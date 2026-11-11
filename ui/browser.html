@@ -1,0 +1,44 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <title>Cypher 브라우저</title>
+  <style>
+    * { box-sizing: border-box; }
+    html, body { height: 100%; margin: 0; overflow: hidden; }
+    body {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      padding: 0 8px;
+      background: #1e2128;
+      border-bottom: 1px solid #2c303a;
+      color: #d7dae0;
+      font: 13px "Malgun Gothic", "Segoe UI", sans-serif;
+      user-select: none;
+    }
+    button, input {
+      height: 28px;
+      background: #2a2e38;
+      color: #d7dae0;
+      border: 1px solid #2c303a;
+      border-radius: 5px;
+      font: inherit;
+    }
+    button { padding: 0 10px; cursor: pointer; }
+    button:hover { border-color: #d97757; }
+    input { flex: 1; min-width: 0; padding: 0 10px; outline: none; }
+    input:focus { border-color: #d97757; }
+    #handoff, #handoff-new { background: #d97757; color: #16181d; border-color: #d97757; font-weight: bold; }
+  </style>
+</head>
+<body>
+  <button id="back" title="뒤로">←</button>
+  <button id="forward" title="앞으로">→</button>
+  <button id="reload" title="새로 고침">⟳</button>
+  <input id="address" spellcheck="false" autocomplete="off" placeholder="주소 또는 검색어">
+  <button id="handoff" title="Cypher로 돌아가 지금 Claude 세션에 이 페이지에서 이어서 할 일을 지시합니다">Claude에게 넘기기</button>
+  <button id="handoff-new" title="새 Claude 세션을 열어 이 페이지에서 이어서 할 일을 지시합니다">새 세션으로 넘기기</button>
+  <script src="browser.js"></script>
+</body>
+</html>

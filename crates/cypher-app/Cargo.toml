@@ -1,0 +1,26 @@
+[package]
+name = "cypher"
+version.workspace = true
+edition.workspace = true
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+# custom-protocol: Tauri CLI 없이 `cargo build`만으로 ui/ 폴더를 실행 파일에 넣는다.
+# unstable: 창 하나에 웹뷰 여러 개(브라우저 창의 주소 줄 + 페이지)를 넣는 데 필요하다.
+tauri = { version = "2", features = ["custom-protocol", "unstable"] }
+webview2-com = "0.39"
+windows-core = "0.62"
+tauri-plugin-notification = "2"
+tauri-plugin-window-state = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+arboard = "3"
+png = "0.17"
+open = "5"
+rfd = "0.15"
+ureq = "2"
+sysinfo = { version = "0.33", default-features = false, features = ["system"] }
+cypher-core = { path = "../cypher-core" }
+cypher-pty = { path = "../cypher-pty" }

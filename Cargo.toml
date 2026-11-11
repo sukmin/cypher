@@ -1,0 +1,22 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/cypher-core",
+    "crates/cypher-pty",
+    "crates/cypher-bridge",
+    "crates/cypher-app",
+]
+
+# 개발 빌드에서도 이미지 저장(PNG 압축)이 느리지 않게 관련 크레이트만 최적화한다.
+[profile.dev.package.png]
+opt-level = 3
+[profile.dev.package.fdeflate]
+opt-level = 3
+[profile.dev.package.miniz_oxide]
+opt-level = 3
+[profile.dev.package.crc32fast]
+opt-level = 3
+
+[workspace.package]
+version = "0.3.1"
+edition = "2021"

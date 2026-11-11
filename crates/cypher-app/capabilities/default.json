@@ -1,0 +1,6 @@
+{
+  "identifier": "default",
+  "description": "본창 권한 (build.rs가 만든 파일)",
+  "windows": ["main"],
+  "permissions": ["core:default", "allow-app-config", "allow-open-config", "allow-home-dir", "allow-autostart", "allow-notify", "allow-pick-folder", "allow-session-create", "allow-session-write", "allow-session-resize", "allow-session-pause", "allow-session-close", "allow-link-detect", "allow-link-open", "allow-git-changes", "allow-git-diff", "allow-save-text", "allow-memory-info", "allow-memory-export", "allow-memory-import", "allow-memory-open", "allow-clipboard-read", "allow-paste-preview", "allow-clipboard-write", "allow-browser-open", "allow-http-files", "allow-http-read", "allow-http-save", "allow-http-run-at"]
+}
