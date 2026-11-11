@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod browser;
+mod claude;
 mod clipboard;
 mod commands;
 mod extras;
@@ -28,8 +29,8 @@ pub struct AppState {
     /// 상태줄 전달 프로그램이 접속하는 로컬 포트와 확인용 값.
     pub status_port: u16,
     pub token: String,
-    /// Claude 세션에 `--settings`로 넘길 파일. 전달 프로그램이 없으면 None.
-    pub claude_settings: Option<PathBuf>,
+    /// Claude 세션의 상태줄·훅에 넣을 전달 프로그램 호출문. 전달 프로그램이 없으면 None.
+    pub bridge: Option<String>,
     /// Claude 세션에 `--mcp-config`로 넘길 파일(브라우저 조작 도구). 꺼져 있으면 None.
     pub mcp_config: Option<PathBuf>,
     pub config: Config,
@@ -115,29 +116,10 @@ fn bridge_command(bridge: &Path) -> String {
     command
 }
 
-/// 상태줄과 훅을 전달 프로그램으로 지정하는 Claude Code 설정 파일을 만든다.
-/// 사용자의 settings.json은 건드리지 않고 세션을 띄울 때 `--settings`로만 넘긴다.
-fn write_claude_settings() -> Option<PathBuf> {
+/// 상태줄·훅 명령으로 쓸 전달 프로그램 호출문. 전달 프로그램이 실행 파일 옆에 없으면 None.
+fn bridge_for_claude() -> Option<String> {
     let bridge = std::env::current_exe().ok()?.with_file_name("cypher-bridge.exe");
-    if !bridge.exists() {
-        return None;
-    }
-    let command = bridge_command(&bridge);
-    // 훅: 요청 시작(UserPromptSubmit), 응답 완료(Stop), 입력·승인 대기(Notification),
-    // 서브에이전트 시작·종료(SubagentStart·SubagentStop).
-    let hook = serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]);
-    let json = serde_json::json!({
-        "statusLine": { "type": "command", "command": command, "refreshInterval": 5 },
-        "hooks": {
-            "UserPromptSubmit": hook, "Stop": hook, "Notification": hook,
-            "SubagentStart": hook, "SubagentStop": hook
-        }
-    });
-    let dir = data_dir()?;
-    std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!("claude-settings-{}.json", std::process::id()));
-    std::fs::write(&path, json.to_string()).ok()?;
-    Some(path)
+    bridge.exists().then(|| bridge_command(&bridge))
 }
 
 /// Claude 세션에 브라우저 조작 도구를 연결하는 MCP 설정 파일을 만든다(`--mcp-config`로 넘긴다).
@@ -220,7 +202,7 @@ fn main() {
                 next_id: AtomicU32::new(1),
                 status_port,
                 token,
-                claude_settings: write_claude_settings(),
+                bridge: bridge_for_claude(),
                 mcp_config,
                 config,
                 config_error,

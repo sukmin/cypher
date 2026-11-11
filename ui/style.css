@@ -220,6 +220,9 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
 #terms.broadcast .pane:not(.hidden) .pane-head { border-bottom-color: var(--busy); }
 .pane-head .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pane-head .model { color: var(--accent); }
+/* 창 제목 줄의 단추: 이 창만 / 숨기기 */
+.pane-button { flex: none; height: 18px; padding: 0 7px; font-size: 11px; line-height: 16px; color: var(--dim); background: #2a2e38; border: 1px solid var(--line); border-radius: 4px; }
+.pane-button:hover { color: var(--text); border-color: var(--accent); }
 
 .term { flex: 1; min-height: 0; padding: 6px 0 0 8px; overflow: hidden; }
 

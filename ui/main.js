@@ -100,10 +100,13 @@ async function init() {
   listen('browser-handoff', ({ payload }) => handoffFromBrowser(payload));
   listen('menu', ({ payload }) => runMenu(payload));
 
-  $('pick').onclick = async () => {
-    const picked = await invoke('pick_folder', { start: folder });
-    if (picked) { folder = picked; localStorage.setItem('cypher.folder', folder); showFolder(); }
-  };
+  $('pick').onclick = pickFolder;
+  // 사이드바의 빈 곳(세션·버튼이 아닌 곳)을 오른쪽 클릭하면 할 수 있는 일을 메뉴로 보여 준다.
+  $('sidebar').addEventListener('contextmenu', (ev) => {
+    if (ev.target.closest('li, button')) return;
+    ev.preventDefault();
+    sidebarMenu(ev);
+  });
   $('search-prev').onclick = () => find(true);
   $('search-next').onclick = () => find(false);
   $('search-close').onclick = closeSearch;
@@ -872,17 +875,63 @@ function render() {
   $waiting.classList.toggle('has', waitingCount > 0);
   $waiting.classList.toggle('on', filterWaiting);
 
-  // 나란히 볼 때 창마다 붙는 제목 줄
+  // 화면을 나눠 볼 때 창마다 붙는 제목 줄: 이 창만 남기기, 이 창 숨기기
   for (const s of visible) {
-    const hide = make('button', 'close', '×');
-    hide.title = '나란히 보기에서 빼기 (세션은 유지)';
+    const only = make('button', 'pane-button', '이 창만');
+    only.title = '분할을 풀고 이 창만 보기 (다른 세션은 계속 실행됩니다 · 제목 줄을 두 번 눌러도 됩니다)';
+    only.onclick = (ev) => { ev.stopPropagation(); showOnly(s); };
+    const hide = make('button', 'pane-button', '숨기기');
+    hide.title = '이 창을 화면에서 숨기기 (세션은 계속 실행되고 사이드바에 남습니다)';
     hide.onclick = (ev) => { ev.stopPropagation(); toggleShown(s); };
     s.head.replaceChildren(
       make('span', 'title', label(s)),
       make('span', 'model', [s.model, s.effort].filter(Boolean).join(' · ')),
-      hide,
+      only, hide,
     );
+    s.head.ondblclick = () => showOnly(s);
   }
+}
+
+/** 분할을 풀고 이 세션 하나만 화면에 남긴다. 다른 세션은 닫지 않는다. */
+function showOnly(s) {
+  tree = { s };
+  layout();
+  activate(s);
+}
+
+/** 사이드바의 빈 곳을 오른쪽 클릭했을 때의 메뉴: 새로 열기, 그룹, 보기 방식. */
+function sidebarMenu(ev) {
+  const items = config.profiles.map((p) => ({ label: `새 ${p.label} 세션`, action: () => newSession(p.id) }));
+  if (config.profiles.some((p) => p.id === 'claude')) {
+    items.push({ label: '새 워크트리 세션…', action: () => newWorktree('replace') });
+  }
+  items.push({ label: '새 그룹 만들기…', action: newGroup });
+  items.push({ label: '새 세션 폴더 바꾸기…', action: pickFolder });
+  if (visible.length > 1) {
+    items.push({ label: '분할 풀기 (지금 창만 보기)', action: () => active && showOnly(active) });
+  }
+  items.push({
+    label: filterWaiting ? '모든 세션 보기' : '대기 중인 세션만 보기',
+    action: () => { filterWaiting = !filterWaiting; render(); },
+  });
+  const keys = [...new Set([...sessions.values()].map(groupKey)), ...groupList.map((name) => `g:${name}`)];
+  if (keys.length) {
+    const allFolded = keys.every((key) => collapsed.has(key));
+    items.push({
+      label: allFolded ? '묶음 모두 펼치기' : '묶음 모두 접기',
+      action: () => {
+        collapsed = allFolded ? new Set() : new Set(keys);
+        localStorage.setItem('cypher.collapsed', JSON.stringify([...collapsed]));
+        render();
+      },
+    });
+  }
+  showMenu(ev, items);
+}
+
+async function pickFolder() {
+  const picked = await invoke('pick_folder', { start: folder });
+  if (picked) { folder = picked; localStorage.setItem('cypher.folder', folder); showFolder(); }
 }
 
 /** 창 아래에 5시간·주간 사용 한도를 항상 보여 준다. */
@@ -936,7 +985,10 @@ function sessionMenu(s, ev) {
     { label: '이름 바꾸기', action: () => rename(s) },
     { colors: COLORS, action: (color) => { s.color = color; render(); saveState(); } },
     { label: s.group ? `그룹 바꾸기… (지금: ${s.group})` : '그룹 지정…', action: () => askGroup([s], s.group) },
-    { label: visible.includes(s) ? '나란히 보기에서 빼기' : '나란히 보기에 넣기', action: () => toggleShown(s) },
+    ...(visible.length > 1 || !visible.includes(s) ? [{ label: '이 세션만 보기 (나머지는 화면에서 숨기기)', action: () => showOnly(s) }] : []),
+    visible.includes(s)
+      ? { label: '화면에서 숨기기', action: () => toggleShown(s) }
+      : { label: '화면에 나눠 보기', action: () => toggleShown(s) },
     { label: '변경 내용 보기', action: () => { activate(s); toggleDiff(true); } },
     { label: '출력 저장…', action: () => exportText(s) },
     { label: '기억 내보내기·가져오기', action: () => showMemory(s) },
@@ -1346,7 +1398,7 @@ document.addEventListener('contextmenu', (ev) => ev.preventDefault());
 
 // 자동 검증과 문제 확인용 창구.
 window.cypher = {
-  sessions, newSession, activate, closeSession, toggleShown, send, setBroadcast, provideLinks, paste, moveToGroup, runMenu,
+  sessions, newSession, activate, closeSession, toggleShown, send, setBroadcast, provideLinks, paste, moveToGroup, runMenu, showOnly,
   onHook, onStatus, nextWaiting, writeState, text: sessionText,
   get visible() { return visible; },
   get active() { return active; },

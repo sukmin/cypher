@@ -176,12 +176,19 @@ pub fn session_create(
             args.push("--mcp-config".into());
             args.push(mcp.to_string_lossy().into_owned());
         }
-        if let Some(settings) = &state.claude_settings {
-            args.push("--settings".into());
-            args.push(settings.to_string_lossy().into_owned());
-            env.push(("CYPHER_PORT".into(), state.status_port.to_string()));
-            env.push(("CYPHER_TOKEN".into(), state.token.clone()));
-            env.push(("CYPHER_SESSION".into(), id.to_string()));
+        if let Some(bridge) = &state.bridge {
+            // 이 폴더에서 원래 쓰였을 상태줄(HUD)이 있으면 전달 프로그램이 이어서 실행하게 알려 준다.
+            let original = crate::claude::original_status_line(&cwd);
+            if let Some(settings) = crate::claude::write_settings(bridge, id, original.as_ref()) {
+                args.push("--settings".into());
+                args.push(settings.to_string_lossy().into_owned());
+                env.push(("CYPHER_PORT".into(), state.status_port.to_string()));
+                env.push(("CYPHER_TOKEN".into(), state.token.clone()));
+                env.push(("CYPHER_SESSION".into(), id.to_string()));
+                if let Some(original) = original {
+                    env.push(("CYPHER_STATUSLINE".into(), original.command));
+                }
+            }
         }
     } else if wants_powershell_hook(&profile.program, &args) {
         args.extend(["-NoExit".into(), "-Command".into(), POWERSHELL_CWD_HOOK.into()]);
