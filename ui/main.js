@@ -140,9 +140,18 @@ function runMenu(id) {
       invoke('open_config').catch((err) => setStatus(String(err)));
       setStatus('설정은 저장한 뒤 Cypher를 다시 시작하면 적용됩니다.');
     },
+    // Claude Code의 사용자 공통 파일(모든 폴더에 적용되는 설정과 지침)
+    'claude-settings': () => openClaudeFile('settings'),
+    'claude-memory': () => openClaudeFile('memory'),
     help: showHelp,
   };
   actions[id]?.();
+}
+
+function openClaudeFile(which) {
+  invoke('open_claude_file', { which })
+    .then((path) => setStatus(`열었습니다: ${path} (고친 내용은 새로 여는 Claude 세션부터 적용됩니다)`))
+    .catch((err) => setStatus(String(err)));
 }
 
 function showFolder() {
@@ -226,6 +235,7 @@ async function newSession(profileId, opts = {}) {
     group: opts.group ?? ((!opts.restoring && active?.group) || ''),
     title: '', model: '', effort: '', context: null, cost: 0,
     usage: '', usageEl: null,
+    agents: new Set(), // 지금 돌고 있는 서브에이전트의 번호
     waiting: '', // '' | 'approval'(승인·입력 대기) | 'done'(응답 완료, 다음 지시 대기)
     claudeSession: opts.resume || '', resumable: !!opts.resume,
     lastOutput: 0, busy: false, attention: false, exited: false,
@@ -530,6 +540,7 @@ function onExit({ id, code }) {
   const s = byId(id);
   if (!s) return;
   s.exited = true;
+  s.agents.clear();
   s.term.write(`\r\n\x1b[90m[세션 종료${code == null ? '' : `: 코드 ${code}`}]\x1b[0m\r\n`);
   render();
   saveState();
@@ -553,11 +564,19 @@ function onStatus({ id, model, effort, context, cwd, project, session, worktree,
   render();
 }
 
-/** Claude Code 훅: 요청 시작, 응답 완료(Stop), 입력·승인 대기(Notification). */
-function onHook({ id, event, kind, message }) {
+/** Claude Code 훅: 요청 시작, 응답 완료(Stop), 입력·승인 대기(Notification), 서브에이전트 시작·종료. */
+function onHook({ id, event, kind, message, agent }) {
   const s = byId(id);
   if (!s) return;
   if (!s.resumable) { s.resumable = true; saveState(); } // 대화가 생겼으니 다음에 이어갈 수 있다.
+  // 서브에이전트: 돌고 있는 것의 번호를 모아 두고 개수를 사이드바에 보여 준다.
+  if (event === 'SubagentStart' || event === 'SubagentStop') {
+    if (agent) {
+      if (event === 'SubagentStart') s.agents.add(agent); else s.agents.delete(agent);
+    }
+    return render();
+  }
+  if (event !== 'UserPromptSubmit' && event !== 'Stop' && event !== 'Notification') return;
   if (event === 'UserPromptSubmit') { s.waiting = ''; return render(); }
   if (event === 'Notification' && kind === 'idle_prompt') return; // 완료 때 이미 알렸다.
   s.waiting = event === 'Stop' ? 'done' : 'approval';
@@ -634,6 +653,7 @@ function sessionItem(s) {
   const context = s.context == null ? null : Math.round(s.context);
   const badge = make('span', 'badge', [
     s.model, s.effort, context == null ? '' : `컨텍스트 ${context}%`, s.cost ? `$${s.cost.toFixed(2)}` : '',
+    s.agents.size ? `서브에이전트 ${s.agents.size}` : '',
   ].filter(Boolean).join(' · '));
   if (context >= CONTEXT_DANGER) badge.classList.add('danger');
   else if (context >= CONTEXT_WARN) badge.classList.add('warn');
@@ -842,7 +862,8 @@ function render() {
 
   // 창 아래 상태줄에도 지금 세션의 모델·effort를 항상 보여 준다.
   $('status-model').textContent = active?.model
-    ? [active.model, active.effort, active.context == null ? '' : `컨텍스트 ${Math.round(active.context)}%`].filter(Boolean).join(' · ')
+    ? [active.model, active.effort, active.context == null ? '' : `컨텍스트 ${Math.round(active.context)}%`,
+      active.agents.size ? `서브에이전트 ${active.agents.size}` : ''].filter(Boolean).join(' · ')
     : '';
 
   const waitingCount = [...sessions.values()].filter((s) => s.waiting).length;

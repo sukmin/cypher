@@ -166,20 +166,37 @@ impl Config {
         Ok(config)
     }
 
-    /// 설정 파일을 읽는다. 없으면 기본 파일을 만들고, 잘못됐으면 기본값과 오류 설명을 돌려준다.
+    /// 설정 파일을 읽는다.
+    ///
+    /// 사용자의 설정 파일은 버전이 바뀌어도 그대로 쓴다. 이 함수는 파일이 **없을 때만** 기본 파일을
+    /// 만들고, 이미 있는 파일은 읽지 못하거나 내용이 잘못됐더라도 절대 고치거나 덮어쓰지 않는다
+    /// (그때는 기본값으로 동작하고 오류 설명을 돌려준다). 모르는 항목은 무시하고 빠진 항목은
+    /// 기본값을 쓰므로, 예전 버전이나 새 버전에서 만든 파일도 그대로 읽힌다.
+    ///
+    /// 새 버전에서 늘어난 항목을 참고할 수 있도록, 같은 폴더의 `config.example.toml`은
+    /// 실행할 때마다 이 버전의 예시로 맞춰 둔다.
     pub fn load(path: &Path) -> (Config, Option<String>) {
-        match std::fs::read_to_string(path) {
-            Ok(text) => match Config::parse(&text) {
-                Ok(config) => (config, None),
-                Err(err) => (Config::default(), Some(err)),
-            },
-            Err(_) => {
-                if let Some(dir) = path.parent() {
-                    let _ = std::fs::create_dir_all(dir);
-                }
-                let _ = std::fs::write(path, DEFAULT_TEXT);
-                (Config::default(), None)
+        if let Some(dir) = path.parent() {
+            let _ = std::fs::create_dir_all(dir);
+            let example = dir.join("config.example.toml");
+            if std::fs::read_to_string(&example).ok().as_deref() != Some(DEFAULT_TEXT) {
+                let _ = std::fs::write(example, DEFAULT_TEXT);
             }
+        }
+        if !path.exists() {
+            let _ = std::fs::write(path, DEFAULT_TEXT);
+            return (Config::default(), None);
+        }
+        match std::fs::read(path) {
+            Ok(bytes) => {
+                // 메모장이 붙인 BOM이나 다른 인코딩의 주석이 있어도 읽을 수 있는 만큼 읽는다.
+                let text = String::from_utf8_lossy(&bytes);
+                match Config::parse(text.strip_prefix('\u{feff}').unwrap_or(&text)) {
+                    Ok(config) => (config, None),
+                    Err(err) => (Config::default(), Some(err)),
+                }
+            }
+            Err(err) => (Config::default(), Some(format!("설정 파일을 읽지 못했습니다: {err}"))),
         }
     }
 
@@ -225,6 +242,37 @@ mod tests {
         assert_eq!(config.profile("powershell").unwrap().program, "pwsh.exe");
         assert_eq!(config.profile("gitbash").unwrap().args, vec!["-i"]);
         assert!(config.profile("claude").unwrap().claude);
+    }
+
+    #[test]
+    fn 있는_설정_파일은_버전이_바뀌어도_그대로_둔다() {
+        let dir = std::env::temp_dir().join("cypher-config-keep");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("config.toml");
+
+        // 없을 때만 기본 파일을 만든다. 예시 파일도 함께 생긴다.
+        let (config, error) = Config::load(&path);
+        assert!(error.is_none() && config == Config::default());
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), DEFAULT_TEXT);
+        assert_eq!(std::fs::read_to_string(dir.join("config.example.toml")).unwrap(), DEFAULT_TEXT);
+
+        // 다른 버전이 쓴 파일: 모르는 항목·구역이 있고, 메모장이 BOM을 붙였고, 빠진 항목도 있다.
+        let mine = "\u{feff}# 내 설정\n[font]\nsize = 16\nligatures = true\n\n[removed_in_future]\nx = 1\n\n[link]\nrequire_ctrl = true\n";
+        std::fs::write(&path, mine).unwrap();
+        let (config, error) = Config::load(&path);
+        assert!(error.is_none(), "{error:?}");
+        assert_eq!((config.font.size, config.link.require_ctrl), (16, true));
+        assert!(config.window.magnet); // 파일에 없는 새 항목은 기본값
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), mine); // 한 글자도 바뀌지 않는다
+
+        // 내용이 잘못됐거나 글자로 읽을 수 없는 파일도 덮어쓰지 않는다.
+        for broken in [&b"[font]\nsize = \"big\"\n"[..], &[0xff, 0xfe, 0x00, 0x41][..]] {
+            std::fs::write(&path, broken).unwrap();
+            let (config, error) = Config::load(&path);
+            assert!(error.is_some() && config == Config::default());
+            assert_eq!(std::fs::read(&path).unwrap(), broken);
+        }
     }
 
     #[test]

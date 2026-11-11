@@ -5,6 +5,7 @@
 //! 조작은 포트를 열지 않고 WebView2의 개발자 도구 프로토콜(CDP)을 앱 안에서 직접 부른다.
 
 use serde_json::{json, Value};
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -15,7 +16,12 @@ use tauri::{AppHandle, Emitter, Manager, PhysicalPosition, PhysicalSize, Url, We
 const WINDOW: &str = "browser";
 const BAR: &str = "browser-bar";
 const PAGE: &str = "browser-page";
-const BAR_HEIGHT: f64 = 44.0;
+/// 주소 줄 웹뷰의 높이(화면 배율 100% 기준). 즐겨찾기 줄이 있으면 화면 쪽에서 키운다.
+static BAR_HEIGHT: AtomicU32 = AtomicU32::new(44);
+
+fn bar_height() -> f64 {
+    f64::from(BAR_HEIGHT.load(Ordering::Relaxed))
+}
 const MAX_TEXT: usize = 15_000;
 
 type ToolResult = Result<Vec<Value>, String>;
@@ -60,7 +66,7 @@ fn layout(app: &AppHandle) {
         return;
     };
     let (Ok(size), Ok(scale)) = (window.inner_size(), window.scale_factor()) else { return };
-    let bar_height = (BAR_HEIGHT * scale).round() as u32;
+    let bar_height = (bar_height() * scale).round() as u32;
     let _ = bar.set_position(PhysicalPosition::new(0, 0));
     let _ = bar.set_size(PhysicalSize::new(size.width, bar_height));
     let _ = page.set_position(PhysicalPosition::new(0, bar_height as i32));
@@ -109,7 +115,7 @@ pub fn open(app: &AppHandle, url: Option<&str>) -> Result<(), String> {
 /// 브라우저 창에 주소 줄과 페이지 웹뷰를 넣는다.
 fn add_webviews(app: &AppHandle, window: &tauri::Window, start: Url) -> Result<(), String> {
     let size = window.inner_size().map_err(err)?;
-    let bar_height = (BAR_HEIGHT * window.scale_factor().map_err(err)?).round() as u32;
+    let bar_height = (bar_height() * window.scale_factor().map_err(err)?).round() as u32;
 
     window
         .add_child(
@@ -178,6 +184,19 @@ pub fn browser_forward(app: AppHandle) -> Result<(), String> {
 #[tauri::command]
 pub fn browser_reload(app: AppHandle) -> Result<(), String> {
     page(&app)?.eval("location.reload()").map_err(err)
+}
+
+/// 주소 줄 높이를 바꾼다(즐겨찾기 줄을 보이거나 숨길 때).
+#[tauri::command]
+pub fn browser_bar_height(app: AppHandle, height: u32) {
+    BAR_HEIGHT.store(height.clamp(44, 120), Ordering::Relaxed);
+    layout(&app);
+}
+
+/// 지금 페이지의 주소와 제목(즐겨찾기에 넣을 때 쓴다).
+#[tauri::command]
+pub async fn browser_page(app: AppHandle) -> Result<Value, String> {
+    eval(&app, "({ url: location.href, title: document.title })")
 }
 
 /// 지금 열려 있는 페이지 주소(주소 줄 표시용).

@@ -8,15 +8,14 @@
     html, body { height: 100%; margin: 0; overflow: hidden; }
     body {
       display: flex;
-      align-items: center;
-      gap: 6px;
-      padding: 0 8px;
+      flex-direction: column;
       background: #1e2128;
       border-bottom: 1px solid #2c303a;
       color: #d7dae0;
       font: 13px "Malgun Gothic", "Segoe UI", sans-serif;
       user-select: none;
     }
+    #nav { flex: none; height: 43px; display: flex; align-items: center; gap: 6px; padding: 0 8px; }
     button, input {
       height: 28px;
       background: #2a2e38;
@@ -30,15 +29,43 @@
     input { flex: 1; min-width: 0; padding: 0 10px; outline: none; }
     input:focus { border-color: #d97757; }
     #handoff, #handoff-new { background: #d97757; color: #16181d; border-color: #d97757; font-weight: bold; }
+    #star { font-size: 15px; padding: 0 8px; }
+    #star.on { color: #e5c07b; }
+
+    /* 즐겨찾기 줄: 즐겨찾기가 있을 때만 보인다. */
+    #bookmarks { flex: none; height: 30px; display: flex; align-items: center; gap: 4px; padding: 0 8px 4px; overflow: hidden; }
+    #bookmarks[hidden] { display: none; }
+    .bookmark {
+      flex: none;
+      display: flex;
+      align-items: center;
+      max-width: 190px;
+      height: 24px;
+      padding: 0 4px 0 9px;
+      background: none;
+      border: 1px solid transparent;
+      border-radius: 12px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+    .bookmark:hover { background: #2a2e38; border-color: #2c303a; }
+    .bookmark .name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .bookmark .remove { visibility: hidden; margin-left: 4px; padding: 0 3px; color: #8b919e; }
+    .bookmark:hover .remove { visibility: visible; }
+    .bookmark .remove:hover { color: #e06c75; }
   </style>
 </head>
 <body>
-  <button id="back" title="뒤로">←</button>
-  <button id="forward" title="앞으로">→</button>
-  <button id="reload" title="새로 고침">⟳</button>
-  <input id="address" spellcheck="false" autocomplete="off" placeholder="주소 또는 검색어">
-  <button id="handoff" title="Cypher로 돌아가 지금 Claude 세션에 이 페이지에서 이어서 할 일을 지시합니다">Claude에게 넘기기</button>
-  <button id="handoff-new" title="새 Claude 세션을 열어 이 페이지에서 이어서 할 일을 지시합니다">새 세션으로 넘기기</button>
+  <div id="nav">
+    <button id="back" title="뒤로">←</button>
+    <button id="forward" title="앞으로">→</button>
+    <button id="reload" title="새로 고침">⟳</button>
+    <input id="address" spellcheck="false" autocomplete="off" placeholder="주소 또는 검색어">
+    <button id="star" title="이 페이지를 즐겨찾기에 추가/삭제">☆</button>
+    <button id="handoff" title="Cypher로 돌아가 지금 Claude 세션에 이 페이지에서 이어서 할 일을 지시합니다">Claude에게 넘기기</button>
+    <button id="handoff-new" title="새 Claude 세션을 열어 이 페이지에서 이어서 할 일을 지시합니다">새 세션으로 넘기기</button>
+  </div>
+  <div id="bookmarks" hidden></div>
   <script src="browser.js"></script>
 </body>
 </html>

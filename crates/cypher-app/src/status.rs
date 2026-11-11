@@ -35,11 +35,13 @@ struct StatusPayload {
 #[derive(Clone, Serialize)]
 struct HookPayload {
     id: u32,
-    /// "UserPromptSubmit" | "Stop" | "Notification"
+    /// "UserPromptSubmit" | "Stop" | "Notification" | "SubagentStart" | "SubagentStop"
     event: String,
     /// Notification일 때의 종류(예: permission_prompt, idle_prompt).
     kind: Option<String>,
     message: Option<String>,
+    /// 이 신호를 낸 서브에이전트의 번호(본 세션이 낸 신호면 없다).
+    agent: Option<String>,
 }
 
 enum Message {
@@ -103,6 +105,7 @@ fn parse(session: &str, body: &str) -> Option<Message> {
             event,
             kind: text(&v["notification_type"]),
             message: text(&v["message"]),
+            agent: text(&v["agent_id"]),
         }));
     }
     Some(Message::Status(StatusPayload {
@@ -146,6 +149,13 @@ mod tests {
         assert_eq!((h.id, h.event.as_str()), (3, "Notification"));
         assert_eq!(h.kind.as_deref(), Some("permission_prompt"));
         assert_eq!(h.message.as_deref(), Some("승인이 필요합니다"));
+        assert_eq!(h.agent, None); // 본 세션이 낸 신호
+
+        let body = r#"{"hook_event_name":"SubagentStart","agent_id":"agent-abc123","agent_type":"Explore"}"#;
+        let Some(Message::Hook(h)) = parse("3", body) else {
+            panic!("훅으로 읽혀야 한다");
+        };
+        assert_eq!((h.event.as_str(), h.agent.as_deref()), ("SubagentStart", Some("agent-abc123")));
     }
 
     #[test]

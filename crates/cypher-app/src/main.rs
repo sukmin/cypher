@@ -123,11 +123,15 @@ fn write_claude_settings() -> Option<PathBuf> {
         return None;
     }
     let command = bridge_command(&bridge);
-    // 훅: 요청 시작(UserPromptSubmit), 응답 완료(Stop), 입력·승인 대기(Notification).
+    // 훅: 요청 시작(UserPromptSubmit), 응답 완료(Stop), 입력·승인 대기(Notification),
+    // 서브에이전트 시작·종료(SubagentStart·SubagentStop).
     let hook = serde_json::json!([{ "hooks": [{ "type": "command", "command": command }] }]);
     let json = serde_json::json!({
         "statusLine": { "type": "command", "command": command, "refreshInterval": 5 },
-        "hooks": { "UserPromptSubmit": hook, "Stop": hook, "Notification": hook }
+        "hooks": {
+            "UserPromptSubmit": hook, "Stop": hook, "Notification": hook,
+            "SubagentStart": hook, "SubagentStop": hook
+        }
     });
     let dir = data_dir()?;
     std::fs::create_dir_all(&dir).ok()?;
@@ -169,7 +173,12 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         .item(&item("broadcast", "동시 입력 켜기/끄기\tCtrl+Shift+B")?)
         .item(&item("memory", "기억 내보내기·가져오기")?)
         .build()?;
-    let settings = SubmenuBuilder::new(app, "설정").item(&item("settings", "설정 파일 열기")?).build()?;
+    let settings = SubmenuBuilder::new(app, "설정")
+        .item(&item("settings", "Cypher 설정 파일 열기")?)
+        .separator()
+        .item(&item("claude-settings", "Claude 공통 설정 열기 (settings.json)")?)
+        .item(&item("claude-memory", "Claude 공통 지침 열기 (CLAUDE.md)")?)
+        .build()?;
     let help = SubmenuBuilder::new(app, "도움말").item(&item("help", "단축키\tF1")?).build()?;
     MenuBuilder::new(app).items(&[&tools, &settings, &help]).build()
 }
@@ -223,6 +232,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::app_config,
             commands::open_config,
+            commands::open_claude_file,
             commands::home_dir,
             commands::autostart,
             commands::notify,
@@ -255,6 +265,8 @@ fn main() {
             browser::browser_reload,
             browser::browser_current,
             browser::browser_handoff,
+            browser::browser_page,
+            browser::browser_bar_height,
         ])
         .run(tauri::generate_context!())
         .expect("Cypher를 실행하지 못했습니다");

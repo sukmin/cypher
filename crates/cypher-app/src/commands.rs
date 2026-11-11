@@ -53,6 +53,20 @@ pub fn open_config(state: State<'_, AppState>) -> Result<(), String> {
     Command::new("notepad.exe").arg(&state.config_path).spawn().map(drop).map_err(|e| e.to_string())
 }
 
+/// Claude Code의 사용자 공통 파일(`~/.claude` 아래)을 메모장으로 연다.
+/// `which`: "settings"(settings.json) 또는 "memory"(CLAUDE.md). 정해진 두 파일만 연다.
+#[tauri::command]
+pub fn open_claude_file(which: String) -> Result<String, String> {
+    let name = match which.as_str() {
+        "settings" => "settings.json",
+        "memory" => "CLAUDE.md",
+        _ => return Err("열 수 없는 파일입니다".into()),
+    };
+    let path = crate::extras::claude_home().ok_or("Claude 설정 폴더를 찾지 못했습니다")?.join(name);
+    Command::new("notepad.exe").arg(&path).spawn().map_err(|e| e.to_string())?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
 #[tauri::command]
 pub fn home_dir() -> String {
     std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into())
