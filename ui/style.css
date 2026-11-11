@@ -93,6 +93,12 @@ li.exited .dot { background: var(--dead); }
 .name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .close { background: none; border: none; color: var(--dim); padding: 0 4px; visibility: hidden; }
 li:hover .close, .pane-head:hover .close { visibility: visible; }
+
+/* 세션 줄 오른쪽 단추: 화면 표시 토글(항상 보임)과 닫기(마우스를 올리면 보임) */
+.row-buttons { display: flex; align-items: center; gap: 2px; }
+.eye { padding: 0 3px; font-size: 12px; line-height: 16px; background: none; border: none; color: var(--idle); }
+.eye.on { color: var(--attention); }
+.eye:hover { color: var(--accent); border: none; }
 .close:hover { color: var(--dead); }
 
 .sub, .badge {
@@ -339,6 +345,11 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
 }
 #status-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 #status-mode { color: var(--busy); }
+/* 수치가 든 표시는 고정폭 글꼴로, 공백을 그대로 살려 자릿수가 바뀌어도 흔들리지 않게 한다. */
+#status-model, #status-limits, #status-usage, .usage {
+  font-family: "Cascadia Mono", Consolas, "D2Coding", "Malgun Gothic", monospace;
+  white-space: pre;
+}
 #status-limits.warn { color: var(--busy); }
 #status-limits.danger, #status-usage.danger { color: var(--dead); font-weight: bold; }
 

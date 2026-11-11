@@ -409,8 +409,31 @@ function layout() {
   for (const old of [...$terms.children]) if (old !== root && old.id !== 'empty') old.remove();
   if (root && root.parentElement !== $terms) $terms.append(root);
   $terms.classList.toggle('multi', visible.length > 1);
-  $('empty').hidden = sessions.size > 0;
-  requestAnimationFrame(fitVisible);
+  $('empty').hidden = visible.length > 0;
+  $('empty').textContent = sessions.size
+    ? '화면에 띄운 세션이 없습니다. 사이드바에서 세션을 누르거나 화면으로 끌어다 놓으세요.'
+    : '왼쪽에서 세션을 시작하세요.';
+  requestAnimationFrame(() => {
+    fitVisible();
+    visible.forEach(resyncScroll);
+  });
+}
+
+/**
+ * 숨겨졌다 다시 보이는 창의 스크롤 막대를 터미널이 기억하는 위치에 다시 맞춘다.
+ *
+ * 창을 숨기면(display: none) 브라우저가 스크롤 막대 위치를 맨 위(0)로 되돌린다. 터미널(xterm.js)이
+ * 기억하는 위치는 그대로라서 둘이 어긋나고, 그 상태에서 휠을 굴리거나 화면이 갱신되면 막대 기준으로
+ * 맞춰지면서 맨 위로 튄다. xterm.js는 위치가 실제로 바뀔 때만 막대를 다시 맞추므로, 한 줄 움직였다가
+ * 원래 자리로 돌려 맞추게 한다.
+ */
+function resyncScroll(s) {
+  const buffer = s.term.buffer.active;
+  const bar = s.pane.querySelector('.xterm-viewport');
+  if (!bar || buffer.viewportY === 0 || bar.scrollTop > 0) return; // 어긋나지 않았다
+  const y = buffer.viewportY;
+  s.term.scrollLines(-1);
+  if (y >= buffer.baseY) s.term.scrollToBottom(); else s.term.scrollToLine(y);
 }
 
 function fitVisible() {
@@ -493,10 +516,11 @@ function toggleShown(s) {
     placeBeside(s);
     layout();
     activate(s);
-  } else if (visible.length > 1) {
+  } else {
+    // 화면에서만 숨긴다. 마지막 창도 숨길 수 있고, 그때는 화면이 비고 세션은 사이드바에 남는다.
     tree = without(tree, s);
     layout();
-    if (active === s) activate(visible[0]); else { render(); saveState(); }
+    if (active === s && visible[0]) activate(visible[0]); else { render(); saveState(); }
   }
 }
 
@@ -653,6 +677,13 @@ function sessionItem(s) {
   const close = make('button', 'close', '×');
   close.title = '세션 닫기';
   close.onclick = (ev) => { ev.stopPropagation(); closeSession(s); };
+  // 화면 표시 토글: 오른쪽 화면에 보이기/숨기기(세션은 계속 실행된다). 항상 보이는 작은 단추.
+  const shown = visible.includes(s);
+  const eye = make('button', `eye${shown ? ' on' : ''}`, shown ? '◉' : '○');
+  eye.title = shown ? '화면에서 숨기기 (세션은 계속 실행됩니다)' : '화면에 보이기';
+  eye.onclick = (ev) => { ev.stopPropagation(); toggleShown(s); };
+  const buttons = make('span', 'row-buttons');
+  buttons.append(eye, close);
   const context = s.context == null ? null : Math.round(s.context);
   const badge = make('span', 'badge', [
     s.model, s.effort, context == null ? '' : `컨텍스트 ${context}%`, s.cost ? `$${s.cost.toFixed(2)}` : '',
@@ -664,23 +695,27 @@ function sessionItem(s) {
   const sub = make('span', 'sub', s.exited ? '종료됨' : WAITING_TEXT[s.waiting] || s.title);
   // 사용량은 3초마다 바뀌므로 목록을 다시 그리지 않고 이 칸만 고친다.
   s.usageEl = make('span', 'usage', s.exited ? '' : s.usage);
-  li.append(make('span', 'dot'), name, close, badge, sub, s.usageEl);
+  li.append(make('span', 'dot'), name, buttons, badge, sub, s.usageEl);
   return li;
 }
 
 const gigabytes = (bytes) => (bytes / 2 ** 30).toFixed(1);
 
+// 수치 표시는 자릿수를 미리 잡아 둔다(고정폭 글꼴 + 앞쪽 공백). 값이 바뀌어도 글자 위치가 흔들리지 않는다.
+const pad = (value, width) => String(value).padStart(width, ' ');
+const percent = (value) => `${pad(Math.min(999, Math.round(value)), 3)}%`;
+
 /** 시스템 전체 사용량은 창 아래에, 세션별 사용량은 사이드바에 보여 준다. */
 function onUsage({ cpu, memory_used: used, memory_total: total, sessions: perSession }) {
   const memoryPct = total ? Math.round((used / total) * 100) : 0;
   const $usage = $('status-usage');
-  $usage.textContent = `CPU ${Math.round(cpu)}% · 메모리 ${gigabytes(used)}/${gigabytes(total)}GB (${memoryPct}%)`;
+  $usage.textContent = `CPU ${percent(cpu)} · 메모리 ${pad(gigabytes(used), 5)}/${gigabytes(total)}GB (${percent(memoryPct)})`;
   $usage.className = Math.max(cpu, memoryPct) >= 90 ? 'danger' : '';
   for (const item of perSession) {
     const s = byId(item.id);
     if (!s) continue;
-    const memory = item.memory >= 2 ** 30 ? `${gigabytes(item.memory)}GB` : `${Math.round(item.memory / 2 ** 20)}MB`;
-    s.usage = `CPU ${item.cpu < 10 ? item.cpu.toFixed(1) : Math.round(item.cpu)}% · ${memory}`;
+    const memory = item.memory >= 2 ** 30 ? `${pad(gigabytes(item.memory), 4)}GB` : `${pad(Math.round(item.memory / 2 ** 20), 4)}MB`;
+    s.usage = `CPU ${pad(Math.min(999.9, item.cpu).toFixed(1), 5)}% · ${memory}`;
     if (s.usageEl && !s.exited) s.usageEl.textContent = s.usage;
   }
 }
@@ -865,7 +900,7 @@ function render() {
 
   // 창 아래 상태줄에도 지금 세션의 모델·effort를 항상 보여 준다.
   $('status-model').textContent = active?.model
-    ? [active.model, active.effort, active.context == null ? '' : `컨텍스트 ${Math.round(active.context)}%`,
+    ? [active.model, active.effort, active.context == null ? '' : `컨텍스트 ${percent(active.context)}`,
       active.agents.size ? `서브에이전트 ${active.agents.size}` : ''].filter(Boolean).join(' · ')
     : '';
 
@@ -939,14 +974,14 @@ function renderLimits() {
   const $limits = $('status-limits');
   const when = (epoch) => {
     if (!epoch) return '';
+    // 날짜와 시각은 늘 같은 자릿수로 적는다(11/13 18:00). 오늘이든 아니든 폭이 같다.
     const d = new Date(epoch * 1000);
-    const time = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
-    const sameDay = d.toDateString() === new Date().toDateString();
-    return ` (${sameDay ? '' : `${d.getMonth() + 1}/${d.getDate()} `}${time} 초기화)`;
+    const two = (n) => String(n).padStart(2, '0');
+    return ` (${two(d.getMonth() + 1)}/${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())} 초기화)`;
   };
   const parts = [['five_hour', '5시간'], ['seven_day', '주간']]
     .filter(([key]) => limits?.[key]?.used_percentage != null)
-    .map(([key, name]) => ({ pct: limits[key].used_percentage, text: `${name} ${Math.round(limits[key].used_percentage)}%${when(limits[key].resets_at)}` }));
+    .map(([key, name]) => ({ pct: limits[key].used_percentage, text: `${name} ${percent(limits[key].used_percentage)}${when(limits[key].resets_at)}` }));
   $limits.textContent = parts.length ? `사용 한도: ${parts.map((p) => p.text).join(' · ')}` : '';
   const worst = Math.max(0, ...parts.map((p) => p.pct));
   $limits.className = worst >= 95 ? 'danger' : worst >= 80 ? 'warn' : '';
