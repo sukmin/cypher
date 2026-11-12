@@ -211,11 +211,15 @@ pub fn run_at(file: &Path, line: usize) -> Result<HttpResponse, String> {
     let text = fs::read_to_string(file).map_err(|e| format!("요청 파일을 읽지 못했습니다: {e}"))?;
     let requests = http::parse(&text);
     let index = http::index_at(&requests, line)
-        .ok_or("보낼 요청이 없습니다. '### 이름' 아래에 'GET https://…' 같은 요청 줄을 적어 주세요.")?;
+        .ok_or("이 줄에는 보낼 수 있는 요청이 없습니다. '### 이름' 아래에 'GET https://…'처럼 http:// 또는 https://로 시작하는 주소(또는 그런 주소가 되는 변수)를 적어 주세요.")?;
     execute(file, &requests[index])
 }
 
 fn execute(file: &Path, request: &HttpRequest) -> Result<HttpResponse, String> {
+    // 서명 같은 내장 값을 계산하지 못했으면 엉뚱한 값으로 보내지 않고 까닭을 알린다.
+    if !request.problems.is_empty() {
+        return Err(format!("요청을 보내지 않았습니다. 값을 채우지 못한 곳이 있습니다:\n{}", request.problems.join("\n")));
+    }
     let sent_headers = wire_headers(request);
     let raw = raw_request(request, &sent_headers);
     let (code, status, headers, body, elapsed_ms) = send(request, &sent_headers)?;
@@ -265,7 +269,12 @@ fn save_target(cwd: &Path, file: Option<&str>, name: Option<&str>) -> Result<Pat
     if !valid {
         return Err("파일 이름에는 글자·숫자·공백·`-`·`_`·`.`만 쓸 수 있습니다".into());
     }
-    Ok(home_dir(cwd).join(format!("{stem}.http")))
+    let target = home_dir(cwd).join(format!("{stem}.http"));
+    // 새 이름을 정해 만드는 경우, 이미 있는 파일을 예시 내용으로 덮어쓰지 않는다.
+    if name.is_some() && target.exists() {
+        return Err(format!("같은 이름의 요청 파일이 이미 있습니다: {stem}.http (위쪽 목록에서 그 파일을 고르세요)"));
+    }
+    Ok(target)
 }
 
 /// 요청 파일(또는 기록 파일)의 내용. 기록이 길면 끝부분만 준다.
@@ -276,8 +285,9 @@ pub async fn http_read(cwd: String, file: String) -> Result<String, String> {
         return Err("이 폴더의 요청 파일이 아닙니다".into());
     }
     let text = fs::read_to_string(file).map_err(|e| e.to_string())?;
+    // 기록 파일만 끝부분을 잘라 준다. 요청 파일은 편집기에 통째로 들어가야 한다(잘린 채 저장되면 안 된다).
     const MAX: usize = 300_000;
-    if text.len() <= MAX {
+    if text.len() <= MAX || file.file_name().is_none_or(|name| name != HISTORY) {
         return Ok(text);
     }
     let mut cut = text.len() - MAX;
@@ -312,7 +322,7 @@ pub fn tools() -> Value {
           "description": "폴더의 .http 요청 파일(IntelliJ HTTP Client 형식)과 그 안의 요청 이름을 나열한다. 사용자가 저장해 둔 요청을 쓰기 전에 부른다. 지난 실행의 요청·응답은 같은 폴더의 history.http에 있다.",
           "inputSchema": { "type": "object", "properties": { "folder": { "type": "string", "description": "작업 폴더의 절대 경로" } }, "required": ["folder"] } },
         { "name": "http_run",
-          "description": "요청 파일의 요청 하나를 실제로 보내고 응답을 돌려준다. 실행 내용은 history.http에 기록된다. 새 요청이 필요하면 요청 파일에 '### 이름' 블록을 추가한 뒤 실행한다.",
+          "description": "요청 파일의 요청 하나를 실제로 보내고 응답을 돌려준다. 실행 내용은 history.http에 기록된다. 새 요청이 필요하면 요청 파일에 '### 이름' 블록을 추가한 뒤 실행한다. 서명이 필요한 API는 {{$timestamp}}, {{$body}}, {{$hmac sha256 hex 키변수 메시지변수}} 같은 내장 값을 쓴다.",
           "inputSchema": { "type": "object", "properties": {
               "file": { "type": "string", "description": ".http 파일의 절대 경로" },
               "name": { "type": "string", "description": "요청 이름('###' 뒤의 글자) 또는 1부터 센 번호" } },
@@ -332,8 +342,16 @@ pub fn call(name: &str, args: &Value) -> Result<Vec<Value>, String> {
                     .files
                     .iter()
                     .map(|f| {
-                        let names: Vec<String> =
-                            f.requests.iter().enumerate().map(|(i, r)| format!("  {}. {} — {} {}", i + 1, r.name, r.method, r.url)).collect();
+                        let names: Vec<String> = f
+                            .requests
+                            .iter()
+                            .enumerate()
+                            .map(|(i, r)| {
+                                // 환경 변수에서 읽은 값은 가리고, 값을 못 채운 요청은 표시해 둔다.
+                                let note = if r.problems.is_empty() { "" } else { " (값을 채우지 못한 곳이 있어 지금은 보낼 수 없음)" };
+                                format!("  {}. {} — {} {}{note}", i + 1, r.masked(&r.name), r.method, r.masked(&r.url))
+                            })
+                            .collect();
                         format!("{}\n{}", f.path, names.join("\n"))
                     })
                     .collect::<Vec<_>>()

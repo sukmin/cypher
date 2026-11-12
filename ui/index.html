@@ -5,6 +5,7 @@
   <title>Cypher</title>
   <link rel="stylesheet" href="vendor/xterm/xterm.css">
   <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="items.css">
 </head>
 <body>
   <aside id="sidebar">
@@ -18,11 +19,22 @@
       <button id="waiting" title="대기 중인 세션만 보기 · Ctrl+Shift+N: 다음 대기 세션으로">대기 0</button>
       <button id="changes" title="세션이 고친 파일과 차이 보기 (Ctrl+Shift+G)">변경 내용</button>
       <button id="browser" title="내장 브라우저 열기. 여기서 로그인하고 작업하던 것을 Claude 세션이 이어서 조작할 수 있습니다 (Ctrl+Shift+O)">브라우저</button>
-      <button id="http-button" title="저장해 둔 HTTP 요청(.http 파일)을 실행하고 응답 보기 (Ctrl+Shift+H)">HTTP</button>
     </div>
   </aside>
+  <div id="sidebar-grip" title="끌어서 사이드바 너비 조절 · 두 번 눌러 기본 너비로"></div>
   <main>
     <div id="terms"><div id="empty">왼쪽에서 세션을 시작하세요.</div></div>
+    <div id="composer" hidden>
+      <div id="composer-grip" title="끌어서 높이 조절 · 두 번 눌러 기본 높이로"></div>
+      <div id="composer-body">
+        <textarea id="composer-text" spellcheck="false" autocomplete="off"></textarea>
+        <div id="composer-side">
+          <button id="composer-send" title="편집기에 쓴 내용을 지금 보고 있는 세션의 입력창에 넣습니다 (Ctrl+Enter)">프롬프트</button>
+          <label id="composer-enter-label" title="켜면 입력창에 넣은 뒤 Enter까지 눌러 바로 보냅니다"><input type="checkbox" id="composer-enter"> 바로 전송</label>
+        </div>
+      </div>
+      <button id="composer-fold" title="프롬프트 편집기 접기/펼치기">프롬프트 편집기 ▾</button>
+    </div>
     <div id="search" hidden>
       <input id="search-input" placeholder="찾기" spellcheck="false">
       <button id="search-prev" title="이전 (Shift+Enter)">↑</button>
@@ -42,21 +54,6 @@
     </div>
     <ul id="diff-files" class="side-list"></ul>
     <div id="diff-view" class="side-view"></div>
-  </aside>
-  <aside id="http" class="side" hidden>
-    <div class="side-head">
-      <span id="http-title" class="side-title">HTTP 요청</span>
-      <select id="http-file" title="요청 파일 고르기 / 새 파일 만들기"></select>
-      <button id="http-save" title="저장 (Ctrl+S)">저장</button>
-      <button id="http-history" title="지난 실행의 요청·응답 기록 보기">기록</button>
-      <button id="http-close" class="close" title="닫기">×</button>
-    </div>
-    <ul id="http-list" class="side-list"></ul>
-    <div id="http-edit">
-      <div id="http-gutter"></div>
-      <textarea id="http-editor" spellcheck="false" autocomplete="off" wrap="off"></textarea>
-    </div>
-    <div id="http-view" class="side-view"></div>
   </aside>
   <div id="parked" hidden></div>
   <div id="drop-hint" hidden></div>

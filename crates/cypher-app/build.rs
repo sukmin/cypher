@@ -13,8 +13,10 @@ const MAIN: &[&str] = &[
     "link_detect", "link_open",
     "git_changes", "git_diff", "save_text",
     "memory_info", "memory_export", "memory_import", "memory_open",
+    "memo_read", "memo_write", "memo_remove", "text_open", "text_save",
+    "site_open", "site_bounds", "site_navigate", "site_action", "site_close",
     "clipboard_read", "paste_preview", "clipboard_write",
-    "browser_open",
+    "browser_open", "browser_where", "browser_engine_info", "browser_latest_version",
     "http_files", "http_read", "http_save", "http_run_at",
 ];
 

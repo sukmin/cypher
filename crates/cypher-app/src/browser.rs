@@ -3,6 +3,9 @@
 //! 창 하나에 웹뷰가 둘 들어간다. 위는 주소 줄(앱 화면), 아래는 웹 페이지.
 //! 웹 페이지 쪽 웹뷰에는 어떤 앱 명령 권한도 주지 않는다(capabilities 참고).
 //! 조작은 포트를 열지 않고 WebView2의 개발자 도구 프로토콜(CDP)을 앱 안에서 직접 부른다.
+//!
+//! 설정에서 엔진을 "chrome"으로 바꾸면 이 창 대신 설치된 Chrome·Edge를 띄워 조작한다(`chrome.rs`).
+//! Claude가 쓰는 도구는 두 엔진에서 똑같이 동작한다.
 
 use serde_json::{json, Value};
 use std::sync::atomic::{AtomicU32, Ordering};
@@ -73,8 +76,29 @@ fn layout(app: &AppHandle) {
     let _ = page.set_size(PhysicalSize::new(size.width, size.height.saturating_sub(bar_height)));
 }
 
+/// 설정에서 고른 엔진이 "chrome"(설치된 브라우저를 띄워 조작)인지. 아니면 내장 웹뷰 창이다.
+fn chrome_engine(app: &AppHandle) -> bool {
+    app.state::<crate::AppState>().config.browser.engine.eq_ignore_ascii_case("chrome")
+}
+
+/// 브라우저가 떠 있는지.
+fn is_open(app: &AppHandle) -> bool {
+    if chrome_engine(app) { crate::chrome::is_open() } else { app.get_webview(PAGE).is_some() }
+}
+
 /// 브라우저 창을 띄운다. 이미 떠 있으면 앞으로 가져오고, 주소가 있으면 그리로 간다.
 pub fn open(app: &AppHandle, url: Option<&str>) -> Result<(), String> {
+    open_engine(app, url)?;
+    // 엔진의 Chromium 버전이 뒤처져 있지 않은지 가끔 뒤에서 확인한다(단추로 열든 Claude가 열든).
+    crate::engine::check_in_background(app);
+    Ok(())
+}
+
+fn open_engine(app: &AppHandle, url: Option<&str>) -> Result<(), String> {
+    if chrome_engine(app) {
+        let settings = &app.state::<crate::AppState>().config.browser;
+        return crate::chrome::open(&settings.chrome_path, &settings.home, url);
+    }
     if let Some(window) = app.get_window(WINDOW) {
         if let Some(page) = app.get_webview(PAGE) {
             let _ = window.unminimize();
@@ -205,6 +229,13 @@ pub fn browser_current(app: AppHandle) -> Option<String> {
     app.get_webview(PAGE)?.url().ok().map(|u| u.to_string())
 }
 
+/// 본창에서 묻는, 지금 브라우저에 열려 있는 페이지 주소(엔진과 무관). 브라우저가 닫혀 있으면 None.
+/// 본창의 "Claude에게 넘기기"가 쓴다.
+#[tauri::command]
+pub async fn browser_where(app: AppHandle) -> Option<String> {
+    if chrome_engine(&app) { crate::chrome::current_url() } else { browser_current(app) }
+}
+
 /// "Claude에게 넘기기": 본창으로 돌아가 Claude 세션 입력창에 이어서 할 일의 머리말을 넣는다.
 /// `fresh`가 참이면 새 Claude 세션을 열어 거기에 넘긴다.
 #[tauri::command]
@@ -226,6 +257,10 @@ pub fn browser_handoff(app: AppHandle, fresh: Option<bool>) -> Result<(), String
 pub fn cdp(app: &AppHandle, method: &str, params: Value) -> Result<Value, String> {
     use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
     use windows_core::HSTRING;
+
+    if chrome_engine(app) {
+        return crate::chrome::cdp(method, params);
+    }
 
     let webview = page(app)?;
     let (tx, rx) = mpsc::channel::<Result<String, String>>();
@@ -266,7 +301,7 @@ fn eval(app: &AppHandle, script: &str) -> Result<Value, String> {
 
 /// 브라우저가 없으면 띄우고, 페이지가 다 읽힐 때까지 기다린다.
 fn ensure_ready(app: &AppHandle) -> Result<(), String> {
-    if app.get_webview(PAGE).is_none() {
+    if !is_open(app) {
         open(app, None)?;
         thread::sleep(Duration::from_millis(800));
     }
@@ -344,11 +379,16 @@ fn tool_read(app: &AppHandle) -> ToolResult {
 
 fn tool_navigate(app: &AppHandle, args: &Value) -> ToolResult {
     let url = args["url"].as_str().ok_or("url이 필요합니다")?;
-    if app.get_webview(PAGE).is_none() {
+    let target = normalize_url(url)?.to_string();
+    if is_open(app) {
+        cdp(app, "Page.navigate", json!({ "url": target }))?;
+    } else if chrome_engine(app) {
+        // 먼저 띄운 뒤에 이동시킨다. 띄우면서 주소를 넘기면 첫 문서가 바뀌기 전의 빈 페이지를 "다 읽힘"으로 볼 수 있다.
+        open(app, None)?;
+        cdp(app, "Page.navigate", json!({ "url": target }))?;
+    } else {
         open(app, Some(url))?;
         thread::sleep(Duration::from_millis(800));
-    } else {
-        cdp(app, "Page.navigate", json!({ "url": normalize_url(url)?.to_string() }))?;
     }
     wait_loaded(app);
     Ok(text(summary(app)))

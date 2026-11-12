@@ -5,3 +5,4 @@ pub mod http;
 pub mod links;
 pub mod magnet;
 pub mod profile;
+pub mod textfile;

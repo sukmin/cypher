@@ -41,7 +41,7 @@ input:focus { border-color: var(--accent); }
 /* ───────── 사이드바 ───────── */
 
 #sidebar {
-  width: 240px;
+  width: var(--sidebar, 240px);
   flex: none;
   display: flex;
   flex-direction: column;
@@ -115,7 +115,7 @@ li:hover .close, .pane-head:hover .close { visibility: visible; }
 
 /* 묶음(그룹·폴더) 머리: 배경이 있는 굵은 줄. 그 아래 세션은 들여쓰고 이음선으로 잇는다. */
 #sessions li.group {
-  grid-template-columns: 12px 1fr auto;
+  grid-template-columns: 12px 1fr auto auto auto;
   margin-top: 10px;
   padding: 6px 8px;
   font-size: 12px;
@@ -162,7 +162,7 @@ li.done .sub { color: var(--attention); }
 .badge.warn { color: var(--busy); }
 .badge.danger { color: var(--dead); font-weight: bold; }
 
-#tools { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line); }
+#tools { display: grid; grid-template-columns: repeat(auto-fit, minmax(52px, 1fr)); gap: 6px; padding: 8px 10px; border-top: 1px solid var(--line); }
 #tools button { padding: 4px 2px; font-size: 12px; }
 #tools button.on { background: var(--accent); color: #16181d; border-color: var(--accent); }
 #waiting.has { border-color: var(--attention); color: var(--attention); }
@@ -407,7 +407,7 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
 .side-view .meta { color: var(--dim); }
 /* 세션 그룹: 이름 붙인 그룹, 끌어다 놓기 */
 #sessions li.group.logical .name { color: var(--accent); }
-#sessions li.group.logical { grid-template-columns: 12px 1fr auto auto; }
+
 #sessions li.group .close { font-size: 14px; line-height: 14px; }
 #sessions li.group .close:hover { color: var(--accent); }
 #sessions li.group.drop { background: #2d323d; outline: 1px dashed var(--accent); }
@@ -426,54 +426,6 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
 }
 #status-model { color: var(--accent); }
 
-/* HTTP 요청 옆 창 */
-#http-file { max-width: 150px; height: 24px; padding: 0 4px; font-size: 12px; background: #2a2e38; color: var(--text); border: 1px solid var(--line); border-radius: 5px; }
-#http-save.on { background: var(--accent); color: #16181d; border-color: var(--accent); }
-#http-list { max-height: 22%; }
-/* 편집기: 왼쪽 여백에 요청마다 녹색 실행 버튼, 오른쪽에 글 */
-#http-edit {
-  flex: 1 1 45%;
-  min-height: 140px;
-  display: flex;
-  background: #12141a;
-  border-bottom: 1px solid var(--line);
-}
-#http-gutter { flex: none; width: 26px; position: relative; overflow: hidden; border-right: 1px solid var(--line); }
-.run {
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  border: none;
-  background: none;
-  color: #4cc45a;
-  font-size: 12px;
-  line-height: 18px;
-  text-align: center;
-  cursor: pointer;
-}
-.run:hover { color: #8dff9a; border: none; }
-#http-gutter .run { position: absolute; left: 4px; }
-#http-list .run { flex: none; }
-#http-editor {
-  flex: 1;
-  min-width: 0;
-  padding: 8px 10px;
-  resize: none;
-  border: none;
-  border-radius: 0;
-  outline: none;
-  background: transparent;
-  color: var(--text);
-  font: 12px/18px "Cascadia Mono", "D2Coding", Consolas, "Malgun Gothic", monospace;
-  white-space: pre;
-  tab-size: 2;
-  user-select: text;
-}
-#http-view { flex: 1 1 35%; }
-#http-list li.file { color: var(--dim); font-size: 11px; cursor: pointer; }
-#http-list .method { flex: none; width: 56px; color: var(--busy); font-size: 11px; font-weight: bold; }
-#http-view .ok { color: #98c379; font-weight: bold; }
-#http-view .fail { color: var(--dead); font-weight: bold; }
 .side-head button:not(.close) { padding: 2px 8px; font-size: 12px; }
 
 .note { margin: 10px; color: var(--dim); white-space: normal; }

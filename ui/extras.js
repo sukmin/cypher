@@ -1,10 +1,8 @@
 // 부가 화면: 떠 있는 창(자주 쓰는 지시·기억·도움말), 오른쪽 클릭 메뉴, 변경 내용 옆 창.
 // main.js가 initExtras()로 필요한 함수들을 넘겨준다.
 
-import { httpOpen, toggleHttp } from './http.js';
-
 const $ = (id) => document.getElementById(id);
-let api = null; // { invoke, make, ask, setStatus, getActive, getFolder, newSession, pasteText, label }
+let api = null; // { invoke, make, ask, setStatus, getActive, getFolder, focusActive, newSession, pasteText, label }
 
 export function initExtras(given) {
   api = given;
@@ -24,7 +22,7 @@ export function openPopup(title, nodes) {
   const dialog = $('popup');
   $('popup-title').textContent = title;
   $('popup-body').replaceChildren(...nodes);
-  dialog.onclose = () => api.getActive()?.term.focus();
+  dialog.onclose = () => api.focusActive();
   if (!dialog.open) dialog.showModal();
   return () => dialog.close();
 }
@@ -127,15 +125,61 @@ const HELP = [
   ['Ctrl+Shift+G', '변경 내용 옆 창'],
   ['Ctrl+Shift+P', '자주 쓰는 지시'],
   ['Ctrl+Shift+O', '내장 브라우저 열기'],
-  ['Ctrl+Shift+H', 'HTTP 요청 옆 창'],
+  ['Ctrl+Shift+H', '새 HTTP 항목'],
+  ['Ctrl+Shift+M', '새 메모 항목'],
+  ['Ctrl+Shift+E', '프롬프트 편집기로 (세션 하나만 보일 때) · Ctrl+Enter: 입력창에 넣기'],
+  ['메모: Ctrl+F / Ctrl+R', '찾기 / 바꾸기 (Alt+C 대소문자, Alt+O 단어, Alt+X 정규식)'],
+  ['메모: Ctrl+S / Ctrl+O', '저장 / 열기 · Ctrl+G: 줄로 이동 · F5: 시간/날짜 · Alt+Z: 줄 바꿈'],
   ['Ctrl+Shift+B', '동시 입력 (나란히 보이는 모든 세션)'],
   ['Ctrl+V', '붙여넣기 (이미지 포함) · Ctrl+Shift+V: 이미지를 파일 경로로'],
   ['Ctrl+C', '선택 영역이 있으면 복사'],
   ['Shift+Enter', '줄바꿈'],
   ['링크 클릭', '웹 주소는 브라우저, 경로는 탐색기 · Ctrl+클릭: 파일 열기'],
   ['목록에서 Ctrl+클릭', '나란히 보기에 넣기/빼기'],
-  ['목록에서 오른쪽 클릭', '이름·색 바꾸기, 출력 저장 등'],
+  ['목록에서 두 번 누르기', '별칭 붙이기 (세션에는 영향 없음)'],
+  ['목록에서 오른쪽 클릭', '별칭·색·그룹, 출력 저장 등 · 빈 곳: 새 항목'],
 ];
+
+/**
+ * 브라우저 엔진 정보: 지금 쓰는 엔진과 Chromium 버전을 보여 주고, 최신 안정판과 비교한다.
+ * Cypher는 Chromium을 직접 싣지 않으므로(브라우저가 스스로 갱신한다) 갱신이 멈춰 있지 않은지만 살핀다.
+ */
+export async function showEngine() {
+  const { invoke, make } = api;
+  const row = (key, value) => {
+    const line = make('div', 'row help');
+    line.append(make('kbd', '', key), make('span', '', value));
+    return line;
+  };
+  const info = await invoke('browser_engine_info');
+  const chrome = info.engine === 'chrome';
+  const major = (version) => Number(String(version).split('.')[0]) || 0;
+  const latest = row('최신 안정판', '확인 중…');
+  const verdict = make('p', 'note', '');
+  openPopup('브라우저 엔진 정보', [
+    row('엔진', chrome ? 'chrome — 설치된 브라우저를 전용 프로필로 띄워 조작' : 'webview — 앱에 내장된 웹뷰 창'),
+    row('브라우저', info.browser),
+    row('Chromium 버전', info.version || '알 수 없음'),
+    ...(info.path ? [row('실행 파일', info.path)] : []),
+    latest, verdict,
+    make('p', 'note', chrome
+      ? '갱신: 이 브라우저가 스스로 갱신합니다. 수동으로 하려면 평소처럼 그 브라우저를 열어 "도움말 → Chrome 정보"(chrome://settings/help, Edge는 edge://settings/help)에서 업데이트한 뒤, Cypher용 브라우저 창을 닫았다 다시 엽니다.'
+      : '갱신: WebView2 런타임은 Edge와 함께 Windows가 자동으로 갱신합니다. 수동으로 하려면 Edge를 열어 edge://settings/help에서 업데이트하거나 Microsoft의 "WebView2 런타임(Evergreen)" 설치 프로그램을 실행한 뒤 Cypher를 다시 시작합니다.'),
+    make('p', 'note', 'Cypher는 Chromium을 직접 싣지 않아, 엔진 버전은 Cypher 버전과 무관하게 올라갑니다. 브라우저를 열 때 일주일에 한 번 자동으로 확인해 두 단계 이상 뒤처지면 알립니다(설정의 [browser] update_check로 끌 수 있음).'),
+  ]);
+  try {
+    const newest = await invoke('browser_latest_version');
+    latest.lastChild.textContent = `${newest} (Chrome 안정판)`;
+    const behind = major(newest) - major(info.version);
+    verdict.textContent = !info.version ? ''
+      : behind <= 0 ? '최신 단계입니다.'
+      : behind === 1 ? '한 단계 뒤입니다. 새 안정판이 순서대로 배포되는 동안에는 정상입니다(보통 며칠 안에 따라옵니다).'
+      : `${behind}단계 뒤처져 있습니다. 자동 갱신이 멈춘 것일 수 있으니 아래 방법으로 갱신하세요.`;
+    verdict.style.color = behind >= 2 ? 'var(--dead)' : '';
+  } catch (err) {
+    latest.lastChild.textContent = String(err);
+  }
+}
 
 export function showHelp() {
   const { make } = api;
@@ -189,11 +233,10 @@ export const diffOpen = () => !$('diff').hidden;
 
 /** 옆 창을 열거나 닫는다. 열면 활성 세션 폴더의 변경 내용을 보여 준다. */
 export function toggleDiff(open = !diffOpen()) {
-  if (open && httpOpen()) toggleHttp(false); // 옆 창은 한 번에 하나만
   $('diff').hidden = !open;
   $('changes').classList.toggle('on', open);
   if (open) showDiff(api.getActive());
-  else api.getActive()?.term.focus();
+  else api.focusActive();
 }
 
 /** 옆 창이 열려 있으면 이 세션의 변경 내용으로 바꾼다. */

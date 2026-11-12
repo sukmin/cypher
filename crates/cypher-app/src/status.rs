@@ -42,6 +42,8 @@ struct HookPayload {
     message: Option<String>,
     /// 이 신호를 낸 서브에이전트의 번호(본 세션이 낸 신호면 없다).
     agent: Option<String>,
+    /// 서브에이전트의 종류(예: Explore, general-purpose).
+    agent_type: Option<String>,
 }
 
 enum Message {
@@ -106,6 +108,7 @@ fn parse(session: &str, body: &str) -> Option<Message> {
             kind: text(&v["notification_type"]),
             message: text(&v["message"]),
             agent: text(&v["agent_id"]),
+            agent_type: text(&v["agent_type"]),
         }));
     }
     Some(Message::Status(StatusPayload {

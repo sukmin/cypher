@@ -95,6 +95,13 @@ pub struct Browser {
     pub enabled: bool,
     /// 브라우저를 처음 띄울 때 여는 주소.
     pub home: String,
+    /// 브라우저 엔진. "webview": 앱에 내장된 웹뷰 창(주소 줄·즐겨찾기 포함, 기본값).
+    /// "chrome": 설치된 Chrome·Edge·Chromium을 Cypher 전용 프로필로 띄워 조작한다(다른 OS에서도 쓸 수 있는 방식).
+    pub engine: String,
+    /// "chrome" 엔진이 쓸 브라우저 실행 파일. 비워 두면 Chrome → Edge → Chromium → Brave 순으로 찾는다.
+    pub chrome_path: String,
+    /// 브라우저를 열 때 일주일에 한 번, 엔진의 Chromium 버전이 최신 안정판에서 뒤처졌는지 확인해 알린다.
+    pub update_check: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -114,7 +121,7 @@ impl Default for Window {
 
 impl Default for Browser {
     fn default() -> Self {
-        Self { enabled: true, home: "https://www.google.com".into() }
+        Self { enabled: true, home: "https://www.google.com".into(), engine: "webview".into(), chrome_path: String::new(), update_check: true }
     }
 }
 
@@ -147,6 +154,9 @@ pub const DEFAULT_TEXT: &str = r#"# Cypher 설정. 고친 뒤 Cypher를 다시 �
 [browser]
 # enabled = true                      # Claude 세션에 내장 브라우저 조작 도구를 연결
 # home = "https://www.google.com"     # 브라우저를 처음 띄울 때 여는 주소
+# engine = "webview"                  # "webview": 내장 웹뷰 창 / "chrome": 설치된 Chrome·Edge를 전용 프로필로 띄워 조작(최신 Chromium)
+# chrome_path = ""                    # "chrome" 엔진이 쓸 실행 파일. 비우면 Chrome, Edge, Chromium, Brave 순으로 찾음
+# update_check = true                 # 브라우저를 열 때 일주일에 한 번 Chromium 버전이 뒤처졌는지 확인해 알림
 
 # 프로필 추가 예시. 기본 프로필(claude, powershell)과 id가 같으면 바꿔 씁니다.
 # [[profile]]

@@ -1,14 +1,18 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod browser;
+mod chrome;
 mod claude;
 mod clipboard;
 mod commands;
+mod engine;
 mod extras;
 mod http;
 mod magnet;
 mod mcp;
+mod memo;
 mod memory;
+mod site;
 mod monitor;
 mod status;
 
@@ -43,10 +47,15 @@ pub fn data_dir() -> Option<PathBuf> {
     Some(PathBuf::from(std::env::var_os("LOCALAPPDATA")?).join("cypher"))
 }
 
+/// `%APPDATA%\cypher` — 사용자의 것(설정, 메모). 버전이 바뀌어도 그대로 둔다.
+pub fn user_dir() -> PathBuf {
+    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
+    base.join("cypher")
+}
+
 /// `%APPDATA%\cypher\config.toml` — 사용자가 고치는 설정.
 fn config_path() -> PathBuf {
-    let base = std::env::var_os("APPDATA").map(PathBuf::from).unwrap_or_else(|| PathBuf::from("."));
-    base.join("cypher").join("config.toml")
+    user_dir().join("config.toml")
 }
 
 /// 문제 확인용 기록을 `%LOCALAPPDATA%\cypher\cypher.log`에 한 줄 덧붙인다.
@@ -161,7 +170,10 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         .item(&item("claude-settings", "Claude 공통 설정 열기 (settings.json)")?)
         .item(&item("claude-memory", "Claude 공통 지침 열기 (CLAUDE.md)")?)
         .build()?;
-    let help = SubmenuBuilder::new(app, "도움말").item(&item("help", "단축키\tF1")?).build()?;
+    let help = SubmenuBuilder::new(app, "도움말")
+        .item(&item("help", "단축키\tF1")?)
+        .item(&item("engine", "브라우저 엔진 정보·업데이트 확인")?)
+        .build()?;
     MenuBuilder::new(app).items(&[&tools, &settings, &help]).build()
 }
 
@@ -172,6 +184,7 @@ fn main() {
         // 본창을 닫으면 브라우저 창이 남아 있어도 앱을 끝낸다.
         .on_window_event(|window, event| {
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                chrome::shutdown(); // "chrome" 엔진으로 띄워 둔 브라우저도 함께 닫는다.
                 window.app_handle().exit(0);
             }
         })
@@ -180,6 +193,7 @@ fn main() {
             let status_port = status::start(app.handle().clone(), token.clone())?;
             clipboard::clean_old_pastes();
             clean_old_settings();
+            memo::clean_closed();
             let config_path = config_path();
             let (config, config_error) = Config::load(&config_path);
             let mcp_config = if config.browser.enabled { write_mcp_config(status_port, &token) } else { None };
@@ -233,6 +247,16 @@ fn main() {
             memory::memory_export,
             memory::memory_import,
             memory::memory_open,
+            memo::memo_read,
+            memo::memo_write,
+            memo::memo_remove,
+            memo::text_open,
+            memo::text_save,
+            site::site_open,
+            site::site_bounds,
+            site::site_navigate,
+            site::site_action,
+            site::site_close,
             clipboard::clipboard_read,
             clipboard::paste_preview,
             clipboard::clipboard_write,
@@ -241,6 +265,9 @@ fn main() {
             http::http_save,
             http::http_run_at,
             browser::browser_open,
+            browser::browser_where,
+            engine::browser_engine_info,
+            engine::browser_latest_version,
             browser::browser_navigate,
             browser::browser_back,
             browser::browser_forward,

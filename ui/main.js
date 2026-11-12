@@ -1,9 +1,11 @@
 // Cypher 화면: 세션 목록, 나란히 보는 터미널 창, 링크·붙여넣기·알림.
 // 빌드 단계 없이 그대로 실행 파일에 들어간다.
 import {
-  initExtras, showSnippets, showHelp, showMemory, showMenu, toggleDiff, showDiff, diffRefreshFor,
+  initExtras, showSnippets, showHelp, showEngine, showMemory, showMenu, toggleDiff, showDiff, diffRefreshFor,
 } from './extras.js';
-import { initHttp, toggleHttp, showHttp } from './http.js';
+import { initHttp, createHttp } from './http.js';
+import { initMemo, createMemo } from './memo.js';
+import { initSite, createSite, syncSites } from './site.js';
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -26,6 +28,7 @@ const SEARCH_COLORS = {
   matchOverviewRuler: '#5c4a1f', activeMatchColorOverviewRuler: '#d97757',
 };
 const BUSY_MS = 1200;           // 이 시간 안에 출력이 있었으면 "작업 중"으로 본다.
+const HELD_STOP_MS = 30000;      // 서브에이전트 때문에 미룬 완료 알림을, 이만큼 조용하면 그냥 알린다.
 const MAX_PANES = 8;            // 한 화면에 나눠 볼 수 있는 창 수
 const MAX_SHOTS = 8;            // 세션마다 남길 이미지 미리보기 수
 const FLOW_HIGH = 2 << 20;      // 화면에 못 그린 출력이 이만큼 쌓이면 읽기를 멈춘다.
@@ -34,8 +37,40 @@ const FOCUS_GUARD_MS = 250;     // 창을 고르려던 클릭이 링크를 열�
 const CONTEXT_WARN = 80;        // 컨텍스트 사용률이 이 이상이면 노란색,
 const CONTEXT_DANGER = 90;      // 이 이상이면 빨간색으로 경고한다.
 const COLORS = ['', '#e06c75', '#e5c07b', '#98c379', '#61afef', '#c678dd', '#56b6c2'];
+const SIDEBAR_WIDTH = 240;      // 사이드바 기본 너비
+const COMPOSER_HEIGHT = 110;    // 프롬프트 편집기 기본 높이
 
-/** @type {Map<number, object>} 화면용 번호(key) → 세션 */
+/**
+ * 사이드바에 놓을 수 있는 항목의 종류. 터미널 세션(Claude·PowerShell 등 프로필)은 따로 다루고,
+ * 그 밖의 종류는 여기에 올린다. 새 종류를 더하려면 화면을 만드는 함수 하나를 등록하면 된다.
+ *   create(item, host, saved, onChange) → { ready, focus(), title(), state(), close(), dispose(), insert?(text) }
+ */
+const KINDS = {
+  memo: { label: '메모', icon: '✎', hint: '글자 편집기(찾기·바꾸기, 파일 열기·저장, 임시 저장)', create: createMemo },
+  http: { label: 'HTTP', icon: '⇄', hint: 'HTTP 요청(.http 파일)을 쓰고 보내고 응답 보기', create: createHttp },
+  site: {
+    label: '사이트', icon: '◎', hint: '웹 페이지를 저장해 두고 창 안에서 보기', create: createSite,
+    // 만들기 전에 물어볼 것: 주소. 취소하면 만들지 않는다.
+    prepare: async () => {
+      const url = await ask('사이트 주소 (주소가 아니면 검색합니다)', 'https://…');
+      return url ? { url } : null;
+    },
+  },
+};
+
+/** 그 종류의 항목을 새로 만든다. 종류에 따라 먼저 물어볼 것(사이트 주소 등)을 묻는다. */
+async function createKind(kind, opts = {}) {
+  const def = KINDS[kind];
+  if (!def) return null;
+  let { saved } = opts;
+  if (!saved && def.prepare) {
+    saved = await def.prepare();
+    if (!saved) return null;
+  }
+  return newItem(kind, { ...opts, saved });
+}
+
+/** @type {Map<number, object>} 화면용 번호(key) → 항목(터미널 세션, 메모, HTTP …) */
 const sessions = new Map();
 let visible = [];               // 나란히 보이는 세션(왼쪽 위부터 순서대로)
 let active = null;
@@ -49,6 +84,9 @@ let limits = null;              // 계정 사용 한도(어느 Claude 세션이�
 let filterWaiting = false;      // 대기 중인 세션만 목록에 보이기
 let collapsed = new Set();      // 접어 둔 묶음(그룹·폴더)의 열쇠
 let drag = null;                // 목록에서 끌고 있는 세션 { s, x, y, active, ghost }
+let restoring = false;          // 지난번 항목을 되살리는 중(이 동안에는 상태를 적지 않는다)
+let renaming = null;            // 사이드바에서 별칭을 고치고 있는 항목의 번호
+let composerFor = null;         // 프롬프트 편집기가 지금 맡고 있는 세션
 try { collapsed = new Set(JSON.parse(localStorage.getItem('cypher.collapsed') || '[]')); } catch { /* 무시 */ }
 let groupList = [];            // 만들어 둔 그룹 이름(세션이 없어도 남는다)
 try { groupList = JSON.parse(localStorage.getItem('cypher.groups') || '[]'); } catch { /* 무시 */ }
@@ -75,9 +113,13 @@ async function init() {
   if (config.profiles.some((p) => p.id === 'claude')) {
     addButton('+ 워크트리', '새 git 워크트리에서 Claude 시작', newWorktree);
   }
+  // 터미널이 아닌 항목(메모, HTTP …)
+  for (const [kind, def] of Object.entries(KINDS)) {
+    addButton(`+ ${def.label}`, def.hint, (show) => createKind(kind, { show }));
+  }
   // 새 그룹 만들기
   const groupButton = make('button', '', '+ 그룹');
-  groupButton.title = '이름 붙인 새 그룹 만들기. 세션을 끌어다 놓거나 그룹 머리의 +로 세션을 엽니다';
+  groupButton.title = '이름 붙인 새 그룹 만들기(업무 하나를 한 그룹으로). 항목을 끌어다 놓거나 그룹 머리의 +로 채웁니다';
   groupButton.onclick = newGroup;
   $('new-buttons').append(groupButton);
 
@@ -85,19 +127,45 @@ async function init() {
     invoke, make, ask, setStatus, newSession, label,
     getActive: () => active,
     getFolder: () => folder,
-    pasteText: (text) => active?.term.paste(text),
+    focusActive: () => focusItem(active),
+    pasteText: (text) => pasteInto(active, text),
   });
-  initHttp({
-    invoke, make, ask, setStatus, baseName,
-    getActive: () => active,
-    getFolder: () => folder,
+  initHttp({ invoke, make, ask, setStatus, baseName });
+  initMemo({
+    invoke, make, ask, setStatus, baseName, showMenu,
+    openMemo: (path) => newItem('memo', { saved: { open: path }, show: 'split' }),
   });
-  // 사이드바 아래에는 자주 쓰는 네 가지만 둔다. 나머지는 창 상단 메뉴에 있다.
+  initSite({ invoke, listen, make, ask, setStatus });
+  initSidebarGrip();
+  initComposer();
+  // 사이드바 아래에는 자주 쓰는 것만 둔다. 나머지는 창 상단 메뉴에 있다.
   $('waiting').onclick = () => { filterWaiting = !filterWaiting; render(); };
   $('changes').onclick = () => toggleDiff();
   $('browser').onclick = openBrowser;
-  $('http-button').onclick = () => toggleHttp();
+  // 브라우저 단추를 오른쪽 클릭하면 지금 페이지를 Claude 세션에 넘길 수 있다.
+  const handoffMenu = (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    showMenu(ev, [
+      { label: '브라우저 열기', action: openBrowser },
+      { label: '지금 페이지를 Claude에게 넘기기', action: () => handoffFromMain(false) },
+      { label: '지금 페이지를 새 Claude 세션에 넘기기', action: () => handoffFromMain(true) },
+    ]);
+  };
+  $('browser').oncontextmenu = handoffMenu;
+  if (config.browser.engine?.toLowerCase() === 'chrome') {
+    // 설치된 Chrome을 띄우는 엔진에는 Cypher 주소 줄이 없으므로, 넘기기 단추를 여기에 둔다.
+    $('browser').title = '설치된 Chrome(또는 Edge)을 Cypher 전용 프로필로 엽니다. 여기서 로그인하고 작업하던 것을 Claude 세션이 이어서 조작할 수 있습니다 (Ctrl+Shift+O)';
+    const handoff = make('button', '', '넘기기');
+    handoff.id = 'handoff';
+    handoff.title = '브라우저에서 보고 있는 페이지를 Claude 세션에 넘기기 (오른쪽 클릭: 새 Claude 세션에 넘기기)';
+    handoff.onclick = () => handoffFromMain(false);
+    handoff.oncontextmenu = handoffMenu;
+    $('tools').append(handoff);
+  }
   listen('browser-handoff', ({ payload }) => handoffFromBrowser(payload));
+  listen('browser-outdated', ({ payload }) => notice('브라우저 엔진이 오래됐습니다',
+    `${payload.info.browser} ${payload.info.version} · 최신 안정판 ${payload.latest}. 도움말 → 브라우저 엔진 정보에서 갱신 방법을 볼 수 있습니다.`));
   listen('menu', ({ payload }) => runMenu(payload));
 
   $('pick').onclick = pickFolder;
@@ -120,17 +188,36 @@ async function init() {
   listen('session-hook', ({ payload }) => onHook(payload));
   listen('system-usage', ({ payload }) => onUsage(payload));
   listen('tauri://drag-drop', ({ payload }) => {
-    // 파일을 끌어다 놓으면 경로를 입력한다.
-    if (active && payload.paths?.length) active.term.paste(payload.paths.map(quote).join(' '));
+    if (!payload.paths?.length) return;
+    // 파일을 끌어다 놓으면: 터미널에는 경로를 입력하고, 메모를 보고 있으면 그 파일을 메모로 연다.
+    if (active?.kind === 'memo') {
+      // 하나씩 차례로 연다. 빈 메모면 첫 파일을 거기에, 나머지는 파일마다 새 메모 항목으로.
+      const memo = active;
+      (async () => { for (const path of payload.paths.slice(0, 8)) await memo.view.openFile(path); })();
+    } else {
+      pasteInto(active, payload.paths.map(quote).join(' '));
+    }
   });
 
   new ResizeObserver(fitVisible).observe($terms);
   setInterval(refreshActivity, 400);
-  window.addEventListener('beforeunload', () => { writeState(); closing = true; });
+  window.addEventListener('beforeunload', () => {
+    // 메모의 임시 저장과 HTTP 편집기의 고친 내용을 밀어 넣어 본다(끝까지 기다릴 수는 없다).
+    for (const s of sessions.values()) s.view?.flush?.();
+    writeState();
+    closing = true;
+  });
 
   const auto = await invoke('autostart');
-  if (auto) { folder = auto[1]; showFolder(); await newSession(auto[0]); }
-  else await restore();
+  if (auto) {
+    // 바로 시작 모드: 지난 세션은 되살리지 않지만 메모·HTTP 항목은 사이드바에 남긴다.
+    folder = auto[1];
+    showFolder();
+    await restore({ docsOnly: true });
+    await newSession(auto[0]);
+  } else {
+    await restore();
+  }
 }
 
 /** 창 상단 메뉴(도구·설정·도움말)에서 고른 항목을 실행한다. 항목 번호는 앱 쪽 메뉴 정의와 맞춘다. */
@@ -147,6 +234,7 @@ function runMenu(id) {
     'claude-settings': () => openClaudeFile('settings'),
     'claude-memory': () => openClaudeFile('memory'),
     help: showHelp,
+    engine: showEngine,
   };
   actions[id]?.();
 }
@@ -166,7 +254,25 @@ function showFolder() {
 const quote = (p) => (p.includes(' ') ? `"${p}"` : p);
 const baseName = (p) => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p;
 const setStatus = (text) => { $('status-text').textContent = text; };
-const label = (s) => s.name || `${s.profile.label} · ${s.worktree || baseName(s.cwd)}`;
+/** 항목의 원래 이름(종류와 폴더, 메모는 파일 이름이나 첫 줄). */
+const baseLabel = (s) => (s.kind === 'term'
+  ? `${s.profile.label} · ${s.worktree || baseName(s.cwd)}`
+  : s.view?.title() || KINDS[s.kind].label);
+/** 화면에 보일 이름: 별칭이 있으면 별칭, 없으면 원래 이름. */
+const label = (s) => s.name || baseLabel(s);
+const isTerm = (s) => s?.kind === 'term';
+
+/** 항목에 초점을 준다(터미널이면 입력, 그 밖에는 그 화면의 편집기). */
+function focusItem(s) {
+  if (!s) return;
+  if (s.term) s.term.focus(); else s.view?.focus();
+}
+
+/** 글자를 그 항목에 넣는다(터미널은 붙여넣기, 메모·HTTP는 커서 위치에 넣기). */
+function pasteInto(s, text) {
+  if (!s) return;
+  if (s.term) s.term.paste(text); else s.view?.insert?.(text);
+}
 
 function make(tag, className, text) {
   const node = document.createElement(tag);
@@ -185,7 +291,7 @@ function ask(title, placeholder = '', value = '') {
     dialog.returnValue = '';
     dialog.onclose = () => {
       resolve(dialog.returnValue === 'ok' ? input.value.trim() : null);
-      active?.term.focus();
+      focusItem(active);
     };
     dialog.showModal();
     input.focus();
@@ -231,22 +337,24 @@ async function newSession(profileId, opts = {}) {
   } catch { /* WebGL을 못 쓰면 기본 그리기로 동작한다 */ }
 
   const s = {
-    key: ++seq, id: null, profile, term, fitAddon, search, pane, head,
+    key: ++seq, kind: 'term', id: null, profile, term, fitAddon, search, pane, head, view: null,
     startCwd: cwd, cwd, project: '', worktree: opts.worktree || '',
     name: opts.name || '', color: opts.color || '',
     // 이름 붙인 그룹. 비어 있으면 시작 폴더별로 묶인다. 새 세션은 지금 세션의 그룹을 따른다.
     group: opts.group ?? ((!opts.restoring && active?.group) || ''),
     title: '', model: '', effort: '', context: null, cost: 0,
     usage: '', usageEl: null,
-    agents: new Set(), // 지금 돌고 있는 서브에이전트의 번호
+    agents: new Map(), // 지금 돌고 있는 서브에이전트: 번호 → 종류
     waiting: '', // '' | 'approval'(승인·입력 대기) | 'done'(응답 완료, 다음 지시 대기)
     claudeSession: opts.resume || '', resumable: !!opts.resume,
     lastOutput: 0, busy: false, attention: false, exited: false,
     pending: '', sending: false, queued: 0, paused: false,
     focusedAt: 0, shots: [],
+    draft: opts.draft || '', // 프롬프트 편집기에 쓰던 글
   };
   sessions.set(s.key, s);
   ensureGroup(s.group);
+  wirePane(s);
   wireTerminal(s);
 
   if (opts.show === 'split' && visible.length < MAX_PANES) placeBeside(s);
@@ -271,8 +379,11 @@ async function newSession(profileId, opts = {}) {
       profile: profileId, cwd, cols: term.cols, rows: term.rows,
       resume: opts.resume || null, worktree: opts.worktree || null, onOutput: channel,
     });
+    // 띄우는 사이에 사용자가 이미 닫았으면, 방금 뜬 프로세스를 끝내고 손을 뗀다.
+    if (!sessions.has(s.key)) { invoke('session_close', { id: s.id }); return s; }
     flush(s); // 띄우는 동안 눌린 키를 보낸다.
   } catch (err) {
+    if (!sessions.has(s.key)) return s;
     term.write(`\x1b[31m세션을 시작하지 못했습니다: ${err}\x1b[0m\r\n`);
     s.exited = true;
   }
@@ -281,6 +392,55 @@ async function newSession(profileId, opts = {}) {
   return s;
 }
 
+/**
+ * 터미널이 아닌 항목(메모, HTTP …)을 새로 만든다. 사이드바에 세션처럼 놓이고, 화면에서도 창 하나를 차지한다.
+ * opts.show / opts.cwd / opts.group / opts.name / opts.color 는 newSession과 같고,
+ * opts.saved 는 그 종류가 되살릴 내용(메모 번호, 열어 둔 파일 등)이다.
+ */
+async function newItem(kind, opts = {}) {
+  const def = KINDS[kind];
+  if (!def) return null;
+  $('empty').hidden = true;
+  // 폴더는 지금 보고 있는 항목의 것을 따른다(같은 업무의 요청 파일·메모가 한 폴더에 모이게).
+  const base = !opts.restoring && active ? (active.project || active.startCwd) : folder;
+  const cwd = (opts.cwd || base).replace(/\//g, '\\').replace(/(?<=[^:\\])\\+$/, '');
+
+  const pane = make('div', 'pane hidden');
+  const head = make('div', 'pane-head');
+  const host = make('div', 'doc-host');
+  pane.append(head, host);
+  $('parked').append(pane);
+
+  const s = {
+    key: ++seq, kind, id: null, profile: null, term: null, pane, head, view: null,
+    startCwd: cwd, cwd, project: '', worktree: '',
+    name: opts.name || '', color: opts.color || '',
+    group: opts.group ?? ((!opts.restoring && active?.group) || ''),
+    title: '', model: '', effort: '', context: null, cost: 0,
+    usage: '', usageEl: null, agents: new Map(), waiting: '',
+    lastOutput: -Infinity, busy: false, attention: false, exited: false,
+    shots: [], draft: '',
+  };
+  // 제목(파일 이름, 메모 첫 줄)이 바뀌면 사이드바를 다시 그리고 상태를 적어 둔다.
+  s.view = def.create(s, host, opts.saved || {}, () => { if (sessions.has(s.key)) { render(); saveState(); } });
+  sessions.set(s.key, s);
+  ensureGroup(s.group);
+  wirePane(s);
+
+  if (opts.show === 'split' && visible.length < MAX_PANES) placeBeside(s);
+  else if (opts.show !== 'hidden') placeInActive(s);
+  layout();
+  if (opts.show !== 'hidden') activate(s);
+  await s.view.ready;
+  render();
+  saveState();
+  return s;
+}
+
+/** 모든 종류의 창에 공통인 동작: 나란히 보기에서 창을 누르면 그 창이 활성화된다. */
+function wirePane(s) {
+  s.pane.addEventListener('mousedown', () => { if (active !== s) activate(s); }, true);
+}
 
 async function newWorktree(show) {
   const name = await ask('새 워크트리 이름 (영문·숫자·. _ -)', 'feature-x');
@@ -411,11 +571,13 @@ function layout() {
   $terms.classList.toggle('multi', visible.length > 1);
   $('empty').hidden = visible.length > 0;
   $('empty').textContent = sessions.size
-    ? '화면에 띄운 세션이 없습니다. 사이드바에서 세션을 누르거나 화면으로 끌어다 놓으세요.'
-    : '왼쪽에서 세션을 시작하세요.';
+    ? '화면에 띄운 항목이 없습니다. 사이드바에서 항목을 누르거나 화면으로 끌어다 놓으세요.'
+    : '왼쪽에서 세션이나 메모·HTTP·사이트 항목을 시작하세요.';
+  syncComposer();
+  syncSites(); // 사이트 항목의 웹뷰를 새 창 자리에 맞춘다.
   requestAnimationFrame(() => {
     fitVisible();
-    visible.forEach(resyncScroll);
+    visible.filter(isTerm).forEach(resyncScroll);
   });
 }
 
@@ -438,7 +600,7 @@ function resyncScroll(s) {
 
 function fitVisible() {
   for (const s of visible) {
-    try { s.fitAddon.fit(); } catch { /* 아직 크기를 잴 수 없는 상태 */ }
+    try { s.fitAddon?.fit(); } catch { /* 아직 크기를 잴 수 없는 상태 */ }
   }
 }
 
@@ -503,8 +665,8 @@ function activate(s) {
   renderShots();
   if (!$search.hidden) closeSearch();
   showDiff(s);
-  showHttp();
-  s.term.focus();
+  syncComposer();
+  focusItem(s);
   render();
   saveState();
 }
@@ -524,9 +686,16 @@ function toggleShown(s) {
   }
 }
 
-function closeSession(s) {
-  if (s.id != null && !s.exited) invoke('session_close', { id: s.id });
-  s.term.dispose();
+async function closeSession(s) {
+  if (s.view) {
+    // 메모·HTTP: 닫기 전에 저장할 것을 저장한다. 거짓이면 사용자가 닫기를 취소한 것이다.
+    if (!(await s.view.close())) return;
+    s.view.dispose();
+  } else {
+    if (s.id != null && !s.exited) invoke('session_close', { id: s.id });
+    s.term.dispose();
+  }
+  if (!sessions.has(s.key)) return; // 기다리는 사이 이미 닫혔다.
   s.pane.remove();
   s.shots.forEach((shot) => URL.revokeObjectURL(shot.url));
   sessions.delete(s.key);
@@ -558,7 +727,7 @@ function setBroadcast(on) {
   broadcast = on;
   $terms.classList.toggle('broadcast', on);
   $('status-mode').textContent = on ? '동시 입력 켜짐: 나란히 보이는 모든 세션에 입력됩니다' : '';
-  active?.term.focus();
+  focusItem(active);
 }
 
 const byId = (id) => [...sessions.values()].find((s) => s.id === id);
@@ -592,20 +761,32 @@ function onStatus({ id, model, effort, context, cwd, project, session, worktree,
 }
 
 /** Claude Code 훅: 요청 시작, 응답 완료(Stop), 입력·승인 대기(Notification), 서브에이전트 시작·종료. */
-function onHook({ id, event, kind, message, agent }) {
+function onHook({ id, event, kind, message, agent, agent_type: agentType, force }) {
   const s = byId(id);
   if (!s) return;
   if (!s.resumable) { s.resumable = true; saveState(); } // 대화가 생겼으니 다음에 이어갈 수 있다.
-  // 서브에이전트: 돌고 있는 것의 번호를 모아 두고 개수를 사이드바에 보여 준다.
+  // 서브에이전트: 돌고 있는 것의 번호와 종류를 모아 두고 사이드바에 보여 준다.
   if (event === 'SubagentStart' || event === 'SubagentStop') {
     if (agent) {
-      if (event === 'SubagentStart') s.agents.add(agent); else s.agents.delete(agent);
+      if (event === 'SubagentStart') s.agents.set(agent, agentType || ''); else s.agents.delete(agent);
     }
+    if (s.heldStop) s.heldAt = performance.now(); // 서브에이전트에 움직임이 있으면 조용한 시간을 다시 잰다.
     return render();
   }
   if (event !== 'UserPromptSubmit' && event !== 'Stop' && event !== 'Notification') return;
-  if (event === 'UserPromptSubmit') { s.waiting = ''; return render(); }
+  if (event === 'UserPromptSubmit') { s.waiting = ''; s.heldStop = false; return render(); }
   if (event === 'Notification' && kind === 'idle_prompt') return; // 완료 때 이미 알렸다.
+  // 서브에이전트가 아직 돌고 있을 때의 완료 신호는 "잠깐 멈춤"이다(끝나면 Claude가 이어서 답한다).
+  // 이때는 끝났다고 알리지 않고, 서브에이전트가 모두 끝난 뒤의 완료 신호를 기다린다.
+  // 그 신호가 끝내 오지 않는 경우(서브에이전트 종료 신호가 빠짐 등)는 refreshActivity()가 챙긴다.
+  if (event === 'Stop' && s.agents.size && !force) {
+    s.heldStop = true;
+    s.heldAt = performance.now();
+    s.waiting = '';
+    return render();
+  }
+  if (event === 'Stop') s.heldStop = false;
+  if (force) s.agents.clear(); // 한참 조용했으니 남아 있던 서브에이전트 표시는 끝난 것으로 본다.
   s.waiting = event === 'Stop' ? 'done' : 'approval';
   if (event === 'Stop') diffRefreshFor(s);
   render();
@@ -644,7 +825,12 @@ function refreshActivity() {
   const now = performance.now();
   let changed = false;
   for (const s of sessions.values()) {
-    const busy = !s.exited && now - s.lastOutput < BUSY_MS;
+    const busy = isTerm(s) && !s.exited && now - s.lastOutput < BUSY_MS;
+    // 미뤄 둔 완료 알림: 서브에이전트 때문에 미뤘는데 그 뒤로 한참 조용하면(출력도, 서브에이전트 신호도 없음)
+    // 마지막 완료 신호나 서브에이전트 종료 신호가 빠진 것으로 보고 여기서 알린다. 승인 대기 중에는 건드리지 않는다.
+    if (s.heldStop && !busy && !s.exited && !s.waiting && now - Math.max(s.lastOutput, s.heldAt || 0) > HELD_STOP_MS) {
+      onHook({ id: s.id, event: 'Stop', force: true });
+    }
     if (busy === s.busy) continue;
     if (!busy && s !== active) s.attention = true;
     s.busy = busy;
@@ -661,42 +847,113 @@ function sessionItem(s) {
     s === active && 'active', visible.includes(s) && 'shown', s.waiting,
     s.exited ? 'exited' : s.busy ? 'busy' : s.attention && 'attention',
   ].filter(Boolean).join(' '));
-  li.title = '화면으로 끌어다 놓기: 놓은 위치대로 좌우·상하 분할 · 묶음 머리로 끌기: 그 묶음으로 옮기기 · 오른쪽 클릭: 이름·색·그룹';
+  li.title = '화면으로 끌어다 놓기: 놓은 위치대로 좌우·상하 분할 · 묶음 머리로 끌기: 그 묶음으로 옮기기 · 두 번 누르기: 별칭 · 오른쪽 클릭: 메뉴';
   if (s.color) li.style.borderLeftColor = s.color;
-  li.onclick = (ev) => (ev.ctrlKey ? toggleShown(s) : activate(s));
+  li.onclick = (ev) => {
+    if (ev.target.closest('input')) return; // 별칭을 고치는 중
+    if (ev.ctrlKey) toggleShown(s); else activate(s);
+  };
   li.onmousedown = (ev) => {
-    if (ev.button === 0 && !ev.ctrlKey && !ev.target.closest('button')) drag = { s, x: ev.clientX, y: ev.clientY, active: false };
+    if (ev.button === 0 && !ev.ctrlKey && !ev.target.closest('button, input')) drag = { s, x: ev.clientX, y: ev.clientY, active: false };
   };
   li.dataset.key = s.key;
-  li.ondblclick = () => rename(s);
+  li.ondblclick = (ev) => { if (!ev.target.closest('button, input')) rename(s); };
   li.oncontextmenu = (ev) => { ev.preventDefault(); sessionMenu(s, ev); };
 
-  const name = make('span', 'name', label(s));
-  name.title = s.cwd;
-  if (s.color) name.style.color = s.color;
+  // 이름: 별칭이 있으면 별칭을 크게, 원래 이름(종류·폴더)은 옆에 흐리게 보여 준다.
+  let name;
+  if (renaming === s.key) {
+    name = renameInput(s);
+  } else {
+    name = make('span', 'name');
+    name.append(make('span', 'alias', label(s)));
+    if (s.name) name.append(make('span', 'origin', baseLabel(s)));
+    name.title = `${s.name ? `${baseLabel(s)}\n` : ''}${s.cwd}`;
+    if (s.color) name.style.color = s.color;
+  }
   const close = make('button', 'close', '×');
-  close.title = '세션 닫기';
+  close.title = isTerm(s) ? '세션 닫기' : '항목 닫기';
   close.onclick = (ev) => { ev.stopPropagation(); closeSession(s); };
+  const pencil = make('button', 'close', '✎');
+  pencil.title = '별칭 붙이기 (세션에는 영향 없이 사이드바에 보이는 이름만 바꿉니다)';
+  pencil.onclick = (ev) => { ev.stopPropagation(); rename(s); };
   // 화면 표시 토글: 오른쪽 화면에 보이기/숨기기(세션은 계속 실행된다). 항상 보이는 작은 단추.
   const shown = visible.includes(s);
   const eye = make('button', `eye${shown ? ' on' : ''}`, shown ? '◉' : '○');
   eye.title = shown ? '화면에서 숨기기 (세션은 계속 실행됩니다)' : '화면에 보이기';
   eye.onclick = (ev) => { ev.stopPropagation(); toggleShown(s); };
   const buttons = make('span', 'row-buttons');
-  buttons.append(eye, close);
+  if (s.agents.size) buttons.append(agentPill(s.agents.size, agentSummary(s)));
+  buttons.append(pencil, eye, close);
+
+  // 터미널이 아닌 항목은 점 대신 종류 기호를 보여 준다.
+  const dot = isTerm(s) ? make('span', 'dot') : make('span', 'dot kind', KINDS[s.kind].icon);
+  if (!isTerm(s)) dot.title = KINDS[s.kind].label;
   const context = s.context == null ? null : Math.round(s.context);
   const badge = make('span', 'badge', [
     s.model, s.effort, context == null ? '' : `컨텍스트 ${context}%`, s.cost ? `$${s.cost.toFixed(2)}` : '',
-    s.agents.size ? `서브에이전트 ${s.agents.size}` : '',
   ].filter(Boolean).join(' · '));
   if (context >= CONTEXT_DANGER) badge.classList.add('danger');
   else if (context >= CONTEXT_WARN) badge.classList.add('warn');
   if (context >= CONTEXT_WARN) badge.title = '컨텍스트가 거의 찼습니다. /compact 또는 새 세션을 고려하세요.';
-  const sub = make('span', 'sub', s.exited ? '종료됨' : WAITING_TEXT[s.waiting] || s.title);
+  // 돌고 있는 서브에이전트: 눈에 띄는 한 줄로 따로 보여 준다.
+  const agents = make('span', 'agents-line');
+  if (s.agents.size) {
+    agents.append(make('i', 'spin'), make('span', '', `서브에이전트 ${s.agents.size}개 실행 중${agentKinds(s) ? ` · ${agentKinds(s)}` : ''}`));
+    agents.title = agentSummary(s);
+  }
+  const sub = make('span', 'sub', s.exited ? '종료됨'
+    : WAITING_TEXT[s.waiting] || (s.heldStop && s.agents.size ? '서브에이전트가 끝나기를 기다리는 중' : s.title));
   // 사용량은 3초마다 바뀌므로 목록을 다시 그리지 않고 이 칸만 고친다.
   s.usageEl = make('span', 'usage', s.exited ? '' : s.usage);
-  li.append(make('span', 'dot'), name, buttons, badge, sub, s.usageEl);
+  li.append(dot, name, buttons, agents, badge, sub, s.usageEl);
   return li;
+}
+
+/** 서브에이전트의 종류별 개수: "Explore 2, general-purpose 1". 종류를 모르면 빈 글. */
+function agentKinds(s) {
+  const counts = new Map();
+  for (const kind of s.agents.values()) if (kind) counts.set(kind, (counts.get(kind) || 0) + 1);
+  return [...counts].map(([kind, count]) => `${kind} ${count}`).join(', ');
+}
+
+const agentSummary = (s) => `${label(s)}: 서브에이전트 ${s.agents.size}개 실행 중${agentKinds(s) ? ` (${agentKinds(s)})` : ''}`;
+
+/** 돌고 있는 서브에이전트 수를 보여 주는 알약 모양 표시(도는 고리 + 숫자). */
+function agentPill(count, title) {
+  const pill = make('span', 'agents');
+  pill.append(make('i', 'spin'), make('b', '', String(count)));
+  pill.title = title;
+  return pill;
+}
+
+/** 사이드바에서 바로 고치는 별칭 입력칸. Enter·다른 곳 클릭: 확정, Esc: 취소. */
+function renameInput(s) {
+  const input = make('input', 'rename');
+  Object.assign(input, { value: s.name, placeholder: baseLabel(s), spellcheck: false, autocomplete: 'off' });
+  input.title = '별칭 (비우면 원래 이름으로)';
+  let done = false;
+  const finish = (commit, byKey) => {
+    if (done) return;
+    done = true;
+    renaming = null;
+    if (commit) { s.name = input.value.trim(); saveState(); }
+    if (byKey) {
+      render();
+      focusItem(active); // 입력칸이 사라졌으니 키 입력이 다시 세션으로 가게 한다.
+    } else {
+      // 다른 곳을 눌러 끝난 경우: 이 줄만 바꾼다. 목록 전체를 다시 그리면 방금 누른 줄·단추가 사라져
+      // 그 클릭이 먹히지 않는다. (전체는 곧 다음 갱신 때 다시 그려진다.)
+      input.closest('li')?.replaceWith(sessionItem(s));
+    }
+  };
+  input.onkeydown = (ev) => {
+    ev.stopPropagation();
+    if (ev.key === 'Enter') finish(true, true);
+    else if (ev.key === 'Escape') finish(false, true);
+  };
+  input.onblur = () => finish(true, false);
+  return input;
 }
 
 const gigabytes = (bytes) => (bytes / 2 ** 30).toFixed(1);
@@ -773,11 +1030,26 @@ function deleteGroup(group, live) {
   moveToGroup(live, '');
 }
 
+/**
+ * 그 묶음에 새 항목을 더하는 메뉴 항목들: 터미널 프로필들과 그 밖의 종류(메모, HTTP …).
+ * 폴더는 그 묶음에 이미 있는 항목의 것을 따른다(없으면 새 세션 폴더).
+ */
+function addItems(group) {
+  const first = group.list.find((s) => sessions.has(s.key));
+  // 폴더 묶음은 시작 폴더로 묶이므로 그 폴더를 그대로 써야 새 항목이 같은 묶음에 들어간다.
+  const cwd = !first ? folder : group.logical ? (first.project || first.startCwd) : first.startCwd;
+  const opts = { group: group.logical ? group.name : '', cwd };
+  return [
+    ...config.profiles.map((p) => ({ label: `+ ${p.label} 세션`, action: () => newSession(p.id, opts) })),
+    ...Object.entries(KINDS).map(([kind, def]) => ({ label: `+ ${def.label}`, action: () => createKind(kind, opts) })),
+  ];
+}
+
 function groupMenu(group, ev) {
   const live = group.list.filter((s) => sessions.has(s.key));
   const items = [];
+  items.push(...addItems(group));
   if (group.logical) {
-    items.push({ label: '이 그룹에 새 세션', action: () => newSession(lastProfile, { group: group.name }) });
     items.push({ label: '그룹 이름 바꾸기', action: () => renameGroup(group, live) });
     items.push({ label: '그룹 삭제 (세션은 폴더별 묶음으로)', action: () => deleteGroup(group, live) });
   } else {
@@ -847,6 +1119,8 @@ document.addEventListener('mouseup', (ev) => {
 function render() {
   // 끄는 중에 목록을 다시 그리면 놓을 자리가 사라지므로 미뤄 둔다.
   if (drag?.active && $list.querySelector('li.group.new')) return;
+  // 별칭을 고치는 중에도 입력칸이 사라지지 않게 미룬다(끝나면 다시 그린다).
+  if (renaming != null && $list.querySelector('input.rename')) return;
 
   const groups = new Map();
   // 만들어 둔 그룹은 비어 있어도 위쪽에 보여 준다(대기만 보기에서는 뺀다).
@@ -874,12 +1148,13 @@ function render() {
       make('span', '', folded ? '▸' : '▾'),
       make('span', 'name', group.logical ? `◆ ${group.name}` : group.name),
     );
-    if (group.logical) {
-      const add = make('button', 'close', '+');
-      add.title = '이 그룹에 새 세션 열기';
-      add.onclick = (ev) => { ev.stopPropagation(); newSession(lastProfile, { group: group.name }); };
-      head.append(add);
-    }
+    // 묶음 안에서 돌고 있는 서브에이전트 수(접어 두어도 보인다).
+    const running = group.list.reduce((sum, s) => sum + s.agents.size, 0);
+    head.append(running ? agentPill(running, `이 묶음에서 서브에이전트 ${running}개 실행 중`) : make('span'));
+    const add = make('button', 'close', '+');
+    add.title = '이 묶음에 새 항목 더하기: 세션, 메모, HTTP …';
+    add.onclick = (ev) => { ev.stopPropagation(); showMenu(ev, addItems(group)); };
+    head.append(add);
     head.append(make('span', 'count', String(group.list.length)));
     head.onclick = () => {
       if (folded) collapsed.delete(group.key); else collapsed.add(group.key);
@@ -890,6 +1165,7 @@ function render() {
     rows.push(head);
     if (!folded) rows.push(...group.list.map(sessionItem));
   }
+  if (renaming != null && !sessions.has(renaming)) renaming = null;
   if (filterWaiting && !rows.length) rows.push(make('li', 'group', '대기 중인 세션이 없습니다.'));
   if (drag?.active) {
     const fresh = make('li', 'group new', '+ 새 그룹으로 (여기에 놓기)');
@@ -920,11 +1196,13 @@ function render() {
     hide.onclick = (ev) => { ev.stopPropagation(); toggleShown(s); };
     s.head.replaceChildren(
       make('span', 'title', label(s)),
+      ...(s.agents.size ? [agentPill(s.agents.size, agentSummary(s))] : []),
       make('span', 'model', [s.model, s.effort].filter(Boolean).join(' · ')),
       only, hide,
     );
     s.head.ondblclick = () => showOnly(s);
   }
+  syncComposer();
 }
 
 /** 분할을 풀고 이 세션 하나만 화면에 남긴다. 다른 세션은 닫지 않는다. */
@@ -940,6 +1218,7 @@ function sidebarMenu(ev) {
   if (config.profiles.some((p) => p.id === 'claude')) {
     items.push({ label: '새 워크트리 세션…', action: () => newWorktree('replace') });
   }
+  for (const [kind, def] of Object.entries(KINDS)) items.push({ label: `새 ${def.label}`, action: () => createKind(kind) });
   items.push({ label: '새 그룹 만들기…', action: newGroup });
   items.push({ label: '새 세션 폴더 바꾸기…', action: pickFolder });
   if (visible.length > 1) {
@@ -989,12 +1268,21 @@ function renderLimits() {
 
 // ───────────────────────── 세션 꾸미기·내보내기 ─────────────────────────
 
-async function rename(s) {
-  const name = await ask('세션 이름 (비우면 기본 이름)', '예: 로그인 수정', s.name);
-  if (name == null) return;
-  s.name = name;
+/**
+ * 별칭 붙이기: 사이드바의 그 줄에서 바로 고친다. 세션(실행 중인 프로그램)에는 영향이 없고
+ * 사이드바·창 제목·알림에 보이는 이름만 바뀐다. 비우면 원래 이름으로 돌아간다.
+ */
+function rename(s) {
+  // 접힌 묶음 안에 있으면 펼쳐서 입력칸이 보이게 한다.
+  collapsed.delete(groupKey(s));
+  renaming = null;
   render();
-  saveState();
+  renaming = s.key;
+  $list.querySelector(`li[data-key="${s.key}"]`)?.replaceWith(sessionItem(s));
+  const input = $list.querySelector('input.rename');
+  if (!input) { renaming = null; return; }
+  input.focus();
+  input.select();
 }
 
 /** 세션 화면에 남아 있는 글자 전체. */
@@ -1016,18 +1304,22 @@ async function exportText(s) {
 }
 
 function sessionMenu(s, ev) {
+  const term = isTerm(s);
   showMenu(ev, [
-    { label: '이름 바꾸기', action: () => rename(s) },
+    { label: s.name ? `별칭 바꾸기… (지금: ${s.name})` : '별칭 붙이기…', action: () => rename(s) },
+    ...(s.name ? [{ label: '별칭 지우기 (원래 이름으로)', action: () => { s.name = ''; render(); saveState(); } }] : []),
     { colors: COLORS, action: (color) => { s.color = color; render(); saveState(); } },
     { label: s.group ? `그룹 바꾸기… (지금: ${s.group})` : '그룹 지정…', action: () => askGroup([s], s.group) },
-    ...(visible.length > 1 || !visible.includes(s) ? [{ label: '이 세션만 보기 (나머지는 화면에서 숨기기)', action: () => showOnly(s) }] : []),
+    ...(visible.length > 1 || !visible.includes(s) ? [{ label: '이것만 보기 (나머지는 화면에서 숨기기)', action: () => showOnly(s) }] : []),
     visible.includes(s)
       ? { label: '화면에서 숨기기', action: () => toggleShown(s) }
       : { label: '화면에 나눠 보기', action: () => toggleShown(s) },
-    { label: '변경 내용 보기', action: () => { activate(s); toggleDiff(true); } },
-    { label: '출력 저장…', action: () => exportText(s) },
-    { label: '기억 내보내기·가져오기', action: () => showMemory(s) },
-    { label: '세션 닫기', action: () => closeSession(s) },
+    ...(term ? [
+      { label: '변경 내용 보기', action: () => { activate(s); toggleDiff(true); } },
+      { label: '출력 저장…', action: () => exportText(s) },
+      { label: '기억 내보내기·가져오기', action: () => showMemory(s) },
+    ] : []),
+    { label: term ? '세션 닫기' : `${KINDS[s.kind].label} 닫기`, action: () => closeSession(s) },
   ]);
 }
 
@@ -1055,9 +1347,9 @@ async function openBrowser() {
  * 사용자가 이어서 할 일을 적고 Enter를 누르면 Claude가 브라우저 도구로 그 페이지를 조작한다.
  */
 async function handoffFromBrowser({ url, fresh }) {
-  const current = active?.profile.claude && !active.exited
+  const current = active?.profile?.claude && !active.exited
     ? active
-    : [...sessions.values()].find((s) => s.profile.claude && !s.exited);
+    : [...sessions.values()].find((s) => s.profile?.claude && !s.exited);
   let target = fresh ? null : current;
   if (!target) {
     // 새 세션으로 넘기기(또는 열린 Claude 세션이 없을 때): 지금 세션과 같은 폴더·그룹에 새로 연다.
@@ -1075,6 +1367,13 @@ async function handoffFromBrowser({ url, fresh }) {
   target.term.paste(`Cypher 브라우저에 열려 있는 페이지(${url})에서 이어서 작업해줘: `);
 }
 
+/** 본창에서 넘기기: 브라우저에 지금 열려 있는 페이지 주소를 물어 Claude 세션에 넘긴다. */
+async function handoffFromMain(fresh) {
+  const url = await invoke('browser_where').catch(() => null);
+  if (!url) return notice('브라우저', '브라우저가 열려 있지 않습니다. 먼저 [브라우저]를 눌러 여세요.');
+  handoffFromBrowser({ url, fresh });
+}
+
 /** 대기 중인 다음 세션으로 간다. 승인 대기가 있으면 그쪽을 먼저 돈다. */
 function nextWaiting() {
   const all = [...sessions.values()];
@@ -1086,28 +1385,175 @@ function nextWaiting() {
   activate(next);
 }
 
+// ───────────────────────── 사이드바 너비 ─────────────────────────
+
+/** 사이드바와 화면 사이의 손잡이를 끌어 사이드바 너비를 바꾼다. 두 번 누르면 기본 너비로 돌아간다. */
+function initSidebarGrip() {
+  const grip = $('sidebar-grip');
+  const apply = (width) => {
+    const clamped = Math.min(Math.max(160, Math.round(width)), Math.max(200, innerWidth - 320));
+    document.body.style.setProperty('--sidebar', `${clamped}px`);
+    return clamped;
+  };
+  apply(Number(localStorage.getItem('cypher.sidebar')) || SIDEBAR_WIDTH);
+  grip.onmousedown = (ev) => {
+    ev.preventDefault();
+    grip.classList.add('active');
+    document.body.classList.add('resizing-row');
+    let width = 0;
+    const move = (e) => { width = apply(e.clientX); };
+    const stop = () => {
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', stop);
+      grip.classList.remove('active');
+      document.body.classList.remove('resizing-row');
+      if (width) localStorage.setItem('cypher.sidebar', String(width));
+      fitVisible();
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', stop);
+  };
+  grip.ondblclick = () => {
+    localStorage.setItem('cypher.sidebar', String(apply(SIDEBAR_WIDTH)));
+    fitVisible();
+  };
+}
+
+// ───────────────────────── 프롬프트 편집기 ─────────────────────────
+// 화면에 세션 하나만 보일 때(분할하지 않았을 때) 세션 아래에 놓이는 글 편집기.
+// 긴 프롬프트를 여기서 편하게 쓰고 [프롬프트]를 누르면 그 세션의 입력창에 들어간다.
+// 쓰던 글은 세션마다 따로 기억한다.
+
+/**
+ * 프롬프트 편집기가 맡을 세션: 화면에 하나만 보이는 터미널 세션.
+ * 세션이 종료돼도 편집기는 남긴다(쓰던 글을 복사해 갈 수 있게). 보내기만 막는다.
+ */
+const composerTarget = () => (visible.length === 1 && isTerm(visible[0]) ? visible[0] : null);
+
+/** 프롬프트 편집기를 접거나 편다. 단추 글자와 저장값을 함께 맞춘다. */
+function setComposerFolded(folded) {
+  $('composer').classList.toggle('folded', folded);
+  $('composer-fold').textContent = folded ? '프롬프트 편집기 ▴' : '프롬프트 편집기 ▾';
+  localStorage.setItem('cypher.composer.folded', folded ? '1' : '');
+}
+
+function initComposer() {
+  const $text = $('composer-text'), $box = $('composer');
+  const setHeight = (height) => {
+    const clamped = Math.min(Math.max(56, Math.round(height)), Math.max(120, innerHeight - 260));
+    $box.style.setProperty('--composer', `${clamped}px`);
+    return clamped;
+  };
+  setHeight(Number(localStorage.getItem('cypher.composer.height')) || COMPOSER_HEIGHT);
+  setComposerFolded(!!localStorage.getItem('cypher.composer.folded'));
+  $('composer-fold').onclick = () => {
+    setComposerFolded(!$box.classList.contains('folded'));
+    if (!$box.classList.contains('folded')) $text.focus(); else focusItem(active);
+  };
+  $('composer-enter').checked = !!localStorage.getItem('cypher.composer.enter');
+  $('composer-enter').onchange = (ev) => localStorage.setItem('cypher.composer.enter', ev.target.checked ? '1' : '');
+  $('composer-send').onclick = () => sendPrompt();
+  $text.addEventListener('input', () => {
+    if (composerFor) { composerFor.draft = $text.value; saveState(); }
+  });
+  $text.addEventListener('keydown', (ev) => {
+    if (ev.ctrlKey && !ev.shiftKey && ev.key === 'Enter') { ev.preventDefault(); sendPrompt(); }
+    else if (ev.key === 'Escape') focusItem(composerFor);
+  });
+  // 위쪽 손잡이를 끌어 높이를 바꾼다.
+  const grip = $('composer-grip');
+  grip.onmousedown = (ev) => {
+    ev.preventDefault();
+    document.body.classList.add('resizing-col');
+    let height = 0;
+    const bottom = $box.getBoundingClientRect().bottom;
+    const move = (e) => { height = setHeight(bottom - e.clientY - 4); };
+    const stop = () => {
+      document.removeEventListener('mousemove', move);
+      document.removeEventListener('mouseup', stop);
+      document.body.classList.remove('resizing-col');
+      if (height) localStorage.setItem('cypher.composer.height', String(height));
+    };
+    document.addEventListener('mousemove', move);
+    document.addEventListener('mouseup', stop);
+  };
+  grip.ondblclick = () => localStorage.setItem('cypher.composer.height', String(setHeight(COMPOSER_HEIGHT)));
+}
+
+/** 화면 상태에 맞춰 프롬프트 편집기를 보이거나 숨기고, 세션이 바뀌면 그 세션이 쓰던 글로 바꾼다. */
+function syncComposer() {
+  const target = composerTarget();
+  const $text = $('composer-text');
+  if (composerFor !== target) {
+    if (composerFor && sessions.has(composerFor.key)) composerFor.draft = $text.value;
+    composerFor = target;
+    $text.value = target?.draft || '';
+  }
+  $('composer').hidden = !target;
+  $('composer-send').disabled = !!target?.exited;
+  $('composer-send').title = target?.exited
+    ? '이 세션은 종료됐습니다. 쓰던 글은 복사해서 다른 세션에 쓸 수 있습니다.'
+    : '편집기에 쓴 내용을 지금 보고 있는 세션의 입력창에 넣습니다 (Ctrl+Enter)';
+  if (target) {
+    $text.placeholder = `"${label(target)}"에 보낼 긴 프롬프트를 여기에 씁니다. [프롬프트] 또는 Ctrl+Enter를 누르면 세션 입력창에 들어갑니다. (Ctrl+Shift+E: 여기로 오기)`;
+  }
+}
+
+function focusComposer() {
+  if (!composerTarget()) return setStatus('프롬프트 편집기는 화면에 세션 하나만 보일 때 쓸 수 있습니다.');
+  setComposerFolded(false);
+  $('composer-text').focus();
+}
+
+/**
+ * 프롬프트 편집기에 쓴 글을 지금 보고 있는 세션의 입력창에 넣는다.
+ * "바로 전송"이 켜져 있으면 Enter까지 눌러 보낸다. 넣은 뒤 편집기는 비운다(Ctrl+Z로 되살릴 수 있다).
+ */
+function sendPrompt() {
+  const s = composerFor, $text = $('composer-text');
+  const text = $text.value.replace(/\s+$/, '');
+  if (!s || !text) return;
+  if (s.exited) return setStatus('이 세션은 종료됐습니다. 쓰던 글은 편집기에 그대로 있으니 복사해서 다른 세션에 쓰세요.');
+  s.term.paste(text); // 여러 줄도 한 번의 붙여넣기로 들어간다.
+  if ($('composer-enter').checked) setTimeout(() => send(s, '\r'), 200);
+  if (s.waiting) s.waiting = '';
+  $text.focus();
+  $text.select();
+  document.execCommand('delete');
+  s.draft = '';
+  saveState();
+  s.term.focus();
+  render();
+}
+
 // ───────────────────────── 배치 기억 ─────────────────────────
 
 let saveTimer = 0;
 
 function saveState() {
+  if (restoring) return;
   clearTimeout(saveTimer);
   saveTimer = setTimeout(writeState, 300);
 }
 
 /** 열린 세션과 배치를 적어 둔다. 다시 시작하면 restore()가 되살린다. */
 function writeState() {
-  if (closing) return; // 창이 닫히는 중의 종료 알림으로 목록이 비워지지 않게 한다.
-  const live = [...sessions.values()].filter((s) => !s.exited && s.id != null);
+  if (closing || restoring) return; // 창이 닫히는 중의 종료 알림이나, 되살리는 도중의 덜 찬 목록을 적지 않는다.
+  if (composerFor && sessions.has(composerFor.key)) composerFor.draft = $('composer-text').value;
+  const live = [...sessions.values()].filter((s) => (isTerm(s) ? !s.exited && s.id != null : !!s.view));
   const state = {
     sessions: live.map((s) => ({
-      profile: s.profile.id,
+      kind: s.kind,
       cwd: s.project || s.startCwd,
-      resume: s.resumable && s.claudeSession ? s.claudeSession : null,
       shown: visible.includes(s),
       name: s.name,
       group: s.group,
       color: s.color,
+      ...(isTerm(s) ? {
+        profile: s.profile.id,
+        resume: s.resumable && s.claudeSession ? s.claudeSession : null,
+        draft: s.draft || undefined,
+      } : { saved: s.view.state() }),
     })),
     active: live.indexOf(active),
     // 화면 분할 모양. 잎은 세션의 순번({ i }), 가지는 { dir, a, b }.
@@ -1127,23 +1573,42 @@ function unpack(data, list) {
   return a && b ? { dir: data.dir === 'col' ? 'col' : 'row', ratio: data.ratio, a, b } : (a || b);
 }
 
-async function restore() {
-  if (!config.session.restore) return;
+/**
+ * 지난번 항목과 배치를 되살린다.
+ * `docsOnly`이면(세션 복원을 꺼 두었거나 바로 시작 모드) 터미널 세션은 되살리지 않고 메모·HTTP 항목만
+ * 사이드바에 되살린다. 메모는 사용자가 쓴 글이라, 세션 복원 설정과 무관하게 목록에서 사라지면 안 된다.
+ */
+async function restore({ docsOnly = false } = {}) {
+  docsOnly = docsOnly || !config.session.restore;
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem('cypher.state') || 'null'); } catch { /* 깨진 기록은 버린다 */ }
   if (!saved?.sessions?.length) return;
   const restored = [];
-  for (const item of saved.sessions) {
-    restored.push(await newSession(item.profile, {
-      cwd: item.cwd, resume: item.resume, show: 'hidden', restoring: true,
-      name: item.name, color: item.color, group: item.group || '',
-    }));
+  // 되살리는 동안에는 상태를 적지 않는다. 도중에 적으면 아직 되살리지 않은 뒤쪽 항목이 기록에서 빠져,
+  // 그때 앱이 꺼지면 그 항목(메모 포함)이 목록에서 사라진다.
+  restoring = true;
+  try {
+    for (const item of saved.sessions) {
+      const common = {
+        cwd: item.cwd, show: 'hidden', restoring: true, name: item.name, color: item.color, group: item.group || '',
+      };
+      // 종류 표시가 없는 예전 기록은 터미널 세션이다.
+      const term = !item.kind || item.kind === 'term';
+      restored.push(term
+        ? (docsOnly ? null : await newSession(item.profile, { ...common, resume: item.resume, draft: item.draft }))
+        : await newItem(item.kind, { ...common, saved: item.saved }));
+    }
+  } finally {
+    restoring = false;
   }
+  if (docsOnly) { render(); saveState(); return; } // 메모·HTTP는 사이드바에만 되살린다.
   // 분할 모양을 되살린다. 저장된 모양이 없으면(예전 기록) 보이던 세션을 고르게 나눈다.
-  tree = unpack(saved.layout, restored)
-    || balanced(restored.filter((s, index) => s && saved.sessions[index].shown).slice(0, MAX_PANES));
+  // 되살리는 도중에 사용자가 닫은 항목은 배치에서 뺀다(순번은 저장 때와 맞아야 하므로 자리는 비워 둔다).
+  const alive = restored.map((s) => (s && sessions.has(s.key) ? s : null));
+  tree = unpack(saved.layout, alive)
+    || balanced(alive.filter((s, index) => s && saved.sessions[index].shown).slice(0, MAX_PANES));
   layout();
-  const target = restored[saved.active] || restored.find(Boolean);
+  const target = alive[saved.active] || alive.find(Boolean);
   if (target) activate(target);
 }
 
@@ -1151,7 +1616,7 @@ async function restore() {
 
 /** 키 입력을 순서대로 보낸다. 동시 입력이 켜져 있으면 나란히 보이는 모든 세션에 보낸다. */
 function send(s, data) {
-  const targets = broadcast && visible.includes(s) ? visible.filter((v) => !v.exited) : [s];
+  const targets = broadcast && visible.includes(s) ? visible.filter((v) => isTerm(v) && !v.exited) : [s];
   for (const t of targets) {
     t.pending += data;
     if (!t.sending) flush(t);
@@ -1179,8 +1644,6 @@ function wireTerminal(s) {
   term.onTitleChange((title) => { s.title = title; render(); });
   term.onBell(() => { if (s !== active) { s.attention = true; render(); } });
   term.textarea?.addEventListener('focus', () => { s.focusedAt = performance.now(); });
-  // 나란히 보기에서 다른 창을 누르면 그 창이 활성화된다.
-  s.pane.addEventListener('mousedown', () => { if (active !== s) activate(s); }, true);
 
   // 셸이 알려 주는 현재 폴더(OSC 9;9 경로, OSC 7 file://…)를 따라간다.
   term.parser.registerOscHandler(9, (data) => {
@@ -1304,6 +1767,7 @@ function renderShots() {
 
 function openSearch() {
   if (!active) return;
+  if (!isTerm(active)) return active.view.find?.(); // 메모는 자기 찾기 줄을 쓴다.
   $search.hidden = false;
   $searchInput.focus();
   $searchInput.select();
@@ -1311,13 +1775,13 @@ function openSearch() {
 
 function closeSearch() {
   $search.hidden = true;
-  active?.search.clearDecorations();
-  active?.term.focus();
+  active?.search?.clearDecorations();
+  focusItem(active);
 }
 
 function find(backward) {
   const query = $searchInput.value;
-  if (!query || !active) return;
+  if (!query || !isTerm(active)) return;
   const options = { decorations: SEARCH_COLORS };
   const found = backward ? active.search.findPrevious(query, options) : active.search.findNext(query, options);
   setStatus(found ? '' : `찾는 내용이 없습니다: ${query}`);
@@ -1418,13 +1882,16 @@ window.addEventListener('keydown', (ev) => {
   else if (combo && key === 'g') toggleDiff();
   else if (combo && key === 'p') showSnippets();
   else if (combo && key === 'o') openBrowser();
-  else if (combo && key === 'h') toggleHttp();
+  else if (combo && key === 'h') newItem('http');
+  else if (combo && key === 'm') newItem('memo');
+  else if (combo && key === 'e') focusComposer();
   else if (key === 'f1') showHelp();
   else if (combo && key === 'arrowright') focusPane(1);
   else if (combo && key === 'arrowleft') focusPane(-1);
   else if (ev.ctrlKey && key === 'tab') cycle(ev.shiftKey ? -1 : 1);
   // 터미널 밖에서 새로 고침이 눌리면 세션 화면이 날아가므로 막는다.
-  else if ((key === 'f5' || (ev.ctrlKey && key === 'r')) && !ev.target.closest?.('.term')) { /* 막기만 한다 */ }
+  // (메모에서는 F5가 시간/날짜, Ctrl+R이 바꾸기라서 메모가 직접 처리한다.)
+  else if ((key === 'f5' || (ev.ctrlKey && key === 'r')) && !ev.target.closest?.('.term, .memo')) { /* 막기만 한다 */ }
   else handled = false;
   if (handled) { ev.preventDefault(); ev.stopPropagation(); }
 }, true);
@@ -1433,8 +1900,8 @@ document.addEventListener('contextmenu', (ev) => ev.preventDefault());
 
 // 자동 검증과 문제 확인용 창구.
 window.cypher = {
-  sessions, newSession, activate, closeSession, toggleShown, send, setBroadcast, provideLinks, paste, moveToGroup, runMenu, showOnly,
-  onHook, onStatus, nextWaiting, writeState, text: sessionText,
+  sessions, newSession, newItem, activate, closeSession, toggleShown, send, setBroadcast, provideLinks, paste, moveToGroup, runMenu, showOnly,
+  onHook, onStatus, nextWaiting, writeState, rename, sendPrompt, text: sessionText,
   get visible() { return visible; },
   get active() { return active; },
 };
