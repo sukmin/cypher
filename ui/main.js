@@ -6,6 +6,8 @@ import {
 import { initHttp, createHttp } from './http.js';
 import { initMemo, createMemo } from './memo.js';
 import { initSite, createSite, syncSites } from './site.js';
+import { initImage, createImage } from './image.js';
+import { initDrop } from './drop.js';
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -56,6 +58,7 @@ const KINDS = {
       return url ? { url } : null;
     },
   },
+  image: { label: '이미지', icon: '▣', hint: '그림(파일, 붙여넣기, 브라우저·사이트 화면 캡처)을 항목으로 두고 보기', create: createImage },
 };
 
 /** 그 종류의 항목을 새로 만든다. 종류에 따라 먼저 물어볼 것(사이트 주소 등)을 묻는다. */
@@ -135,7 +138,20 @@ async function init() {
     invoke, make, ask, setStatus, baseName, showMenu,
     openMemo: (path) => newItem('memo', { saved: { open: path }, show: 'split' }),
   });
-  initSite({ invoke, listen, make, ask, setStatus });
+  initSite({ invoke, listen, make, ask, setStatus, captured: onCaptured });
+  initImage({
+    invoke, make, setStatus, showMenu, addImages, toClaude: imageToClaude,
+    // 같은 묶음의 이미지 항목들(사이드바에 놓인 순서). 이미지 화면에서 이전/다음으로 넘길 때 쓴다.
+    siblings: (s) => [...sessions.values()].filter((other) => other.kind === 'image' && groupKey(other) === groupKey(s)),
+    show: (s) => activate(s),
+  });
+  initDrop({
+    invoke, listen, setStatus, quote, newItem, addImages, pasteInto, reveal,
+    itemOfPane: (pane) => (pane ? [...sessions.values()].find((s) => s.pane === pane) : null),
+    itemOfRow: (row) => sessions.get(Number(row.dataset.key)),
+    contextOfHead: (head) => ({ group: head.dataset.group || '', cwd: head.dataset.cwd || folder }),
+    screenEmpty: () => !visible.length,
+  });
   initSidebarGrip();
   initComposer();
   // 사이드바 아래에는 자주 쓰는 것만 둔다. 나머지는 창 상단 메뉴에 있다.
@@ -150,6 +166,8 @@ async function init() {
       { label: '브라우저 열기', action: openBrowser },
       { label: '지금 페이지를 Claude에게 넘기기', action: () => handoffFromMain(false) },
       { label: '지금 페이지를 새 Claude 세션에 넘기기', action: () => handoffFromMain(true) },
+      { label: '브라우저 화면 캡처 → 이미지 항목', action: () => captureBrowser(false) },
+      { label: '브라우저 페이지 전체 캡처 → 이미지 항목', action: () => captureBrowser(true) },
     ]);
   };
   $('browser').oncontextmenu = handoffMenu;
@@ -161,9 +179,15 @@ async function init() {
     handoff.title = '브라우저에서 보고 있는 페이지를 Claude 세션에 넘기기 (오른쪽 클릭: 새 Claude 세션에 넘기기)';
     handoff.onclick = () => handoffFromMain(false);
     handoff.oncontextmenu = handoffMenu;
-    $('tools').append(handoff);
+    const capture = make('button', '', '캡처');
+    capture.id = 'capture';
+    capture.title = '브라우저에 보이는 화면을 찍어 지금 보고 있는 항목의 묶음에 이미지 항목으로 넣기 (Shift+클릭: 페이지 전체)';
+    capture.onclick = (ev) => captureBrowser(ev.shiftKey);
+    $('tools').append(handoff, capture);
   }
   listen('browser-handoff', ({ payload }) => handoffFromBrowser(payload));
+  // 브라우저 창에서 [캡처]를 눌렀을 때: 지금 보고 있는 항목의 묶음에 이미지 항목으로 넣는다.
+  listen('image-captured', ({ payload }) => onCaptured(payload, null));
   listen('browser-outdated', ({ payload }) => notice('브라우저 엔진이 오래됐습니다',
     `${payload.info.browser} ${payload.info.version} · 최신 안정판 ${payload.latest}. 도움말 → 브라우저 엔진 정보에서 갱신 방법을 볼 수 있습니다.`));
   listen('menu', ({ payload }) => runMenu(payload));
@@ -187,17 +211,7 @@ async function init() {
   listen('session-status', ({ payload }) => onStatus(payload));
   listen('session-hook', ({ payload }) => onHook(payload));
   listen('system-usage', ({ payload }) => onUsage(payload));
-  listen('tauri://drag-drop', ({ payload }) => {
-    if (!payload.paths?.length) return;
-    // 파일을 끌어다 놓으면: 터미널에는 경로를 입력하고, 메모를 보고 있으면 그 파일을 메모로 연다.
-    if (active?.kind === 'memo') {
-      // 하나씩 차례로 연다. 빈 메모면 첫 파일을 거기에, 나머지는 파일마다 새 메모 항목으로.
-      const memo = active;
-      (async () => { for (const path of payload.paths.slice(0, 8)) await memo.view.openFile(path); })();
-    } else {
-      pasteInto(active, payload.paths.map(quote).join(' '));
-    }
-  });
+  // 창에 끌어다 놓은 파일·글자·링크·그림은 drop.js가 받는다(터미널에는 입력하고, 그 밖에는 항목으로 만든다).
 
   new ResizeObserver(fitVisible).observe($terms);
   setInterval(refreshActivity, 400);
@@ -1030,15 +1044,20 @@ function deleteGroup(group, live) {
   moveToGroup(live, '');
 }
 
+/** 그 묶음에 새 항목을 넣을 때 쓸 그룹 이름과 폴더. */
+function groupContext(group) {
+  const first = group.list.find((s) => sessions.has(s.key));
+  // 폴더 묶음은 시작 폴더로 묶이므로 그 폴더를 그대로 써야 새 항목이 같은 묶음에 들어간다.
+  const cwd = !first ? folder : group.logical ? (first.project || first.startCwd) : first.startCwd;
+  return { group: group.logical ? group.name : '', cwd };
+}
+
 /**
  * 그 묶음에 새 항목을 더하는 메뉴 항목들: 터미널 프로필들과 그 밖의 종류(메모, HTTP …).
  * 폴더는 그 묶음에 이미 있는 항목의 것을 따른다(없으면 새 세션 폴더).
  */
 function addItems(group) {
-  const first = group.list.find((s) => sessions.has(s.key));
-  // 폴더 묶음은 시작 폴더로 묶이므로 그 폴더를 그대로 써야 새 항목이 같은 묶음에 들어간다.
-  const cwd = !first ? folder : group.logical ? (first.project || first.startCwd) : first.startCwd;
-  const opts = { group: group.logical ? group.name : '', cwd };
+  const opts = groupContext(group);
   return [
     ...config.profiles.map((p) => ({ label: `+ ${p.label} 세션`, action: () => newSession(p.id, opts) })),
     ...Object.entries(KINDS).map(([kind, def]) => ({ label: `+ ${def.label}`, action: () => createKind(kind, opts) })),
@@ -1141,9 +1160,13 @@ function render() {
     const head = make('li', [
       'group', group.logical && 'logical', group.list.some((s) => s.attention || s.waiting) && 'attention',
     ].filter(Boolean).join(' '));
-    head.title = `${group.hint}\n클릭: 접기/펼치기 · 오른쪽 클릭: 묶음 메뉴 · 세션을 끌어다 놓으면 이 묶음으로`;
+    head.title = `${group.hint}\n클릭: 접기/펼치기 · 오른쪽 클릭: 묶음 메뉴 · 세션을 끌어다 놓으면 이 묶음으로 · 파일·글자·링크·그림을 끌어다 놓으면 이 묶음의 항목으로`;
     head.dataset.drop = group.logical ? 'logical' : 'folder';
     head.dataset.name = group.name;
+    // 밖에서 끌어다 놓은 것을 이 묶음의 항목으로 만들 때 쓴다(drop.js).
+    const context = groupContext(group);
+    head.dataset.group = context.group;
+    head.dataset.cwd = context.cwd;
     head.append(
       make('span', '', folded ? '▸' : '▾'),
       make('span', 'name', group.logical ? `◆ ${group.name}` : group.name),
@@ -1372,6 +1395,86 @@ async function handoffFromMain(fresh) {
   const url = await invoke('browser_where').catch(() => null);
   if (!url) return notice('브라우저', '브라우저가 열려 있지 않습니다. 먼저 [브라우저]를 눌러 여세요.');
   handoffFromBrowser({ url, fresh });
+}
+
+// ───────────────────────── 이미지 항목 ─────────────────────────
+
+/**
+ * 저장소에 넣은 그림들을 이미지 항목으로 만든다. 만든(또는 채운) 항목들을 돌려준다.
+ * opts.near: 이 항목과 같은 묶음·폴더에 만든다. 그것이 빈 이미지 항목이면 첫 장으로 그 항목을 채운다.
+ * opts.group / opts.cwd: 묶음을 직접 정한다. 아무것도 없으면 지금 보고 있는 항목의 묶음에 만든다.
+ * opts.source: 그림이 온 곳(캡처한 페이지 주소 등) · opts.shot / opts.full: 화면 캡처인지, 페이지 전체인지 · opts.show: 기본은 사이드바에만 놓는다('hidden').
+ */
+async function addImages(list, { near = null, group, cwd, source = '', shot = false, full = false, show = 'hidden' } = {}) {
+  const base = near && sessions.has(near.key) ? near : null;
+  const made = [];
+  for (const stored of list) {
+    if (base?.kind === 'image' && base.view.empty()) {
+      await base.view.fill(stored, { source, shot, full });
+      made.push(base);
+      continue;
+    }
+    made.push(await newItem('image', {
+      group: group ?? base?.group,
+      cwd: cwd ?? (base ? base.project || base.startCwd : undefined),
+      saved: { image: stored.id, ext: stored.ext, name: stored.name, source, at: Date.now(), shot, full },
+      show: made.length ? 'hidden' : show,
+    }));
+  }
+  reveal(made);
+  return made.filter(Boolean);
+}
+
+/** 방금 만든 항목들이 사이드바에서 눈에 띄게 한다: 접힌 묶음을 펴고, 화면에 없는 것은 주의 표시를 한다. */
+function reveal(items) {
+  const fresh = items.filter((s) => s && sessions.has(s.key));
+  if (!fresh.length) return;
+  for (const s of fresh) {
+    if (!visible.includes(s)) s.attention = true;
+    collapsed.delete(groupKey(s));
+  }
+  localStorage.setItem('cypher.collapsed', JSON.stringify([...collapsed]));
+  render();
+  $list.querySelector(`li[data-key="${fresh[fresh.length - 1].key}"]`)?.scrollIntoView({ block: 'nearest' });
+}
+
+/**
+ * 화면을 찍은 그림을 이미지 항목으로 넣는다. `near`가 있으면(사이트 항목에서 찍음) 그 항목의 묶음에,
+ * 없으면(브라우저 창에서 찍음) 지금 보고 있는 항목의 묶음에 넣는다.
+ */
+async function onCaptured(captured, near) {
+  const [s] = await addImages([captured.image], { near, source: captured.source, shot: true, full: captured.full });
+  if (!s) return;
+  const where = s.group ? `그룹 "${s.group}"` : `"${baseName(s.startCwd)}" 묶음`;
+  toast(s, captured.full ? '페이지 전체 캡처' : '화면 캡처',
+    `${label(s)} — ${where}에 이미지 항목으로 넣었습니다.${captured.cut ? ' 페이지가 너무 길어 아래쪽은 잘렸습니다.' : ''} (누르면 엽니다)`);
+}
+
+/** 본창에서 브라우저 화면을 찍는다. 찍힌 그림은 `image-captured` 사건으로 돌아온다. */
+async function captureBrowser(full) {
+  setStatus('브라우저 화면을 찍는 중…');
+  try {
+    await invoke('browser_capture', { full });
+    setStatus('');
+  } catch (err) {
+    setStatus('');
+    notice('캡처하지 못했습니다', String(err));
+  }
+}
+
+/** 이미지 파일의 경로를 Claude 세션 입력창에 넣는다. 같은 묶음의 세션을 먼저 고르고, 여럿이면 고르게 한다. */
+function imageToClaude(item, path, ev) {
+  if (!path) return setStatus('아직 그림이 없습니다.');
+  const claudes = [...sessions.values()].filter((s) => s.profile?.claude && !s.exited);
+  if (!claudes.length) return setStatus('열려 있는 Claude 세션이 없습니다. 먼저 Claude 세션을 여세요.');
+  const give = (target) => {
+    activate(target);
+    target.term.paste(`${quote(path)} `);
+  };
+  const same = claudes.filter((s) => groupKey(s) === groupKey(item));
+  const pool = same.length ? same : claudes;
+  if (pool.length === 1) return give(pool[0]);
+  showMenu(ev, pool.map((s) => ({ label: `${label(s)}에 넣기`, action: () => give(s) })));
 }
 
 /** 대기 중인 다음 세션으로 간다. 승인 대기가 있으면 그쪽을 먼저 돈다. */
@@ -1901,7 +2004,7 @@ document.addEventListener('contextmenu', (ev) => ev.preventDefault());
 // 자동 검증과 문제 확인용 창구.
 window.cypher = {
   sessions, newSession, newItem, activate, closeSession, toggleShown, send, setBroadcast, provideLinks, paste, moveToGroup, runMenu, showOnly,
-  onHook, onStatus, nextWaiting, writeState, rename, sendPrompt, text: sessionText,
+  onHook, onStatus, nextWaiting, writeState, rename, sendPrompt, text: sessionText, addImages, onCaptured, captureBrowser,
   get visible() { return visible; },
   get active() { return active; },
 };

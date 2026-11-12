@@ -4,7 +4,7 @@
 // 여기서는 그 웹뷰가 놓일 자리(빈 칸)만 만들고, 자리의 위치·크기를 앱에 알려 웹뷰를 그 위에 겹쳐 놓게 한다.
 // 웹뷰는 화면 요소보다 항상 위에 그려지므로, 메뉴·대화상자가 열리거나 무언가를 끄는 동안에는 잠시 숨긴다.
 
-let api = null; // { invoke, listen, make, ask, setStatus }
+let api = null; // { invoke, listen, make, ask, setStatus, captured(찍은 그림, 이 항목) }
 const views = new Map(); // 항목 번호 → { sync, changed }
 let queued = false;
 
@@ -79,6 +79,7 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
     button('⟳', '새로 고침', () => act('reload')),
     button('⌂', `처음 저장한 주소로: ${home}`, () => go(home)),
     $address,
+    button('캡처', '보이는 화면을 찍어 이 항목과 같은 묶음에 이미지 항목으로 넣기 (Shift+클릭: 페이지 전체)', (ev) => capture(ev.shiftKey)),
     button('브라우저로', '이 주소를 내장 브라우저 창에서 열기 (Claude가 조작할 수 있는 창)', () => invoke('browser_open', { url }).catch((err) => setStatus(String(err)))),
   );
   const $view = make('div', 'site-view');
@@ -87,6 +88,24 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
   const root = make('div', 'doc site');
   root.append(bar, $view);
   host.append(root);
+
+  /** 페이지를 찍어 이 항목과 같은 묶음에 이미지 항목으로 넣는다. */
+  let capturing = false;
+  async function capture(full) {
+    if (!opened) return setStatus('페이지가 아직 열리지 않았습니다.');
+    if (capturing) return;
+    capturing = true;
+    setStatus(full ? '페이지 전체를 찍는 중…' : '화면을 찍는 중…');
+    try {
+      const captured = await invoke('site_capture', { id, full });
+      setStatus('');
+      await api.captured(captured, item);
+    } catch (err) {
+      setStatus(`캡처하지 못했습니다: ${err}`);
+    } finally {
+      capturing = false;
+    }
+  }
 
   async function go(target) {
     if (!opened) { url = target; $address.value = target; return sync(); }

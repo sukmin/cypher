@@ -38,6 +38,8 @@ pub async fn site_open(app: AppHandle, id: u32, url: String, x: f64, y: f64, wid
     let window = app.get_window("main").ok_or("본창이 없습니다")?;
     let (for_title, for_load, for_new) = (app.clone(), app.clone(), app.clone());
     let builder = WebviewBuilder::new(label(id), WebviewUrl::External(target.clone()))
+        // 파일을 끌어다 놓는 것은 페이지가 직접 받게 한다(사이트의 끌어서 올리기가 동작하도록).
+        .disable_drag_drop_handler()
         // 웹 주소가 아닌 곳(file:, 앱 내부 주소 등)으로는 가지 못하게 한다.
         .on_navigation(|url| matches!(url.scheme(), "http" | "https" | "about"))
         // 새 창으로 열리는 링크는 같은 자리에서 연다(통제되지 않는 창이 생기지 않게).
@@ -95,6 +97,15 @@ pub fn site_action(app: AppHandle, id: u32, action: String) -> Result<(), String
         _ => return Err("모르는 동작입니다".into()),
     }
     .map_err(err)
+}
+
+/// 사이트에 보이는 화면(또는 `full`이면 페이지 전체)을 찍어 이미지 저장소에 넣는다.
+/// 화면 쪽이 돌려받은 그림으로 이 사이트 항목과 같은 그룹에 이미지 항목을 만든다.
+#[tauri::command]
+pub async fn site_capture(app: AppHandle, id: u32, full: Option<bool>) -> Result<crate::image::Captured, String> {
+    let webview = app.get_webview(&label(id)).ok_or("사이트가 아직 열리지 않았습니다")?;
+    crate::image::capture(&|method, params| crate::browser::webview_cdp(&webview, method, params), full.unwrap_or(false))
+        .inspect_err(|problem| crate::log(&format!("사이트 캡처 실패: {problem}")))
 }
 
 #[tauri::command]

@@ -244,3 +244,42 @@ li.active .dot.kind { color: var(--accent); }
 .site-view { flex: 1; min-height: 0; display: grid; place-items: center; background: #12141a; }
 /* 사이트가 보이는 동안에는 알림을 사이드바 쪽에 띄운다(웹뷰는 화면 요소를 가린다). */
 body.site-shown #toasts { right: auto; left: 14px; bottom: 56px; }
+
+/* ───────── 이미지 항목: 그림을 칸 안에 놓고 확대·이동한다 ───────── */
+
+.image-stage { flex: 1; min-height: 0; position: relative; overflow: hidden; background: #1c1c1e; outline: none; }
+.image-stage.pannable { cursor: grab; }
+.image-stage.panning { cursor: grabbing; }
+.image-pic { position: absolute; max-width: none; user-select: none; -webkit-user-drag: none; }
+.image-pic[hidden] { display: none; }
+.image-zoom { flex: none; min-width: 42px; text-align: center; font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+/* 왼쪽 위의 파일 정보(I로 켜고 끈다) */
+.image-info {
+  position: absolute;
+  left: 10px;
+  top: 10px;
+  max-width: min(520px, calc(100% - 20px));
+  padding: 7px 10px;
+  font-size: 12px;
+  line-height: 1.55;
+  color: #e6e8ea;
+  background: rgba(0, 0, 0, 0.66);
+  border-radius: 6px;
+  pointer-events: none;
+}
+.image-info[hidden] { display: none; }
+.image-info div { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.image-info .strong { font-weight: bold; }
+.image-info .dim { color: #9aa3ad; }
+/* 빈 이미지 항목의 안내 */
+.image-empty { position: absolute; inset: 0; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; padding: 20px; color: var(--dim); text-align: center; }
+.image-empty[hidden] { display: none; }
+.image-empty p { margin: 0 0 4px; max-width: 420px; white-space: normal; }
+.image-empty button { padding: 5px 14px; }
+
+/* ───────── 끌어다 놓기: 놓을 수 있는 곳 표시 ───────── */
+
+#sidebar.dropping { box-shadow: inset 0 0 0 2px var(--accent); }
+.pane.dropping { box-shadow: inset 0 0 0 2px var(--accent); }
+/* 방금 만들어져 아직 열어 보지 않은 항목(메모·이미지 …)의 종류 기호 */
+li.attention .dot.kind { background: none; box-shadow: none; color: #fff; text-shadow: 0 0 6px var(--attention); }

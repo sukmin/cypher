@@ -151,6 +151,8 @@ fn add_webviews(app: &AppHandle, window: &tauri::Window, start: Url) -> Result<(
 
     let app_for_new_window = app.clone();
     let page = WebviewBuilder::new(PAGE, WebviewUrl::External(start))
+        // 파일을 끌어다 놓는 것은 페이지가 직접 받게 한다(사이트의 끌어서 올리기가 동작하도록).
+        .disable_drag_drop_handler()
         // 웹 주소가 아닌 곳(file:, 앱 내부 주소 등)으로는 가지 못하게 한다.
         .on_navigation(|url| matches!(url.scheme(), "http" | "https" | "about"))
         // 새 창으로 열리는 링크는 같은 창에서 연다(통제되지 않는 창이 생기지 않게).
@@ -236,6 +238,18 @@ pub async fn browser_where(app: AppHandle) -> Option<String> {
     if chrome_engine(&app) { crate::chrome::current_url() } else { browser_current(app) }
 }
 
+/// 브라우저에 보이는 화면(또는 `full`이면 페이지 전체)을 찍어 이미지 항목으로 만든다.
+/// 찍은 그림은 저장소에 넣고 본창에 알린다. 본창이 지금 보고 있는 항목의 그룹에 이미지 항목을 만든다.
+#[tauri::command]
+pub async fn browser_capture(app: AppHandle, full: Option<bool>) -> Result<(), String> {
+    if !is_open(&app) {
+        return Err("브라우저가 열려 있지 않습니다".into());
+    }
+    let captured = crate::image::capture(&|method, params| cdp(&app, method, params), full.unwrap_or(false))
+        .inspect_err(|problem| crate::log(&format!("브라우저 캡처 실패: {problem}")))?;
+    app.emit_to("main", "image-captured", captured).map_err(err)
+}
+
 /// "Claude에게 넘기기": 본창으로 돌아가 Claude 세션 입력창에 이어서 할 일의 머리말을 넣는다.
 /// `fresh`가 참이면 새 Claude 세션을 열어 거기에 넘긴다.
 #[tauri::command]
@@ -255,14 +269,17 @@ pub fn browser_handoff(app: AppHandle, fresh: Option<bool>) -> Result<(), String
 /// 페이지 웹뷰에 CDP 명령을 보내고 답을 받는다.
 /// 답은 창 스레드에서 돌아오므로, 창 스레드에서 부르면 안 된다(작업 스레드 전용).
 pub fn cdp(app: &AppHandle, method: &str, params: Value) -> Result<Value, String> {
-    use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
-    use windows_core::HSTRING;
-
     if chrome_engine(app) {
         return crate::chrome::cdp(method, params);
     }
+    webview_cdp(&page(app)?, method, params)
+}
 
-    let webview = page(app)?;
+/// 웹뷰 하나(브라우저 창의 페이지, 사이트 항목)에 CDP 명령을 보내고 답을 받는다. 작업 스레드 전용.
+pub fn webview_cdp(webview: &tauri::Webview, method: &str, params: Value) -> Result<Value, String> {
+    use webview2_com::CallDevToolsProtocolMethodCompletedHandler;
+    use windows_core::HSTRING;
+
     let (tx, rx) = mpsc::channel::<Result<String, String>>();
     let (method, params) = (HSTRING::from(method), HSTRING::from(params.to_string()));
     webview

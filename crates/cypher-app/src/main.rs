@@ -5,9 +5,11 @@ mod chrome;
 mod claude;
 mod clipboard;
 mod commands;
+mod drops;
 mod engine;
 mod extras;
 mod http;
+mod image;
 mod magnet;
 mod mcp;
 mod memo;
@@ -194,6 +196,7 @@ fn main() {
             clipboard::clean_old_pastes();
             clean_old_settings();
             memo::clean_closed();
+            image::clean_closed();
             let config_path = config_path();
             let (config, config_error) = Config::load(&config_path);
             let mcp_config = if config.browser.enabled { write_mcp_config(status_port, &token) } else { None };
@@ -223,6 +226,7 @@ fn main() {
                 config_path,
             });
             monitor::start(app.handle().clone());
+            drops::watch(app.handle());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -257,6 +261,19 @@ fn main() {
             site::site_navigate,
             site::site_action,
             site::site_close,
+            site::site_capture,
+            image::image_import,
+            image::image_pick,
+            image::image_paste,
+            image::image_store,
+            image::image_fetch,
+            image::image_read,
+            image::image_info,
+            image::image_remove,
+            image::image_export,
+            image::image_copy,
+            drops::drop_classify,
+            browser::browser_capture,
             clipboard::clipboard_read,
             clipboard::paste_preview,
             clipboard::clipboard_write,

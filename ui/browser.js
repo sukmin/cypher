@@ -17,6 +17,23 @@ $('reload').onclick = () => invoke('browser_reload');
 $('handoff').onclick = () => invoke('browser_handoff', { fresh: false });
 $('handoff-new').onclick = () => invoke('browser_handoff', { fresh: true });
 
+// 화면 캡처: 찍은 그림은 본창의 이미지 항목이 된다. 단추에 결과를 잠깐 보여 준다.
+$('capture').onclick = async (ev) => {
+  const button = $('capture');
+  if (button.disabled) return;
+  button.disabled = true;
+  button.textContent = '찍는 중…';
+  let result = '넣었습니다 ✓';
+  try {
+    await invoke('browser_capture', { full: ev.shiftKey });
+  } catch (err) {
+    result = '실패';
+    button.title = `캡처하지 못했습니다: ${err}`;
+  }
+  button.textContent = result;
+  setTimeout(() => { button.textContent = '캡처'; button.disabled = false; }, 1200);
+};
+
 $address.addEventListener('keydown', async (ev) => {
   if (ev.key !== 'Enter') return;
   try {

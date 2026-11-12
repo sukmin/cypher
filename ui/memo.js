@@ -719,6 +719,8 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
           }
         }
         text = working ?? '';
+        // 끌어다 놓은 글자로 만든 새 메모는 그 글자로 시작한다.
+        if (!saved.memo && saved.text != null) text = String(saved.text);
         // 파일로 저장하지 않은 메모에서 골라 둔 인코딩·줄 끝 형식을 되살린다.
         if (saved.encoding) encoding = saved.encoding;
         if (saved.eol) eol = saved.eol;

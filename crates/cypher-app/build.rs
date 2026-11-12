@@ -14,7 +14,9 @@ const MAIN: &[&str] = &[
     "git_changes", "git_diff", "save_text",
     "memory_info", "memory_export", "memory_import", "memory_open",
     "memo_read", "memo_write", "memo_remove", "text_open", "text_save",
-    "site_open", "site_bounds", "site_navigate", "site_action", "site_close",
+    "site_open", "site_bounds", "site_navigate", "site_action", "site_close", "site_capture",
+    "image_import", "image_pick", "image_paste", "image_store", "image_fetch", "image_read", "image_info",
+    "image_remove", "image_export", "image_copy", "drop_classify",
     "clipboard_read", "paste_preview", "clipboard_write",
     "browser_open", "browser_where", "browser_engine_info", "browser_latest_version",
     "http_files", "http_read", "http_save", "http_run_at",
@@ -25,6 +27,9 @@ const BAR: &[&str] = &[
     "browser_navigate", "browser_back", "browser_forward", "browser_reload", "browser_current", "browser_handoff",
     "browser_page", "browser_bar_height",
 ];
+
+/// 본창과 주소 줄이 함께 쓰는 명령.
+const BOTH: &[&str] = &["browser_capture"];
 
 fn permissions(commands: &[&str]) -> String {
     commands.iter().map(|c| format!("\"allow-{}\"", c.replace('_', "-"))).collect::<Vec<_>>().join(", ")
@@ -44,19 +49,19 @@ fn main() {
         &dir.join("default.json"),
         &format!(
             "{{\n  \"identifier\": \"default\",\n  \"description\": \"본창 권한 (build.rs가 만든 파일)\",\n  \"windows\": [\"main\"],\n  \"permissions\": [\"core:default\", {}]\n}}\n",
-            permissions(MAIN)
+            permissions(&[MAIN, BOTH].concat())
         ),
     );
     write_if_changed(
         &dir.join("browser-bar.json"),
         &format!(
             "{{\n  \"identifier\": \"browser-bar\",\n  \"description\": \"브라우저 창 주소 줄 권한 (build.rs가 만든 파일). 웹 페이지 웹뷰에는 권한이 없다.\",\n  \"webviews\": [\"browser-bar\"],\n  \"permissions\": [{}]\n}}\n",
-            permissions(BAR)
+            permissions(&[BAR, BOTH].concat())
         ),
     );
 
     // 권한 목록은 프로그램이 끝날 때까지 살아 있어야 하는 형식이라 떼어 놓는다.
-    let all: &'static [&'static str] = MAIN.iter().chain(BAR).copied().collect::<Vec<_>>().leak();
+    let all: &'static [&'static str] = MAIN.iter().chain(BAR).chain(BOTH).copied().collect::<Vec<_>>().leak();
     tauri_build::try_build(
         tauri_build::Attributes::new().app_manifest(tauri_build::AppManifest::new().commands(all)),
     )
