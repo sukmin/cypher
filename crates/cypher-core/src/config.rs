@@ -53,6 +53,9 @@ pub struct Session {
     pub scrollback: u32,
     /// PowerShell·cmd 세션이 다른 프로그램과 글자를 주고받을 때 UTF-8을 쓰게 한다(Claude 세션은 해당 없음).
     pub utf8: bool,
+    /// Claude 세션이 새로 만든 파일을 그 세션의 묶음에 항목으로 놓을지.
+    /// "known": 문서(.md, .txt)·이미지·HTTP 요청만, "all": 그 밖의 글자 파일도 문서로, "off": 놓지 않음.
+    pub show_created: String,
 }
 
 impl Default for Config {
@@ -86,7 +89,7 @@ impl Default for Notify {
 
 impl Default for Session {
     fn default() -> Self {
-        Self { restore: true, scrollback: 10_000, utf8: true }
+        Self { restore: true, scrollback: 10_000, utf8: true, show_created: "known".into() }
     }
 }
 
@@ -148,6 +151,9 @@ pub const DEFAULT_TEXT: &str = r#"# Cypher 설정. 고친 뒤 Cypher를 다시 �
 # restore = true       # 다시 시작할 때 이전 세션과 배치를 되살림
 # scrollback = 10000   # 세션마다 기억할 지난 출력 줄 수
 # utf8 = true          # PowerShell·cmd 세션의 글자 인코딩을 UTF-8로 (Claude 세션은 해당 없음)
+# Claude 세션이 새로 만든 파일을 그 세션의 묶음에 항목으로 놓기.
+#   "known": 문서(.md, .txt)·이미지·HTTP 요청(.http)만 / "all": 그 밖의 글자 파일도 문서로 / "off": 놓지 않음
+# show_created = "known"
 
 [window]
 # magnet = true            # 창을 끌 때 화면 가장자리와 다른 Cypher 창에 달라붙기 (Ctrl을 누른 채 끌면 붙지 않음)
@@ -174,6 +180,13 @@ impl Config {
         // 파일에 [[profile]]이 없으면 기본 목록이 그대로 들어와 있다. 합쳐도 결과는 같다.
         config.profiles = profile::merge(std::mem::take(&mut config.profiles));
         config.font.size = config.font.size.clamp(6, 72);
+        // 대/소문자와 앞뒤 공백은 가리지 않고, 모르는 값은 기본값으로 본다.
+        config.session.show_created = match config.session.show_created.trim().to_ascii_lowercase().as_str() {
+            "off" => "off",
+            "all" => "all",
+            _ => "known",
+        }
+        .to_string();
         Ok(config)
     }
 
@@ -284,6 +297,16 @@ mod tests {
             assert!(error.is_some() && config == Config::default());
             assert_eq!(std::fs::read(&path).unwrap(), broken);
         }
+    }
+
+    #[test]
+    fn 만든_파일_놓기_설정은_대소문자를_가리지_않고_모르는_값은_기본값() {
+        let value = |text: &str| Config::parse(&format!("[session]\nshow_created = \"{text}\"")).unwrap().session.show_created;
+        assert_eq!(value("Off"), "off");
+        assert_eq!(value(" ALL "), "all");
+        assert_eq!(value("known"), "known");
+        assert_eq!(value("끄기"), "known");
+        assert_eq!(Config::default().session.show_created, "known");
     }
 
     #[test]

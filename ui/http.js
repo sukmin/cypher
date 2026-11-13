@@ -336,6 +336,8 @@ export function createHttp(item, host, saved = {}, onChange = () => {}) {
     title: () => `HTTP · ${current?.name?.replace(/\.http$/, '') || baseName(cwd)}`,
     /** 다시 시작할 때 되살릴 내용. */
     state: () => ({ file: current?.path || saved.file || null }),
+    /** 폴더의 요청 파일 목록을 다시 읽는다(같은 그룹의 Claude 세션이 이 폴더에 새 요청 파일을 만들었을 때). 열어 둔 파일과 고치던 내용은 그대로 둔다. */
+    reload: () => load(false).catch((err) => hint(String(err))),
     /** 앱이 꺼질 때: 고친 내용을 저장해 본다(끝까지 기다릴 수는 없다). */
     flush: () => { if (dirty()) save(true); },
     /** 닫기 전에: 손댄 내용을 저장한다. 저장하지 못했으면 버리고 닫을지 묻는다. 거짓이면 닫지 않는다. */

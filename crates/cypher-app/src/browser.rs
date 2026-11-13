@@ -430,6 +430,8 @@ fn run(target: &Target, name: &str, args: &Value) -> ToolResult {
 pub fn call(app: &AppHandle, session: Option<u32>, name: &str, args: &Value) -> ToolResult {
     let choosing = matches!(name, "browser_tabs" | "browser_select");
     if chrome_engine(app) {
+        // 이 엔진의 브라우저는 사이드바 항목이 아니지만, 부른 세션을 알 수 없거나 그룹에 들지 않은 세션에는 맡기지 않는다.
+        crate::mcp::ask_ui(app, "chrome_scope", json!({ "session": session }))?;
         if choosing {
             return Ok(text("브라우저 엔진이 chrome으로 설정되어 있어 브라우저는 하나뿐입니다(Cypher 전용 프로필의 Chrome)."));
         }
@@ -440,7 +442,8 @@ pub fn call(app: &AppHandle, session: Option<u32>, name: &str, args: &Value) -> 
         return run(&Target::Chrome, name, args);
     }
     if choosing {
-        let reply = crate::mcp::ask_ui(app, name, json!({ "session": session, "id": args["id"] }))?;
+        // 고를 브라우저의 번호는 `site`로 넘긴다(`id`는 화면에 묻는 요청의 번호로 쓰인다).
+        let reply = crate::mcp::ask_ui(app, name, json!({ "session": session, "site": args["id"] }))?;
         return Ok(text(reply["text"].as_str().unwrap_or("")));
     }
     // 어느 사이트 항목을 조작할지는 화면이 정한다. 이동하라는 요청이면, 그룹에 브라우저가 없을 때 새로 만든다.

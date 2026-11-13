@@ -12,6 +12,9 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
+/// 본체가 신호를 처리하고 연결을 닫기를 기다리는 시간. 본체가 멈춰 있어도 Claude Code를 오래 붙잡지 않는다.
+const ACK_WAIT: Duration = Duration::from_millis(1500);
+
 fn connect() -> Option<(TcpStream, String)> {
     let port = std::env::var("CYPHER_PORT").ok()?.parse::<u16>().ok()?;
     let token = std::env::var("CYPHER_TOKEN").ok()?;
@@ -28,7 +31,14 @@ fn forward_status() {
         return;
     }
     if let Some((mut stream, token)) = connect() {
-        let _ = write!(stream, "{token}\n{session}\n{input}");
+        if write!(stream, "{token}\n{session}\n{input}").is_ok() {
+            // 다 보냈다고 알리고, 본체가 처리한 뒤 연결을 닫을 때까지 잠깐 기다린다. 이렇게 해야
+            // (1) 본체가 이 프로세스가 살아 있는 동안 누가 보낸 것인지 확인할 수 있고,
+            // (2) 쓰기 직전 신호라면 본체가 "그 파일이 아직 없다"는 것을 Claude Code가 쓰기 전에 본다.
+            let _ = stream.shutdown(std::net::Shutdown::Write);
+            let _ = stream.set_read_timeout(Some(ACK_WAIT));
+            let _ = stream.read(&mut [0u8; 1]);
+        }
     }
     // 상태줄로 불렸을 때만(훅 신호가 아닐 때) 원래 상태줄을 이어서 실행한다.
     if !input.contains("\"hook_event_name\"") {

@@ -204,7 +204,8 @@ pub fn session_create(
         if let Some(bridge) = &state.bridge {
             // 이 폴더에서 원래 쓰였을 상태줄(HUD)이 있으면 전달 프로그램이 이어서 실행하게 알려 준다.
             let original = crate::claude::original_status_line(&cwd);
-            if let Some(settings) = crate::claude::write_settings(bridge, id, original.as_ref()) {
+            let watch_files = state.config.session.show_created != "off";
+            if let Some(settings) = crate::claude::write_settings(bridge, id, original.as_ref(), watch_files) {
                 args.push("--settings".into());
                 args.push(settings.to_string_lossy().into_owned());
                 env.push(("CYPHER_PORT".into(), state.status_port.to_string()));
