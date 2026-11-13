@@ -10,6 +10,8 @@ import { initImage, createImage } from './image.js';
 import { initDrop } from './drop.js';
 import { initMindmap, createMindmap } from './mindmap.js';
 import { initLook, showLook, setLook, currentLook } from './look.js';
+import { initPalette, showPalette } from './palette.js';
+import { initClosed, rememberClosed, reopenLast, showClosed, closedCount } from './closed.js';
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -35,6 +37,8 @@ const CONTEXT_DANGER = 90;      // 이 이상이면 빨간색으로 경고한다
 const COLORS = ['', '#e06c75', '#e5c07b', '#98c379', '#61afef', '#c678dd', '#56b6c2'];
 const SIDEBAR_WIDTH = 240;      // 사이드바 기본 너비
 const COMPOSER_HEIGHT = 110;    // 프롬프트 편집기 기본 높이
+const MAX_FOLDERS = 8;          // 기억해 둘 최근 폴더 수
+const MAX_PROMPTS = 50;         // 기억해 둘 보낸 프롬프트 수
 
 /**
  * 사이드바에 놓을 수 있는 항목의 종류. 터미널 세션(Claude·PowerShell 등 프로필)은 따로 다루고,
@@ -82,6 +86,14 @@ try { collapsed = new Set(JSON.parse(localStorage.getItem('cypher.collapsed') ||
 let storeDirs = {};            // 메모·브레인스토밍·이미지를 두는 폴더(같은 그룹의 Claude 세션에 경로를 알려 줄 때 쓴다)
 let groupList = [];            // 만들어 둔 그룹 이름(세션이 없어도 남는다)
 try { groupList = JSON.parse(localStorage.getItem('cypher.groups') || '[]'); } catch { /* 무시 */ }
+let recentFolders = [];        // 세션을 시작했던 폴더(최근 것이 앞)
+try { recentFolders = JSON.parse(localStorage.getItem('cypher.folders') || '[]'); } catch { /* 무시 */ }
+let promptLog = [];            // 프롬프트 편집기에서 보낸 글(최근 것이 뒤)
+try { promptLog = JSON.parse(localStorage.getItem('cypher.prompts') || '[]'); } catch { /* 무시 */ }
+if (!Array.isArray(recentFolders)) recentFolders = [];
+if (!Array.isArray(promptLog)) promptLog = [];
+let searchOptions = { caseSensitive: false, regex: false }; // 터미널 화면에서 찾기의 방식
+try { searchOptions = { ...searchOptions, ...JSON.parse(localStorage.getItem('cypher.search') || '{}') }; } catch { /* 무시 */ }
 
 // ───────────────────────── 시작 ─────────────────────────
 
@@ -153,6 +165,13 @@ async function init() {
     contextOfHead: (head) => ({ group: head.dataset.group || '', cwd: head.dataset.cwd || folder }),
     screenEmpty: () => !visible.length,
   });
+  initPalette({ make, openPopup, entries: paletteEntries });
+  initClosed({
+    invoke, make, openPopup, setStatus, notice, baseName,
+    revive: (record) => revive(record),
+    icon: (record) => (KINDS[record.kind]?.icon || '›'),
+    kindLabel: (record) => (KINDS[record.kind]?.label || config.profiles.find((p) => p.id === record.profile)?.label || '세션'),
+  });
   initSidebarGrip();
   initComposer();
   // 사이드바 아래에는 자주 쓰는 것만 둔다. 나머지는 창 상단 메뉴에 있다. 브라우저는 사이드바의 사이트 항목이다.
@@ -180,6 +199,7 @@ async function init() {
   listen('menu', ({ payload }) => runMenu(payload));
 
   $('pick').onclick = pickFolder;
+  $('recent').onclick = folderMenu;
   // 사이드바의 빈 곳(세션·버튼이 아닌 곳)을 오른쪽 클릭하면 할 수 있는 일을 메뉴로 보여 준다.
   $('sidebar').addEventListener('contextmenu', (ev) => {
     if (ev.target.closest('li, button')) return;
@@ -189,9 +209,16 @@ async function init() {
   $('search-prev').onclick = () => find(true);
   $('search-next').onclick = () => find(false);
   $('search-close').onclick = closeSearch;
+  $('search-case').onclick = () => setSearchOption('caseSensitive');
+  $('search-regex').onclick = () => setSearchOption('regex');
+  setSearchOption(); // 지난번에 켜 둔 방식을 단추에 표시한다.
+  // 글자를 치는 대로 찾는다(치는 동안에는 지금 찾은 자리에서 벗어나지 않는다).
+  $searchInput.addEventListener('input', () => find(false, true));
   $searchInput.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter') find(ev.shiftKey);
     else if (ev.key === 'Escape') closeSearch();
+    else if (ev.altKey && ev.key.toLowerCase() === 'c') { ev.preventDefault(); setSearchOption('caseSensitive'); }
+    else if (ev.altKey && ev.key.toLowerCase() === 'x') { ev.preventDefault(); setSearchOption('regex'); }
   });
 
   listen('session-exit', ({ payload }) => onExit(payload));
@@ -224,6 +251,8 @@ async function init() {
 /** 창 상단 메뉴(도구·설정·도움말)에서 고른 항목을 실행한다. 항목 번호는 앱 쪽 메뉴 정의와 맞춘다. */
 function runMenu(id) {
   const actions = {
+    palette: showPalette,
+    reopen: showClosed,
     snippets: showSnippets,
     broadcast: () => setBroadcast(!broadcast),
     memory: () => showMemory(),
@@ -251,6 +280,42 @@ function showFolder() {
   // 오른쪽 정렬 말줄임에서 글자 순서가 뒤집히지 않도록 방향 표시 문자를 붙인다.
   $folder.textContent = '‎' + folder;
   $folder.title = `새 세션이 시작될 폴더: ${folder}`;
+}
+
+/** 새 세션이 시작될 폴더를 바꾼다. */
+function useFolder(path) {
+  folder = path;
+  localStorage.setItem('cypher.folder', folder);
+  showFolder();
+  setStatus(`새 세션 폴더: ${folder}`);
+}
+
+/** 세션을 시작한 폴더를 최근 폴더 목록 맨 앞에 올린다. */
+function rememberFolder(path) {
+  recentFolders = [path, ...recentFolders.filter((other) => other.toLowerCase() !== path.toLowerCase())].slice(0, MAX_FOLDERS);
+  localStorage.setItem('cypher.folders', JSON.stringify(recentFolders));
+}
+
+/** 새 세션 폴더로 고를 만한 곳: 지금 보고 있는 항목의 폴더와 최근에 세션을 시작한 폴더(지금 폴더는 뺀다). */
+function folderChoices() {
+  const here = active && sessions.has(active.key) ? (active.project || active.startCwd) : '';
+  const seen = new Set([folder.toLowerCase()]);
+  const choices = [];
+  for (const [path, note] of [[here, '지금 항목의 폴더'], ...recentFolders.map((path) => [path, '최근 폴더'])]) {
+    if (!path || seen.has(path.toLowerCase())) continue;
+    seen.add(path.toLowerCase());
+    choices.push({ path, note });
+  }
+  return choices;
+}
+
+/** 폴더 줄의 ▾ 단추: 최근 폴더에서 골라 새 세션 폴더를 바꾼다. */
+function folderMenu(ev) {
+  showMenu(ev, [
+    { caption: `지금: ${folder}` },
+    ...folderChoices().map(({ path, note }) => ({ label: `${baseName(path)}  —  ${path}${note === '지금 항목의 폴더' ? '  (지금 항목)' : ''}`, action: () => useFolder(path) })),
+    { label: '다른 폴더 고르기…', action: pickFolder },
+  ]);
 }
 
 const quote = (p) => (p.includes(' ') ? `"${p}"` : p);
@@ -354,11 +419,15 @@ async function newSession(profileId, opts = {}) {
     pending: '', sending: false, queued: 0, paused: false,
     focusedAt: 0, shots: [],
     draft: opts.draft || '', // 프롬프트 편집기에 쓰던 글
+    workStart: 0, took: 0,   // 지금 요청을 시작한 시각(일하는 중이 아니면 0)과 지난 요청에 걸린 시간(ms)
   };
   sessions.set(s.key, s);
   ensureGroup(s.group);
+  if (!opts.restoring) rememberFolder(cwd);
   wirePane(s);
   wireTerminal(s);
+  // 찾기 결과의 개수와 지금 몇 번째인지를 찾기 줄에 보여 준다.
+  search.onDidChangeResults?.((result) => { if (s === active && !$search.hidden) showSearchCount(result); });
 
   if (opts.show === 'split' && visible.length < MAX_PANES) placeBeside(s);
   else if (opts.show !== 'hidden') placeInActive(s);
@@ -422,7 +491,7 @@ async function newItem(kind, opts = {}) {
     title: '', model: '', effort: '', context: null, cost: 0,
     usage: '', usageEl: null, agents: new Map(), waiting: '',
     lastOutput: -Infinity, busy: false, attention: false, exited: false,
-    shots: [], draft: '',
+    shots: [], draft: '', workStart: 0, took: 0,
   };
   // 제목(파일 이름, 메모 첫 줄)이 바뀌면 사이드바를 다시 그리고 상태를 적어 둔다.
   s.view = def.create(s, host, opts.saved || {}, () => { if (sessions.has(s.key)) { render(); saveState(); } });
@@ -691,7 +760,25 @@ function toggleShown(s) {
   }
 }
 
-async function closeSession(s) {
+/**
+ * 닫은 항목을 다시 열 수 있게 적어 둘 내용. 되살릴 것이 없으면(빈 메모, 빈 페이지, 시작하지 못한 세션) null.
+ * 닫기 전에 만들어야 한다(닫은 뒤에는 화면이 제목과 상태를 내놓지 못한다).
+ */
+function closedRecord(s) {
+  if (isTerm(s) && s.id == null) return null;
+  if (s.kind === 'memo' && !s.view.text().trim() && !s.view.state().path) return null;
+  if (s.kind === 'image' && s.view.empty()) return null;
+  if (s.kind === 'site' && !s.view.url()) return null;
+  try {
+    return { ...describe(s), label: label(s) };
+  } catch {
+    return null;
+  }
+}
+
+/** 항목을 닫는다. `forget`이면 닫은 항목 목록에 남기지 않는다(다시 시작하려고 닫을 때). */
+async function closeSession(s, { forget = false } = {}) {
+  const record = forget ? null : closedRecord(s);
   if (s.view) {
     // 메모·HTTP: 닫기 전에 저장할 것을 저장한다. 거짓이면 사용자가 닫기를 취소한 것이다.
     if (!(await s.view.close())) return;
@@ -701,6 +788,10 @@ async function closeSession(s) {
     s.term.dispose();
   }
   if (!sessions.has(s.key)) return; // 기다리는 사이 이미 닫혔다.
+  if (record) {
+    rememberClosed(record);
+    setStatus(`닫았습니다: ${record.label} · 다시 열기: Ctrl+Shift+R`);
+  }
   s.pane.remove();
   s.shots.forEach((shot) => URL.revokeObjectURL(shot.url));
   sessions.delete(s.key);
@@ -717,8 +808,29 @@ async function closeSession(s) {
   saveState();
 }
 
-function cycle(step) {
+/**
+ * 종료된 세션을 같은 자리에서 다시 시작한다. Claude 세션은 하던 대화를 이어 가고, 다른 터미널은 같은 폴더에서 새로 뜬다.
+ * 사이드바의 순서, 화면에서의 자리, 별칭·색·그룹은 그대로 둔다.
+ */
+async function restartSession(s) {
+  if (!isTerm(s) || !sessions.has(s.key)) return;
   const all = [...sessions.values()];
+  const after = all[all.indexOf(s) + 1];
+  const fresh = await revive(describe(s), { show: 'hidden' });
+  if (!fresh || !sessions.has(s.key)) return;
+  if (after && sessions.has(after.key)) placeInOrder(fresh, after, false);
+  const leaf = findLeaf(s);
+  if (leaf) leaf.s = fresh;
+  const wasActive = active === s;
+  await closeSession(s, { forget: true });
+  if (wasActive || leaf) activate(fresh); else render();
+}
+
+/** 사이드바에 보이는 차례대로의 항목(접어 둔 묶음 안의 것도 포함). */
+const inSidebarOrder = () => groupsInOrder().flatMap((group) => group.list);
+
+function cycle(step) {
+  const all = inSidebarOrder();
   if (all.length < 2 || !active) return;
   activate(all[(all.indexOf(active) + step + all.length) % all.length]);
 }
@@ -742,7 +854,8 @@ function onExit({ id, code }) {
   if (!s) return;
   s.exited = true;
   s.agents.clear();
-  s.term.write(`\r\n\x1b[90m[세션 종료${code == null ? '' : `: 코드 ${code}`}]\x1b[0m\r\n`);
+  s.workStart = 0;
+  s.term.write(`\r\n\x1b[90m[세션 종료${code == null ? '' : `: 코드 ${code}`} · 사이드바에서 오른쪽 클릭 → 다시 시작]\x1b[0m\r\n`);
   render();
   saveState();
 }
@@ -754,6 +867,13 @@ function onStatus({ id, model, effort, context, cwd, project, session, worktree,
   s.effort = effort || '';
   s.context = context;
   s.cost = cost || 0;
+  // 컨텍스트가 거의 찼을 때 한 번 알린다(/compact 등으로 줄었다가 다시 차면 또 알린다).
+  if (context != null && context >= CONTEXT_DANGER && !s.contextAlerted) {
+    s.contextAlerted = true;
+    if (config.notify.in_app) toast(s, label(s), `컨텍스트가 ${Math.round(context)}% 찼습니다. /compact 또는 새 세션을 고려하세요.`);
+  } else if (context != null && context < CONTEXT_WARN) {
+    s.contextAlerted = false;
+  }
   if (newLimits) { limits = newLimits; renderLimits(); }
   if (cwd) s.cwd = cwd; // 상대경로 링크의 기준 폴더도 따라간다.
   if (worktree) s.worktree = worktree;
@@ -779,7 +899,13 @@ function onHook({ id, event, kind, message, agent, agent_type: agentType, force 
     return render();
   }
   if (event !== 'UserPromptSubmit' && event !== 'Stop' && event !== 'Notification') return;
-  if (event === 'UserPromptSubmit') { s.waiting = ''; s.heldStop = false; return render(); }
+  if (event === 'UserPromptSubmit') {
+    s.waiting = '';
+    s.heldStop = false;
+    s.workStart = Date.now(); // 이 요청에 걸리는 시간을 잰다.
+    s.took = 0;
+    return render();
+  }
   if (event === 'Notification' && kind === 'idle_prompt') return; // 완료 때 이미 알렸다.
   // 서브에이전트가 아직 돌고 있을 때의 완료 신호는 "잠깐 멈춤"이다(끝나면 Claude가 이어서 답한다).
   // 이때는 끝났다고 알리지 않고, 서브에이전트가 모두 끝난 뒤의 완료 신호를 기다린다.
@@ -787,16 +913,24 @@ function onHook({ id, event, kind, message, agent, agent_type: agentType, force 
   if (event === 'Stop' && s.agents.size && !force) {
     s.heldStop = true;
     s.heldAt = performance.now();
+    s.heldEpoch = Date.now();
     s.waiting = '';
     return render();
   }
-  if (event === 'Stop') s.heldStop = false;
+  if (event === 'Stop') {
+    s.heldStop = false;
+    // 걸린 시간: 요청을 보낸 때부터 지금까지. 미뤄 둔 완료를 뒤늦게 알리는 경우에는 그 완료 신호가 온 때까지.
+    if (s.workStart) s.took = (force && s.heldEpoch ? s.heldEpoch : Date.now()) - s.workStart;
+    s.workStart = 0;
+  }
   if (force) s.agents.clear(); // 한참 조용했으니 남아 있던 서브에이전트 표시는 끝난 것으로 본다.
   s.waiting = event === 'Stop' ? 'done' : 'approval';
   if (event === 'Stop') diffRefreshFor(s);
   render();
   const title = label(s);
-  const body = event === 'Stop' ? '요청한 작업이 끝났습니다.' : (message || '입력을 기다리고 있습니다.');
+  const body = event === 'Stop'
+    ? `요청한 작업이 끝났습니다.${s.took >= 1000 ? ` (${duration(s.took)} 걸림)` : ''}`
+    : (message || '입력을 기다리고 있습니다.');
   const focused = document.hasFocus();
   if (!focused && config.notify.system) invoke('notify', { title, body }); // Windows 알림 + 작업 표시줄 깜빡임
   if (!focused || s !== active) {
@@ -836,6 +970,8 @@ function refreshActivity() {
     if (s.heldStop && !busy && !s.exited && !s.waiting && now - Math.max(s.lastOutput, s.heldAt || 0) > HELD_STOP_MS) {
       onHook({ id: s.id, event: 'Stop', force: true });
     }
+    // 일하는 중인 세션의 경과 시간은 목록을 다시 그리지 않고 그 칸만 고친다.
+    if (s.workStart && s.timeEl?.isConnected) s.timeEl.textContent = clock(Date.now() - s.workStart);
     if (busy === s.busy) continue;
     if (!busy && s !== active) s.attention = true;
     s.busy = busy;
@@ -846,13 +982,30 @@ function refreshActivity() {
 
 const WAITING_TEXT = { approval: '승인·입력 대기', done: '완료 · 다음 지시 대기' };
 
+/** 경과 시간을 시계 모양으로: 3:24, 1:02:07. */
+function clock(ms) {
+  const total = Math.max(0, Math.floor(ms / 1000));
+  const two = (n) => String(n).padStart(2, '0');
+  const hours = Math.floor(total / 3600), minutes = Math.floor((total % 3600) / 60), seconds = total % 60;
+  return hours ? `${hours}:${two(minutes)}:${two(seconds)}` : `${minutes}:${two(seconds)}`;
+}
+
+/** 걸린 시간을 말로: 42초, 5분 12초, 1시간 3분. */
+function duration(ms) {
+  const total = Math.max(0, Math.round(ms / 1000));
+  const hours = Math.floor(total / 3600), minutes = Math.floor((total % 3600) / 60), seconds = total % 60;
+  if (hours) return `${hours}시간${minutes ? ` ${minutes}분` : ''}`;
+  if (minutes) return `${minutes}분${seconds ? ` ${seconds}초` : ''}`;
+  return `${seconds}초`;
+}
+
 /** 사이드바의 세션 한 줄. */
 function sessionItem(s) {
   const li = make('li', [
     s === active && 'active', visible.includes(s) && 'shown', s.waiting,
     s.exited ? 'exited' : s.busy ? 'busy' : s.attention && 'attention',
   ].filter(Boolean).join(' '));
-  li.title = '화면으로 끌어다 놓기: 놓은 위치대로 좌우·상하 분할 · 묶음 머리로 끌기: 그 묶음으로 옮기기 · 두 번 누르기: 별칭 · 오른쪽 클릭: 메뉴';
+  li.title = '화면으로 끌어다 놓기: 놓은 위치대로 좌우·상하 분할 · 다른 줄 위·아래로 끌기: 순서 바꾸기 · 묶음 머리로 끌기: 그 묶음으로 옮기기 · 두 번 누르기: 별칭 · 오른쪽 클릭: 메뉴';
   if (s.color) li.style.borderLeftColor = s.color;
   li.onclick = (ev) => {
     if (ev.target.closest('input')) return; // 별칭을 고치는 중
@@ -907,8 +1060,18 @@ function sessionItem(s) {
     agents.append(make('i', 'spin'), make('span', '', `서브에이전트 ${s.agents.size}개 실행 중${agentKinds(s) ? ` · ${agentKinds(s)}` : ''}`));
     agents.title = agentSummary(s);
   }
-  const sub = make('span', 'sub', s.exited ? '종료됨'
-    : WAITING_TEXT[s.waiting] || (s.heldStop && s.agents.size ? '서브에이전트가 끝나기를 기다리는 중' : s.title));
+  const sub = make('span', 'sub');
+  // 요청을 처리하는 중이면 경과 시간을 앞에 보여 준다(승인을 기다리는 동안에는 대기 표시가 먼저다).
+  s.timeEl = null;
+  if (s.workStart && !s.exited && !s.waiting) {
+    s.timeEl = make('b', 'elapsed', clock(Date.now() - s.workStart));
+    s.timeEl.title = '이 요청을 처리한 지 지난 시간';
+    sub.append(s.timeEl);
+  }
+  const subText = s.exited ? '종료됨 (오른쪽 클릭: 다시 시작)'
+    : s.waiting === 'done' && s.took >= 1000 ? `완료 · ${duration(s.took)} 걸림 · 다음 지시 대기`
+    : WAITING_TEXT[s.waiting] || (s.heldStop && s.agents.size ? '서브에이전트가 끝나기를 기다리는 중' : s.title);
+  if (subText) sub.append(subText);
   // 사용량은 3초마다 바뀌므로 목록을 다시 그리지 않고 이 칸만 고친다.
   s.usageEl = make('span', 'usage', s.exited ? '' : s.usage);
   li.append(dot, name, buttons, agents, badge, sub, s.usageEl);
@@ -1092,9 +1255,12 @@ document.addEventListener('mousemove', (ev) => {
   }
   drag.ghost.style.left = `${ev.clientX + 12}px`;
   drag.ghost.style.top = `${ev.clientY + 8}px`;
-  for (const head of $list.querySelectorAll('li.group.drop')) head.classList.remove('drop');
+  for (const row of $list.querySelectorAll('li.drop, li.before, li.after')) row.classList.remove('drop', 'before', 'after');
   const point = document.elementFromPoint(ev.clientX, ev.clientY);
   point?.closest?.('li.group[data-drop]')?.classList.add('drop');
+  // 다른 항목의 줄 위에서는 놓으면 끼어들 자리(그 줄의 위나 아래)를 선으로 보여 준다.
+  const over = rowUnder(point, ev.clientY);
+  if (over && over.target !== drag.s) over.row.classList.add(over.after ? 'after' : 'before');
   // 터미널 화면 위에서는 놓으면 창이 어떻게 나뉘는지 미리 보여 준다.
   showDropHint(paneZoneAt(ev.clientX, ev.clientY));
 });
@@ -1115,6 +1281,17 @@ document.addEventListener('mouseup', (ev) => {
     else moveToGroup([s], head.dataset.drop === 'logical' ? head.dataset.name : '');
     return;
   }
+  // 다른 항목의 줄에 놓음: 그 줄의 위나 아래로 순서를 옮긴다. 다른 그룹의 줄이면 그 그룹으로도 옮긴다.
+  const over = rowUnder(point, ev.clientY);
+  if (over) {
+    if (over.target !== s) {
+      if (over.target.group) ensureGroup(over.target.group);
+      s.group = over.target.group;
+      placeInOrder(s, over.target, over.after);
+      saveState();
+    }
+    return render();
+  }
   // 터미널 화면에 놓음: 놓은 위치에 따라 그 창을 나누거나 그 자리에 연다.
   const hit = paneZoneAt(ev.clientX, ev.clientY);
   if (hit) dropOnPane(s, hit.target, hit.zone);
@@ -1122,27 +1299,53 @@ document.addEventListener('mouseup', (ev) => {
   render();
 });
 
-function render() {
-  // 끄는 중에 목록을 다시 그리면 놓을 자리가 사라지므로 미뤄 둔다.
-  if (drag?.active && $list.querySelector('li.group.new')) return;
-  // 별칭을 고치는 중에도 입력칸이 사라지지 않게 미룬다(끝나면 다시 그린다).
-  if (renaming != null && $list.querySelector('input.rename')) return;
+/** 그 자리(point)에 있는 사이드바의 항목 줄과, 세로 위치로 본 끼어들 자리(줄의 아래쪽 절반이면 뒤). */
+function rowUnder(point, y) {
+  const row = point?.closest?.('#sessions li[data-key]');
+  const target = row && sessions.get(Number(row.dataset.key));
+  if (!target) return null;
+  const rect = row.getBoundingClientRect();
+  return { row, target, after: y > rect.top + rect.height / 2 };
+}
 
+/** 항목 s를 사이드바 순서에서 target의 바로 앞(after이면 바로 뒤)으로 옮긴다. 이 순서는 다시 시작해도 유지된다. */
+function placeInOrder(s, target, after) {
+  const order = [...sessions.values()].filter((other) => other !== s);
+  const at = order.indexOf(target);
+  if (at < 0) return;
+  order.splice(at + (after ? 1 : 0), 0, s);
+  sessions.clear();
+  for (const item of order) sessions.set(item.key, item);
+}
+
+/**
+ * 사이드바에 보이는 차례대로의 묶음들: 만들어 둔 그룹이 먼저(비어 있어도), 그 뒤로 폴더 묶음이 처음 나온 순서대로.
+ * `waitingOnly`이면 대기 중인 세션만 담고 빈 그룹은 뺀다.
+ */
+function groupsInOrder({ waitingOnly = false } = {}) {
   const groups = new Map();
-  // 만들어 둔 그룹은 비어 있어도 위쪽에 보여 준다(대기만 보기에서는 뺀다).
-  if (!filterWaiting) {
+  if (!waitingOnly) {
     for (const name of groupList) groups.set(`g:${name}`, { key: `g:${name}`, logical: true, name, hint: `그룹: ${name}`, list: [] });
   }
   for (const s of sessions.values()) {
-    if (filterWaiting && !s.waiting) continue;
+    if (waitingOnly && !s.waiting) continue;
     const key = groupKey(s);
     if (!groups.has(key)) {
       groups.set(key, { key, logical: !!s.group, name: s.group || baseName(s.startCwd), hint: s.group ? `그룹: ${s.group}` : s.startCwd, list: [] });
     }
     groups.get(key).list.push(s);
   }
+  return [...groups.values()];
+}
+
+function render() {
+  // 끄는 중에 목록을 다시 그리면 놓을 자리가 사라지므로 미뤄 둔다.
+  if (drag?.active && $list.querySelector('li.group.new')) return;
+  // 별칭을 고치는 중에도 입력칸이 사라지지 않게 미룬다(끝나면 다시 그린다).
+  if (renaming != null && $list.querySelector('input.rename')) return;
+
   const rows = [];
-  for (const group of groups.values()) {
+  for (const group of groupsInOrder({ waitingOnly: filterWaiting })) {
     const folded = collapsed.has(group.key);
     const head = make('li', [
       'group', group.logical && 'logical', group.list.some((s) => s.attention || s.waiting) && 'attention',
@@ -1292,6 +1495,8 @@ function sidebarMenu(ev) {
   for (const [kind, def] of Object.entries(KINDS)) items.push({ label: `새 ${def.label}`, action: () => createKind(kind) });
   items.push({ label: '새 그룹 만들기…', action: newGroup });
   items.push({ label: '새 세션 폴더 바꾸기…', action: pickFolder });
+  items.push({ label: '빠른 이동·명령 찾기…  (Ctrl+Shift+K)', action: showPalette });
+  if (closedCount()) items.push({ label: '닫은 항목 다시 열기…  (Ctrl+Shift+R)', action: showClosed });
   if (visible.length > 1) {
     items.push({ label: '분할 풀기 (지금 창만 보기)', action: () => active && showOnly(active) });
   }
@@ -1316,7 +1521,52 @@ function sidebarMenu(ev) {
 
 async function pickFolder() {
   const picked = await invoke('pick_folder', { start: folder });
-  if (picked) { folder = picked; localStorage.setItem('cypher.folder', folder); showFolder(); }
+  if (picked) useFolder(picked);
+}
+
+/**
+ * 빠른 이동 창에 올릴 것: 사이드바의 항목(최근에 본 순서, 지금 보고 있는 것은 맨 뒤)과 앱의 명령.
+ * 아무것도 치지 않고 Enter를 누르면 바로 전에 보던 항목으로 간다.
+ */
+function paletteEntries() {
+  const items = [...sessions.values()]
+    .sort((a, b) => (a === active) - (b === active) || (b.usedAt || 0) - (a.usedAt || 0))
+    .map((s) => {
+      const state = !isTerm(s) ? '' : s.exited ? '종료됨' : WAITING_TEXT[s.waiting] || (s.busy || s.workStart ? '작업 중' : '');
+      return {
+        icon: isTerm(s) ? '›' : KINDS[s.kind].icon,
+        title: label(s),
+        note: [s.group ? `◆ ${s.group}` : baseName(s.startCwd), s.name ? baseLabel(s) : '', state, s === active ? '지금 보는 항목' : ''].filter(Boolean).join(' · '),
+        keywords: [s.cwd, s.title, isTerm(s) ? '세션 터미널' : KINDS[s.kind].label, s.model].filter(Boolean).join(' '),
+        tone: s.waiting === 'approval' ? 'alert' : s.waiting === 'done' ? 'done' : '',
+        action: () => activate(s),
+      };
+    });
+  const command = (title, action, note = '명령') => ({ icon: '⌘', title, note, action });
+  const commands = [
+    ...config.profiles.map((p) => command(`새 ${p.label} 세션`, () => newSession(p.id), `명령 · 폴더: ${folder}`)),
+    ...(config.profiles.some((p) => p.id === 'claude') ? [command('새 워크트리 세션…', () => newWorktree('replace'))] : []),
+    ...Object.entries(KINDS).map(([kind, def]) => command(`새 ${def.label}`, () => createKind(kind))),
+    command('새 그룹 만들기…', newGroup),
+    command('닫은 항목 다시 열기…', showClosed, '명령 · Ctrl+Shift+R: 가장 나중에 닫은 것'),
+    command('다음 대기 세션으로', nextWaiting, '명령 · Ctrl+Shift+N'),
+    command(filterWaiting ? '모든 세션 보기' : '대기 중인 세션만 보기', () => { filterWaiting = !filterWaiting; render(); }),
+    command('변경 내용 옆 창 열기/닫기', () => toggleDiff(), '명령 · Ctrl+Shift+G'),
+    command('화면에서 찾기', openSearch, '명령 · Ctrl+Shift+F'),
+    command('자주 쓰는 지시', showSnippets, '명령 · Ctrl+Shift+P'),
+    command(broadcast ? '동시 입력 끄기' : '동시 입력 켜기', () => setBroadcast(!broadcast), '명령 · Ctrl+Shift+B'),
+    command('프롬프트 편집기로 가기', focusComposer, '명령 · Ctrl+Shift+E'),
+    ...(visible.length > 1 && active ? [command('분할 풀기 (지금 창만 보기)', () => showOnly(active))] : []),
+    command('기억 내보내기·가져오기', () => showMemory()),
+    command('모양: 테마·글꼴·글자 크기', showLook, '설정'),
+    command('Cypher 설정 파일 열기', () => runMenu('settings'), '설정'),
+    command('Claude 공통 설정 열기 (settings.json)', () => runMenu('claude-settings'), '설정'),
+    command('Claude 공통 지침 열기 (CLAUDE.md)', () => runMenu('claude-memory'), '설정'),
+    command('단축키 보기', showHelp, '도움말 · F1'),
+    command('새 세션 폴더 고르기…', pickFolder, `폴더 · 지금: ${folder}`),
+    ...folderChoices().map(({ path, note }) => command(`새 세션 폴더를 ${baseName(path)}(으)로`, () => useFolder(path), `${note} · ${path}`)),
+  ];
+  return [...items, ...commands];
 }
 
 /** 창 아래에 5시간·주간 사용 한도를 항상 보여 준다. */
@@ -1386,12 +1636,27 @@ function sessionMenu(s, ev) {
       ? { label: '화면에서 숨기기', action: () => toggleShown(s) }
       : { label: '화면에 나눠 보기', action: () => toggleShown(s) },
     ...(term ? [
+      ...(s.exited ? [{
+        label: s.profile.claude && s.resumable && s.claudeSession ? '다시 시작 (대화 이어 가기)' : '다시 시작 (같은 폴더에서)',
+        action: () => restartSession(s),
+      }] : []),
+      {
+        label: `같은 폴더에 새 ${s.profile.label} 세션`,
+        action: () => newSession(s.profile.id, { ...besideOf(s), show: visible.includes(s) ? 'split' : 'replace' }),
+      },
       { label: '변경 내용 보기', action: () => { activate(s); toggleDiff(true); } },
       { label: '출력 저장…', action: () => exportText(s) },
       { label: '기억 내보내기·가져오기', action: () => showMemory(s) },
     ] : []),
+    { label: '폴더를 탐색기에서 열기', action: () => openFolder(s) },
+    { label: '폴더 경로 복사', action: () => invoke('clipboard_write', { text: s.cwd }).then(() => setStatus(`복사했습니다: ${s.cwd}`)).catch((err) => setStatus(String(err))) },
     { label: term ? '세션 닫기' : `${KINDS[s.kind].label} 닫기`, action: () => closeSession(s) },
   ]);
+}
+
+/** 항목의 폴더를 탐색기에서 연다. */
+function openFolder(s) {
+  invoke('link_open', { target: s.cwd, cwd: s.cwd, openFile: false, line: null, col: null }).catch((err) => setStatus(String(err)));
 }
 
 // ───────────────────────── 브라우저(사이트 항목)와 Claude 세션 ─────────────────────────
@@ -1671,7 +1936,7 @@ function imageToClaude(item, path, ev) {
 
 /** 대기 중인 다음 세션으로 간다. 승인 대기가 있으면 그쪽을 먼저 돈다. */
 function nextWaiting() {
-  const all = [...sessions.values()];
+  const all = inSidebarOrder();
   const approvals = all.filter((s) => s.waiting === 'approval');
   const pool = approvals.length ? approvals : all.filter((s) => s.waiting);
   if (!pool.length) return setStatus('대기 중인 세션이 없습니다.');
@@ -1748,11 +2013,14 @@ function initComposer() {
   $('composer-enter').checked = !!localStorage.getItem('cypher.composer.enter');
   $('composer-enter').onchange = (ev) => localStorage.setItem('cypher.composer.enter', ev.target.checked ? '1' : '');
   $('composer-send').onclick = () => sendPrompt();
+  $('composer-history').onclick = promptMenu;
   $text.addEventListener('input', () => {
+    if (!recalling) promptAt = -1; // 직접 고치기 시작하면 기록을 넘기던 자리를 잊는다.
     if (composerFor) { composerFor.draft = $text.value; saveState(); }
   });
   $text.addEventListener('keydown', (ev) => {
     if (ev.ctrlKey && !ev.shiftKey && ev.key === 'Enter') { ev.preventDefault(); sendPrompt(); }
+    else if (ev.altKey && !ev.ctrlKey && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown')) { ev.preventDefault(); recallPrompt(ev.key === 'ArrowUp' ? 1 : -1); }
     else if (ev.key === 'Escape') focusItem(composerFor);
   });
   // 위쪽 손잡이를 끌어 높이를 바꾼다.
@@ -1781,6 +2049,7 @@ function syncComposer() {
   const $text = $('composer-text');
   if (composerFor !== target) {
     if (composerFor && sessions.has(composerFor.key)) composerFor.draft = $text.value;
+    promptAt = -1;
     composerFor = target;
     $text.value = target?.draft || '';
   }
@@ -1800,6 +2069,54 @@ function focusComposer() {
   $('composer-text').focus();
 }
 
+// 보낸 프롬프트 기록: 편집기에서 보낸 글을 기억해 두고 Alt+↑/↓나 [기록] 단추로 다시 불러온다(세션과 무관하게 함께 쓴다).
+
+let promptAt = -1;      // 기록을 넘겨 보는 자리(0이 가장 최근). -1이면 쓰던 글을 보고 있다.
+let promptDraft = '';   // 기록을 넘기기 전에 쓰던 글
+let recalling = false;  // 기록의 글을 편집기에 넣는 중(이때의 입력 사건은 사용자가 친 것이 아니다)
+
+function rememberPrompt(text) {
+  promptLog = [...promptLog.filter((old) => old !== text), text].slice(-MAX_PROMPTS);
+  try { localStorage.setItem('cypher.prompts', JSON.stringify(promptLog)); } catch { /* 저장 공간 문제는 무시 */ }
+}
+
+/** 편집기의 글을 통째로 바꾼다. 되돌리기(Ctrl+Z)로 앞의 글을 되살릴 수 있게 편집 명령으로 넣는다. */
+function setComposerText(text) {
+  const $text = $('composer-text');
+  recalling = true;
+  try {
+    $text.focus();
+    $text.select();
+    if (text) document.execCommand('insertText', false, text); else document.execCommand('delete');
+    if ($text.value !== text) $text.value = text; // 편집 명령이 듣지 않는 경우
+  } finally {
+    recalling = false;
+  }
+  if (composerFor) { composerFor.draft = $text.value; saveState(); }
+}
+
+/** 보낸 프롬프트 기록을 넘겨 본다. step 1: 더 예전 것, -1: 더 최근 것(끝까지 오면 쓰던 글로 돌아온다). */
+function recallPrompt(step) {
+  if (!promptLog.length) return setStatus('보낸 프롬프트 기록이 없습니다.');
+  const next = Math.min(promptLog.length - 1, Math.max(-1, promptAt + step));
+  if (next === promptAt) return;
+  if (promptAt === -1) promptDraft = $('composer-text').value;
+  promptAt = next;
+  setComposerText(next === -1 ? promptDraft : promptLog[promptLog.length - 1 - next]);
+  setStatus(next === -1 ? '쓰던 글로 돌아왔습니다.' : `보낸 프롬프트 ${next + 1}/${promptLog.length} (Alt+↑: 더 예전 것 · Alt+↓: 더 최근 것)`);
+}
+
+/** [기록] 단추: 최근에 보낸 프롬프트를 골라 편집기에 넣는다. */
+function promptMenu(ev) {
+  if (!promptLog.length) return setStatus('보낸 프롬프트 기록이 없습니다. 편집기에서 보낸 글이 여기에 쌓입니다.');
+  const brief = (text) => { const line = text.trim().split('\n')[0]; return line.length > 60 ? `${line.slice(0, 60)}…` : line; };
+  showMenu(ev, [
+    { caption: '최근에 보낸 프롬프트 (누르면 편집기에 넣습니다 · Alt+↑/↓로도 넘깁니다)' },
+    ...promptLog.slice(-15).reverse().map((text) => ({ label: brief(text) + (text.includes('\n') ? '  ⏎' : ''), action: () => { promptAt = -1; setComposerText(text); } })),
+    { label: '기록 지우기', action: () => { promptLog = []; localStorage.removeItem('cypher.prompts'); promptAt = -1; setStatus('보낸 프롬프트 기록을 지웠습니다.'); } },
+  ]);
+}
+
 /**
  * 프롬프트 편집기에 쓴 글을 지금 보고 있는 세션의 입력창에 넣는다.
  * "바로 전송"이 켜져 있으면 Enter까지 눌러 보낸다. 넣은 뒤 편집기는 비운다(Ctrl+Z로 되살릴 수 있다).
@@ -1810,6 +2127,8 @@ function sendPrompt() {
   if (!s || !text) return;
   if (s.exited) return setStatus('이 세션은 종료됐습니다. 쓰던 글은 편집기에 그대로 있으니 복사해서 다른 세션에 쓰세요.');
   s.term.paste(text); // 여러 줄도 한 번의 붙여넣기로 들어간다.
+  rememberPrompt(text);
+  promptAt = -1;
   if ($('composer-enter').checked) setTimeout(() => send(s, '\r'), 200);
   if (s.waiting) s.waiting = '';
   $text.focus();
@@ -1837,19 +2156,7 @@ function writeState() {
   if (composerFor && sessions.has(composerFor.key)) composerFor.draft = $('composer-text').value;
   const live = [...sessions.values()].filter((s) => (isTerm(s) ? !s.exited && s.id != null : !!s.view));
   const state = {
-    sessions: live.map((s) => ({
-      kind: s.kind,
-      cwd: s.project || s.startCwd,
-      shown: visible.includes(s),
-      name: s.name,
-      group: s.group,
-      color: s.color,
-      ...(isTerm(s) ? {
-        profile: s.profile.id,
-        resume: s.resumable && s.claudeSession ? s.claudeSession : null,
-        draft: s.draft || undefined,
-      } : { saved: s.view.state() }),
-    })),
+    sessions: live.map((s) => ({ ...describe(s), shown: visible.includes(s) })),
     active: live.indexOf(active),
     // 화면 분할 모양. 잎은 세션의 순번({ i }), 가지는 { dir, a, b }.
     layout: (function pack(node) {
@@ -1858,6 +2165,35 @@ function writeState() {
     })(tree),
   };
   try { localStorage.setItem('cypher.state', JSON.stringify(state)); } catch { /* 저장 공간 문제는 무시 */ }
+}
+
+/**
+ * 항목을 다시 만들 수 있게 적어 둘 내용: 종류, 폴더, 별칭·그룹·색, 그리고 세션이면 프로필과 이어갈 대화 번호,
+ * 그 밖의 항목이면 그 화면이 내놓은 상태. 배치 기억(writeState)과 닫은 항목 목록이 함께 쓴다.
+ */
+function describe(s) {
+  return {
+    kind: s.kind,
+    cwd: s.project || s.startCwd,
+    name: s.name,
+    group: s.group,
+    color: s.color,
+    ...(isTerm(s) ? {
+      profile: s.profile.id,
+      resume: s.resumable && s.claudeSession ? s.claudeSession : null,
+      draft: s.draft || undefined,
+    } : { saved: s.view.state() }),
+  };
+}
+
+/** describe()로 적어 둔 내용으로 항목을 다시 만든다. `opts`는 newSession·newItem에 그대로 더해진다(show, restoring 등). */
+function revive(item, opts = {}) {
+  const common = { cwd: item.cwd, name: item.name, color: item.color, group: item.group || '', ...opts };
+  // 종류 표시가 없는 예전 기록은 터미널 세션이다.
+  const term = !item.kind || item.kind === 'term';
+  return term
+    ? newSession(item.profile, { ...common, resume: item.resume, draft: item.draft })
+    : newItem(item.kind, { ...common, saved: item.saved });
 }
 
 /** 저장해 둔 분할 모양을 되살린다. 없어진 세션의 자리는 짝이 차지한다. */
@@ -1884,14 +2220,8 @@ async function restore({ docsOnly = false } = {}) {
   restoring = true;
   try {
     for (const item of saved.sessions) {
-      const common = {
-        cwd: item.cwd, show: 'hidden', restoring: true, name: item.name, color: item.color, group: item.group || '',
-      };
-      // 종류 표시가 없는 예전 기록은 터미널 세션이다.
       const term = !item.kind || item.kind === 'term';
-      restored.push(term
-        ? (docsOnly ? null : await newSession(item.profile, { ...common, resume: item.resume, draft: item.draft }))
-        : await newItem(item.kind, { ...common, saved: item.saved }));
+      restored.push(term && docsOnly ? null : await revive(item, { show: 'hidden', restoring: true }));
     }
   } finally {
     restoring = false;
@@ -2066,19 +2396,58 @@ function openSearch() {
   $search.hidden = false;
   $searchInput.focus();
   $searchInput.select();
+  if ($searchInput.value) find(false, true); // 지난번에 찾던 글이 남아 있으면 개수를 바로 보여 준다.
 }
 
 function closeSearch() {
   $search.hidden = true;
   active?.search?.clearDecorations();
+  $('search-count').textContent = '';
   focusItem(active);
 }
 
-function find(backward) {
+/** 찾기 방식(대/소문자 구분, 정규식)을 켜거나 끈다. `key` 없이 부르면 단추 표시만 맞춘다. */
+function setSearchOption(key) {
+  if (key) {
+    searchOptions[key] = !searchOptions[key];
+    localStorage.setItem('cypher.search', JSON.stringify(searchOptions));
+  }
+  $('search-case').classList.toggle('on', !!searchOptions.caseSensitive);
+  $('search-regex').classList.toggle('on', !!searchOptions.regex);
+  if (key && !$search.hidden) { find(false, true); $searchInput.focus(); }
+}
+
+/** 찾은 개수와 지금 몇 번째인지: "3/15". 너무 많아 다 세지 못했으면 "많음". */
+function showSearchCount({ resultIndex, resultCount } = {}) {
+  const $count = $('search-count');
+  if (!$searchInput.value) $count.textContent = '';
+  else if (!resultCount) $count.textContent = '없음';
+  else $count.textContent = resultIndex >= 0 ? `${resultIndex + 1}/${resultCount}` : `${resultCount}개`;
+  $count.classList.toggle('none', !!$searchInput.value && !resultCount);
+}
+
+/** 터미널 화면에서 찾는다. `typing`이면(글자를 치는 중) 지금 찾은 자리부터 다시 맞춰 본다(다음 것으로 넘어가지 않는다). */
+function find(backward, typing = false) {
   const query = $searchInput.value;
-  if (!query || !isTerm(active)) return;
-  const options = { decorations: currentLook().searchColors };
+  if (!isTerm(active)) return;
+  if (!query) {
+    active.search.clearDecorations();
+    showSearchCount();
+    return setStatus('');
+  }
+  const options = {
+    decorations: currentLook().searchColors, caseSensitive: !!searchOptions.caseSensitive, regex: !!searchOptions.regex, incremental: typing,
+  };
+  if (options.regex) {
+    // 쓰다 만 정규식("(" 등)은 찾기에 넘기지 않는다(넘기면 출력이 올 때마다 오류가 난다).
+    try { new RegExp(query); } catch {
+      active.search.clearDecorations();
+      showSearchCount({ resultCount: 0 });
+      return setStatus(`정규식이 올바르지 않습니다: ${query}`);
+    }
+  }
   const found = backward ? active.search.findPrevious(query, options) : active.search.findNext(query, options);
+  if (!found) showSearchCount({ resultCount: 0 });
   setStatus(found ? '' : `찾는 내용이 없습니다: ${query}`);
 }
 
@@ -2180,6 +2549,8 @@ window.addEventListener('keydown', (ev) => {
   else if (combo && key === 'h') newItem('http');
   else if (combo && key === 'm') newItem('memo');
   else if (combo && key === 'e') focusComposer();
+  else if (combo && key === 'k') showPalette();
+  else if (combo && key === 'r') reopenLast();
   else if (key === 'f1') showHelp();
   else if (combo && key === 'arrowright') focusPane(1);
   else if (combo && key === 'arrowleft') focusPane(-1);
@@ -2198,6 +2569,7 @@ window.cypher = {
   sessions, newSession, newItem, activate, closeSession, toggleShown, send, setBroadcast, provideLinks, paste, moveToGroup, runMenu, showOnly,
   onHook, onStatus, nextWaiting, writeState, rename, sendPrompt, text: sessionText, addImages, onCaptured, captureBrowser,
   setLook, currentLook, mcpAction, handoffSite, onMcpRequest,
+  showPalette, paletteEntries, showClosed, reopenLast, restartSession, placeInOrder, inSidebarOrder, cycle, find, recallPrompt, useFolder, folderChoices,
   get visible() { return visible; },
   get active() { return active; },
 };

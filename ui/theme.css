@@ -103,7 +103,12 @@
 :root[data-theme="win32"] button.run,
 :root[data-theme="win32"] .shot button,
 :root[data-theme="win32"] #menu > button,
+:root[data-theme="win32"] .palette-row,
 :root[data-theme="win32"] .memo-status button.stat { border: none; box-shadow: none; }
+:root[data-theme="win32"] .palette-row.chosen,
+:root[data-theme="win32"] .palette-row.chosen .palette-icon,
+:root[data-theme="win32"] .palette-row.chosen .palette-note,
+:root[data-theme="win32"] #sessions li.active .elapsed { color: #ffffff; }
 /* 고른 줄과 묶음 머리는 남색 바탕에 흰 글자(창 제목 줄처럼) */
 :root[data-theme="win32"] #sessions li.active,
 :root[data-theme="win32"] #sessions li.active .name,

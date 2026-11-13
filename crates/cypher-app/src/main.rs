@@ -4,6 +4,7 @@ mod browser;
 mod chrome;
 mod claude;
 mod clipboard;
+mod closed;
 mod commands;
 mod drops;
 mod engine;
@@ -176,6 +177,9 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
     use tauri::menu::{MenuBuilder, MenuItemBuilder, SubmenuBuilder};
     let item = |id: &str, text: &str| MenuItemBuilder::with_id(id, text).build(app);
     let tools = SubmenuBuilder::new(app, "도구")
+        .item(&item("palette", "빠른 이동·명령 찾기\tCtrl+Shift+K")?)
+        .item(&item("reopen", "닫은 항목 다시 열기…\tCtrl+Shift+R")?)
+        .separator()
         .item(&item("snippets", "자주 쓰는 지시\tCtrl+Shift+P")?)
         .item(&item("broadcast", "동시 입력 켜기/끄기\tCtrl+Shift+B")?)
         .item(&item("memory", "기억 내보내기·가져오기")?)
@@ -305,6 +309,7 @@ fn main() {
             mindmap::mindmap_export,
             mindmap::mindmap_pdf,
             commands::store_dirs,
+            closed::closed_restore,
             commands::ui_zoom,
             engine::browser_engine_info,
             engine::browser_latest_version,

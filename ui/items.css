@@ -7,8 +7,9 @@
 
 /* 이름 칸: 별칭(또는 원래 이름) + 흐린 원래 이름 */
 #sessions li .name { display: flex; align-items: baseline; gap: 6px; min-width: 0; }
-.name .alias { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.name .origin { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--idle); }
+/* 자리가 모자라면 흐린 원래 이름부터 줄인다(별칭이 끝까지 보이게). */
+.name .alias { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.name .origin { flex: 0 1000 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; font-size: 11px; color: var(--idle); }
 input.rename { width: 100%; min-width: 0; height: 20px; padding: 0 5px; font-size: 13px; border-color: var(--accent); }
 
 /* 터미널이 아닌 항목은 점 대신 종류 기호 */
@@ -80,10 +81,9 @@ li.active .dot.kind { color: var(--accent); }
 #composer-send:hover { filter: brightness(1.1); }
 #composer-enter-label { display: flex; align-items: center; gap: 4px; font-size: 11px; color: var(--dim); cursor: pointer; }
 #composer-enter-label input { padding: 0; margin: 0; }
-#composer-fold {
-  position: absolute;
-  right: 8px;
-  top: -19px;
+/* 편집기 위에 붙는 작은 단추들: 보낸 프롬프트 기록, 접기/펼치기 */
+#composer-tabs { position: absolute; right: 8px; top: -19px; display: flex; gap: 4px; z-index: 4; }
+#composer-tabs button {
   height: 18px;
   padding: 0 8px;
   font-size: 11px;
@@ -94,9 +94,9 @@ li.active .dot.kind { color: var(--accent); }
   border-bottom: none;
   border-radius: 5px 5px 0 0;
   opacity: 0.75;
-  z-index: 4;
 }
-#composer-fold:hover { opacity: 1; color: var(--text); }
+#composer-tabs button:hover { opacity: 1; color: var(--text); }
+#composer.folded #composer-history { display: none; }
 #composer.folded #composer-body, #composer.folded #composer-grip { display: none; }
 #composer.folded { border-top: none; height: 0; }
 
@@ -419,3 +419,47 @@ li.attention .dot.kind { background: none; box-shadow: none; color: var(--text);
   #print { display: block; }
   #print svg { display: block; }
 }
+
+/* ───────── 빠른 이동(Ctrl+Shift+K) ───────── */
+
+.palette-input { width: 100%; height: 30px; padding: 0 10px; font-size: 14px; }
+.palette-list { display: flex; flex-direction: column; gap: 1px; max-height: min(52vh, 420px); overflow-y: auto; }
+.palette-row {
+  display: grid;
+  grid-template-columns: 18px minmax(0, auto) minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  text-align: left;
+  background: none;
+  border: 1px solid transparent;
+  border-radius: 5px;
+}
+.palette-row:hover { border-color: transparent; }
+.palette-row.chosen { background: var(--select); border-color: var(--accent); }
+.palette-icon { color: var(--attention); text-align: center; }
+.palette-title { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.palette-note { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 11px; color: var(--dim); text-align: right; }
+.palette-row.alert .palette-icon, .palette-row.alert .palette-note { color: var(--dead); }
+.palette-row.done .palette-icon { color: var(--ok); }
+.palette-hint { margin: 4px 6px 2px; font-size: 11px; }
+
+/* ───────── 사이드바: 순서 바꾸기, 경과 시간, 최근 폴더 ───────── */
+
+/* 끌어 온 항목이 끼어들 자리(줄의 위나 아래) */
+#sessions li.before { box-shadow: inset 0 2px 0 var(--accent); }
+#sessions li.after { box-shadow: inset 0 -2px 0 var(--accent); }
+#sessions.dragging li.before, #sessions.dragging li.after { opacity: 1; }
+
+/* 요청을 처리한 지 지난 시간: 자릿수가 바뀌어도 흔들리지 않게 고정폭 숫자로 */
+.elapsed { margin-right: 6px; font-weight: normal; font-variant-numeric: tabular-nums; color: var(--busy); }
+
+#recent { flex: none; padding: 4px 6px; }
+
+/* ───────── 터미널 화면에서 찾기: 개수, 방식 단추 ───────── */
+
+#search { align-items: center; }
+#search-count { min-width: 44px; padding: 0 4px; font-size: 12px; color: var(--dim); text-align: center; font-variant-numeric: tabular-nums; }
+#search-count.none { color: var(--dead); }
+#search button.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
