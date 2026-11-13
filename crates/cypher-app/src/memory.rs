@@ -4,18 +4,25 @@
 //! (`MEMORY.md` 색인 + 기억 하나당 파일 하나). 이 폴더를 다른 곳으로 복사해 두거나,
 //! 다른 곳의 기억을 이 폴더로 들여온다.
 //!
+//! `<폴더 이름>`은 git 저장소 기준이다: 같은 저장소의 하위 폴더나 워크트리에서 시작한 세션은 저장소 뿌리의
+//! 기억 폴더를 함께 쓴다. 저장소가 아니면 세션을 시작한 폴더 기준이다.
+//!
 //! 가져오기는 기존 기억을 잃지 않게 한다: 먼저 통째로 백업하고, 색인은 합친다.
 
 use crate::extras::{claude_home, project_dir_name};
 use serde::Serialize;
 use std::fs;
 use std::io;
+use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const INDEX: &str = "MEMORY.md";
 const MAX_DEPTH: usize = 8;
+/// 가져올 폴더에 기억 파일(.md)이 이보다 많으면 기억 폴더가 아니라고 본다(저장소 폴더를 잘못 골랐을 때).
+const MAX_IMPORT_FILES: usize = 500;
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 #[derive(Serialize)]
 pub struct MemoryInfo {
@@ -33,9 +40,34 @@ pub struct Transfer {
     backup: Option<String>,
 }
 
+/// 그 폴더가 든 git 저장소의 뿌리(워크트리면 본 저장소의 뿌리). 저장소가 아니거나 git이 없으면 None.
+fn repo_root(cwd: &str) -> Option<PathBuf> {
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(cwd)
+        .args(["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .stdin(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    root_of_common_dir(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+/// 저장소의 공용 git 폴더(`…/.git`)에서 저장소 뿌리를 얻는다. 그 모양이 아니면(하위 모듈, 따로 둔 git 폴더) None.
+fn root_of_common_dir(common: &str) -> Option<PathBuf> {
+    let common = PathBuf::from(common.replace('/', "\\"));
+    (common.file_name()? == ".git").then(|| common.parent().map(Path::to_path_buf))?
+}
+
 fn memory_dir(cwd: &str) -> Result<PathBuf, String> {
     let home = claude_home().ok_or("Claude 설정 폴더를 찾지 못했습니다")?;
-    Ok(home.join("projects").join(project_dir_name(cwd)).join("memory"))
+    let of = |folder: &str| home.join("projects").join(project_dir_name(folder)).join("memory");
+    let here = of(cwd);
+    let Some(root) = repo_root(cwd) else { return Ok(here) };
+    let shared = of(&root.to_string_lossy());
+    // 저장소 뿌리 쪽에는 없고 이 폴더 쪽에만 기억이 쌓여 있으면 그것을 쓴다(있는 기억을 못 찾는 일이 없게).
+    Ok(if list_files(&shared).is_empty() && !list_files(&here).is_empty() { here } else { shared })
 }
 
 /// 폴더 안의 일반 파일 전체(상대 경로). 바로가기·연결 파일은 따라가지 않는다.
@@ -70,10 +102,18 @@ fn merge_index(existing: &str, incoming: &str) -> String {
     text
 }
 
+/// 기억 파일인지(.md).
+fn is_markdown(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("md"))
+}
+
 /// `from`의 파일을 모두 `to`로 복사한다(같은 이름은 덮어쓴다).
-/// `merge`가 참이면 색인 파일은 덮어쓰지 않고 합친다.
+/// `merge`가 참이면(가져오기) 기억 파일(.md)만 복사하고, 색인 파일은 덮어쓰지 않고 합친다.
 fn copy_tree(from: &Path, to: &Path, merge: bool) -> io::Result<usize> {
-    let files = list_files(from);
+    let mut files = list_files(from);
+    if merge {
+        files.retain(|relative| is_markdown(relative));
+    }
     for relative in &files {
         let (source, target) = (from.join(relative), to.join(relative));
         if let Some(parent) = target.parent() {
@@ -125,9 +165,13 @@ fn export(memory: &Path, dest: &Path) -> Result<Transfer, String> {
 }
 
 fn import(memory: &Path, source: &Path) -> Result<Transfer, String> {
-    let has_markdown = list_files(source).iter().any(|p| p.extension().is_some_and(|e| e == "md"));
-    if !has_markdown {
+    // 기억 파일(.md)만 가져온다. 저장소 폴더처럼 엉뚱한 폴더를 골랐을 때 그 안의 모든 파일이 기억 폴더로 들어가지 않게 한다.
+    let markdown = list_files(source).iter().filter(|p| is_markdown(p)).count();
+    if markdown == 0 {
         return Err("기억 파일(.md)이 없는 폴더입니다".into());
+    }
+    if markdown > MAX_IMPORT_FILES {
+        return Err(format!("기억 폴더로 보이지 않습니다(.md 파일 {markdown}개). 내보낸 기억이 든 폴더를 골라 주세요"));
     }
     if overlaps(memory, source) {
         return Err("기억 폴더 자신에서는 가져올 수 없습니다".into());
@@ -240,5 +284,33 @@ mod tests {
         fs::create_dir_all(&empty).unwrap();
         fs::write(empty.join("note.txt"), "x").unwrap();
         assert!(import(&memory, &empty).is_err()); // .md 없음
+    }
+
+    #[test]
+    fn 가져올_때는_기억_파일만_복사한다() {
+        let root = fresh("only-md");
+        let (memory, source) = (root.join("p").join("memory"), root.join("repo"));
+        fs::create_dir_all(source.join(".git")).unwrap();
+        fs::write(source.join("README.MD"), "읽어 보기").unwrap();
+        fs::write(source.join("main.rs"), "fn main() {}").unwrap();
+        fs::write(source.join(".git").join("config"), "x").unwrap();
+        let result = import(&memory, &source).unwrap();
+        assert_eq!(result.copied, 1);
+        assert!(memory.join("README.MD").is_file());
+        assert!(!memory.join("main.rs").exists() && !memory.join(".git").exists());
+    }
+
+    #[test]
+    fn 저장소의_공용_git_폴더에서_뿌리를_얻는다() {
+        assert_eq!(root_of_common_dir("C:/work/proj/.git"), Some(PathBuf::from(r"C:\work\proj")));
+        assert_eq!(root_of_common_dir(r"C:\work\proj\.git"), Some(PathBuf::from(r"C:\work\proj")));
+        // 하위 모듈이나 따로 둔 git 폴더는 뿌리를 알 수 없다.
+        assert_eq!(root_of_common_dir("C:/work/proj/.git/modules/sub"), None);
+        assert_eq!(root_of_common_dir(""), None);
+        // 이 저장소의 하위 폴더에서도 저장소 뿌리를 찾는다(git이 있을 때).
+        let here = env!("CARGO_MANIFEST_DIR");
+        if let Some(found) = repo_root(here) {
+            assert!(Path::new(here).starts_with(&found) && found.join(".git").exists(), "{found:?}");
+        }
     }
 }

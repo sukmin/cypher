@@ -1,9 +1,11 @@
-// 모양 설정: 테마(어두운·밝은·Windows 고전), 글꼴, 글자 크기. 창 상단 메뉴 "설정 → 모양"에서 연다.
+// 모양 설정: 테마(어두운·밝은·Windows 고전·매트릭스), 글꼴, 글자 크기. 창 상단 메뉴 "설정 → 모양"에서 연다.
 //
 // 고른 값은 이 컴퓨터에 기억해 두고(localStorage) 바로 적용한다. 다시 시작할 필요가 없다.
 // - 테마: <html data-theme="…">를 바꾸면 theme.css가 색을 바꾼다. 터미널 색은 여기서 따로 정한다.
 // - 화면 글자 크기: 본창 전체의 배율로 바꾼다(글자와 함께 단추·여백도 같이 커져 화면이 깨지지 않는다).
 // - 터미널 글자 크기: 화면 글자 크기와 따로 정한다(배율만큼 나눠서 넣는다).
+
+import { setRain } from './matrix.js';
 
 const KEY = 'cypher.look';
 const BASE_SIZE = 13; // 화면 글자 크기의 기준(배율 100%)
@@ -37,6 +39,20 @@ export const THEMES = {
     },
     search: { matchBackground: '#808000', activeMatchBackground: '#ffff00', matchOverviewRuler: '#808000', activeMatchColorOverviewRuler: '#ffff00' },
   },
+  matrix: {
+    label: '매트릭스 (녹색 글자가 흐르는 화면)',
+    contrast: 1,
+    rain: true, // 본창 바탕에 흐르는 글자를 깐다(matrix.js). 모양 설정에서 끌 수 있다.
+    term: {
+      // 바탕은 비워 둔다: 터미널 칸의 반투명한 검은 바탕(theme.css의 --term-bg) 뒤로 흐르는 글자가 비친다.
+      // 비침을 켜지 않고 만든 터미널에서는 그냥 검은 바탕이 된다.
+      background: 'rgba(0, 0, 0, 0)', foreground: '#39f57a', cursor: '#c8ffd8', cursorAccent: '#001a08', selectionBackground: 'rgba(0, 255, 102, 0.28)',
+      black: '#001a08', red: '#ff5f5f', green: '#00ff66', yellow: '#c8ff3d', blue: '#2bd4a4', magenta: '#8dffb0', cyan: '#38ffd0', white: '#a8f5c0',
+      brightBlack: '#1f8a45', brightRed: '#ff8a8a', brightGreen: '#6dffa3', brightYellow: '#e2ff7a', brightBlue: '#5cf0c8',
+      brightMagenta: '#b6ffcf', brightCyan: '#7dffe2', brightWhite: '#e6fff0',
+    },
+    search: { matchBackground: '#0d5c28', activeMatchBackground: '#00ff66', matchOverviewRuler: '#0d5c28', activeMatchColorOverviewRuler: '#00ff66' },
+  },
 };
 
 const UI_FONTS = ['Malgun Gothic', 'Segoe UI', '굴림', '돋움', '바탕', 'Pretendard', 'Noto Sans KR', '나눔고딕', 'Tahoma'];
@@ -58,16 +74,20 @@ export function currentLook() {
   const zoom = uiSize / BASE_SIZE;
   const termSize = clamp(saved.termSize, 6, 72, api.config.font.size);
   const termBase = api.config.font.family;
+  // 글꼴 이름은 글이어야 한다. 기억해 둔 값이 다른 것(숫자 등)으로 망가져 있으면 고르지 않은 것으로 본다.
+  const fontName = (value) => (typeof value === 'string' ? value.trim() : '');
+  const uiFont = fontName(saved.uiFont), termFont = fontName(saved.termFont);
   return {
-    theme, zoom, uiSize, termSize,
-    uiFont: (saved.uiFont || '').trim(),
-    termFont: (saved.termFont || '').trim(),
-    termFamily: saved.termFont?.trim() ? `${quoted(saved.termFont.trim())}, ${termBase}` : termBase,
+    theme, zoom, uiSize, termSize, uiFont, termFont,
+    termFamily: termFont ? `${quoted(termFont)}, ${termBase}` : termBase,
     // 화면 배율이 터미널 글자까지 키우지 않게 그만큼 나눠 둔다.
     termPixels: Math.round((termSize / zoom) * 100) / 100,
     termTheme: THEMES[theme].term,
     searchColors: THEMES[theme].search,
     contrast: THEMES[theme].contrast,
+    // 흐르는 글자를 까는 테마인지, 그리고 지금 켜 두었는지.
+    rainy: !!THEMES[theme].rain,
+    rain: !!THEMES[theme].rain && saved.rain !== false,
   };
 }
 
@@ -75,6 +95,9 @@ function apply() {
   const now = currentLook();
   const root = document.documentElement;
   root.dataset.theme = now.theme;
+  // 흐르는 글자: 켜져 있으면 본창 바탕을 비워(theme.css) 그 뒤의 캔버스가 보이게 한다.
+  root.dataset.rain = now.rain ? 'on' : 'off';
+  setRain(now.rain);
   // 글꼴을 고르지 않았으면 테마의 기본 글꼴을 쓴다. 골랐으면 그 글꼴을 맨 앞에 두고 한글 글꼴을 뒤에 받친다.
   if (now.uiFont) root.style.setProperty('--ui-font', `${quoted(now.uiFont)}, "Malgun Gothic", "Segoe UI", sans-serif`);
   else root.style.removeProperty('--ui-font');
@@ -90,7 +113,8 @@ function store() {
 
 export function initLook(given) {
   api = given;
-  try { saved = JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch { saved = {}; }
+  try { saved = JSON.parse(localStorage.getItem(KEY) || '{}'); } catch { saved = {}; }
+  if (!saved || typeof saved !== 'object' || Array.isArray(saved)) saved = {}; // 기억해 둔 값이 설정 묶음이 아니면 버린다.
   apply();
 }
 
@@ -119,7 +143,15 @@ export function showLook() {
     theme.append(option);
   }
   theme.value = now.theme;
-  theme.onchange = () => { setLook({ theme: theme.value }); refresh(); };
+  theme.onchange = () => { setLook({ theme: theme.value }); refresh(true); };
+
+  // 흐르는 글자를 까는 테마에서만 보이는 줄: 끄면 색만 남는다.
+  const rain = make('input');
+  rain.type = 'checkbox';
+  rain.onchange = () => { setLook({ rain: rain.checked ? null : false }); refresh(); };
+  const rainLabel = make('label', 'look-check');
+  rainLabel.append(rain, ' 바탕에 녹색 글자가 흐르게 한다');
+  const rainRow = row('흐르는 글자', rainLabel);
 
   const fontInput = (value, list, listId, placeholder, key) => {
     const input = make('input');
@@ -160,6 +192,8 @@ export function showLook() {
   /** 보기 글과 안내를 지금 설정에 맞춘다. */
   function refresh(fill = false) {
     const look = currentLook();
+    rainRow.hidden = !look.rainy;
+    rain.checked = look.rain;
     if (fill) {
       theme.value = look.theme;
       uiFont.input.value = look.uiFont;
@@ -174,12 +208,15 @@ export function showLook() {
     const missing = [look.uiFont, look.termFont].filter((name) => name && !document.fonts.check(`12px ${quoted(name)}`));
     note.textContent = missing.length
       ? `이 컴퓨터에 없는 글꼴입니다: ${missing.join(', ')} (대신 기본 글꼴로 보입니다)`
-      : look.theme === 'dark' ? '' : 'Claude Code 화면의 색은 Claude Code의 /theme 설정을 따릅니다. 밝은 바탕에서는 밝은 테마로 맞추면 더 잘 보입니다.';
+      : look.theme === 'dark' ? ''
+      : look.rainy ? 'Claude Code 화면의 색은 Claude Code의 /theme 설정을 따릅니다. 터미널 뒤로 글자가 비치는 것은 이 테마를 고른 뒤에 연 세션(또는 Cypher를 다시 시작한 뒤)부터입니다.'
+      : 'Claude Code 화면의 색은 Claude Code의 /theme 설정을 따릅니다. 밝은 바탕에서는 밝은 테마로 맞추면 더 잘 보입니다.';
   }
   refresh();
 
   openPopup('모양: 테마 · 글꼴 · 글자 크기', [
     row('테마', theme),
+    rainRow,
     row('화면 글꼴', uiFont.box),
     row('화면 글자 크기', uiSize.box),
     row('터미널·코드 글꼴', termFont.box),

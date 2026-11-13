@@ -386,9 +386,13 @@ li.attention .dot.kind { background: none; box-shadow: none; color: var(--text);
 .mm-guide-row code { flex: none; width: 170px; color: var(--text); font-family: var(--mono-font); white-space: pre; }
 .mm-guide-row span { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .mm-stage { flex: 1; min-width: 0; position: relative; overflow: hidden; outline: none; background: var(--field); font-family: var(--ui-font); }
-.mm-stage.panning { cursor: grabbing; }
 .mm-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
 .mm-node, .mm-fold { cursor: pointer; }
+/* Space를 누르고 있으면 손 모양(끌면 그림이 움직인다), 그림을 끄는 동안에는 쥔 손 모양. 가지 위에서도 같다. */
+.mm-stage.grab, .mm-stage.grab .mm-node, .mm-stage.grab .mm-fold { cursor: grab; }
+.mm-stage.panning, .mm-stage.panning .mm-node, .mm-stage.panning .mm-fold { cursor: grabbing; }
+/* 빈 곳을 끌어 여러 가지를 고를 때의 범위 상자 */
+.mm-band { fill: var(--accent); fill-opacity: 0.08; stroke: var(--accent); stroke-width: 1; stroke-dasharray: 4 3; pointer-events: none; }
 .mm-drop { fill: none; stroke: var(--accent); stroke-width: 2; stroke-dasharray: 5 3; pointer-events: none; }
 .mm-drop.before, .mm-drop.after { fill: var(--accent); stroke: none; }
 /* 좁은 창에서는 도구 줄을 여러 줄로 접어 오른쪽 단추(저장·내보내기)가 잘리지 않게 한다. */

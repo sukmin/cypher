@@ -15,6 +15,10 @@ const MAX_MARK_TEXT = 400_000;  // 이보다 긴 글은 본문 표시(강조)를
 const MAX_MARKS = 5000;
 const MAX_MATCHES = 50_000;
 const ENCODINGS = ['UTF-8', 'UTF-8 BOM', 'UTF-16 LE', 'UTF-16 BE', 'ANSI (CP949)'];
+/** 연결된 파일이 화면이 본 뒤에 다른 곳에서 바뀌어 저장하지 않았을 때 앱(text_save)이 돌려주는 오류 글의 머리. */
+const CHANGED_ON_DISK = 'changed-on-disk';
+/** 찾기 칸에서 한글 조합이 끝난 뒤 이만큼 지나도 다시 조합하지 않으면 찾은 곳을 보여 준다(큰 글에서만 쓴다). */
+const REVEAL_AFTER_COMPOSE_MS = 300;
 const EOLS = [['CRLF', 'Windows (CRLF)'], ['LF', 'Unix (LF)'], ['CR', 'Macintosh (CR)']];
 
 // 눈에 안 보이거나 일반 공백과 헷갈리는 문자. 한국어 글에 흔한 전각 공백(U+3000)은 뺀다.
@@ -147,9 +151,15 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
   let stored = null;            // 파일에 마지막으로 저장한(읽은) 내용. 파일이 없으면 null.
   let storedFormat = '';        // 그때의 인코딩·줄 끝 형식
   let lossy = false;            // 읽지 못한 글자가 있던 파일인지
+  let stamp = null;             // 연결된 파일을 마지막으로 읽거나 저장했을 때의 고친 시각(밀리초). 본 적이 없으면 null.
+  let changed = false;          // 그 뒤로 파일이 다른 곳에서 바뀐 것을 알고 있다(아직 다시 읽지도 덮어쓰지도 않았다).
+  let diskSeq = 0;              // 저장하거나 다시 읽을 때마다 올린다(그 전에 시작한 "바뀌었는지 보기"의 결과를 버린다).
+  let saving = 0;               // 저장하는 중인 횟수(그동안은 바뀌었는지 보지 않는다)
+  let checking = false, started = false, disposed = false, shown = false;
+  let composing = false, revealTimer = 0; // 찾기 칸에서 한글을 조합하는 중인지
   let wrap = localStorage.getItem(WRAP_KEY) !== 'off';
   let size = Number(localStorage.getItem(ZOOM_KEY)) || DEFAULT_SIZE;
-  let lastTitle = '';
+  let lastTitle = '', lastStamp = null;
   let storeTimer = 0, statTimer = 0;
   let invisible = [];           // 보이지 않는 문자 위치
   const find = { open: false, replace: false, matchCase: false, word: false, regex: false, matches: [], at: -1, error: '' };
@@ -220,6 +230,10 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
   const $invisible = make('button', 'stat invisible');
   $invisible.title = '눈에 안 보이거나 일반 공백과 헷갈리는 문자가 있습니다. 눌러서 찾거나 정리합니다.';
   $invisible.onclick = (ev) => invisibleMenu(ev);
+  const $changed = make('button', 'stat invisible', '다른 곳에서 바뀜');
+  $changed.title = '연결된 파일이 다른 곳에서 바뀌었습니다. 이 메모에는 그 변경이 들어 있지 않습니다. 눌러서 다시 읽거나 덮어씁니다.';
+  $changed.hidden = true;
+  $changed.onclick = () => askChanged($changed);
   const $note = make('span', 'stat note-text');
   const $eol = make('button', 'stat');
   $eol.title = '줄 끝 형식 (저장할 때 적용)';
@@ -228,7 +242,7 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
   $encoding.title = '인코딩 (저장할 때 적용)';
   $encoding.onclick = (ev) => showMenu(ev, ENCODINGS.map((value) => ({ label: `${value === encoding ? '● ' : ''}${value}`, action: () => { encoding = value; touch(); } })));
   const status = make('div', 'memo-status');
-  status.append($pos, $chars, $pages, $invisible, $note, $eol, $encoding);
+  status.append($pos, $chars, $pages, $invisible, $changed, $note, $eol, $encoding);
 
   const root = make('div', 'doc memo');
   root.append(bar, $find, edit, status);
@@ -254,7 +268,8 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
     $save.classList.toggle('on', dirty());
     const looksJson = /\.(json|canvas)$/i.test(path || '') || (!path && /^\s*[{[]/.test($text.value));
     $json.hidden = !looksJson;
-    if (now !== lastTitle) { lastTitle = now; onChange(); }
+    // 본 판의 시각이 바뀌었을 때도 알린다(다시 시작할 때 되살릴 내용에 들어간다).
+    if (now !== lastTitle || stamp !== lastStamp) { lastTitle = now; lastStamp = stamp; onChange(); }
   }
 
   function refreshPosition() {
@@ -392,6 +407,8 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
     refreshPosition();
     if ($back.querySelector('mark.cur')) return reveal();
     // 글이 너무 길어 본문 표시를 하지 않는 경우: 초점을 잠깐 주어 고른 곳이 보이게 스크롤시킨다.
+    // 찾기 칸에서 한글을 조합하는 중에는 하지 않는다(초점이 나갔다 오면 조합이 끊겨 자모가 흩어진다). 조합이 끝나면 그때 보여 준다.
+    if (composing) return undefined;
     const focused = document.activeElement;
     $text.blur();
     $text.focus();
@@ -580,8 +597,86 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
     eol = file.eol;
     stored = file.text;
     storedFormat = format();
+    stamp = file.modified ?? null;
+    diskSeq++;
+    setChanged(false);
     lossy = !!file.lossy;
     $note.textContent = lossy ? '읽지 못한 글자(�)가 있습니다. 이대로 저장하면 원본의 그 부분이 바뀝니다' : '';
+  }
+
+  // ── 연결된 파일이 다른 곳에서 바뀌었을 때 ──
+  // 메모는 파일을 읽은(저장한) 때의 고친 시각을 기억한다. 저장할 때 그 시각을 함께 보내, 그 뒤로 다른 곳(Claude 세션,
+  // 다른 편집기)에서 파일이 바뀌었으면 말없이 덮어쓰지 않고 묻는다. 고치지 않은 메모는 초점을 받거나 다시 보일 때 스스로 다시 읽는다.
+
+  function setChanged(on) {
+    changed = on;
+    $changed.hidden = !on;
+  }
+
+  /** 디스크의 내용으로 다시 읽을지, 이 메모의 글로 덮어쓸지 고르게 한다(anchor: 메뉴를 띄울 자리의 단추). */
+  function askChanged(anchor) {
+    if (!path) return;
+    const rect = anchor.getBoundingClientRect();
+    showMenu({ clientX: rect.left, clientY: rect.bottom + 2 }, [
+      { caption: `"${baseName(path)}" 파일이 다른 곳에서 바뀌었습니다. 이 메모에는 그 변경이 들어 있지 않습니다.` },
+      { label: '다시 읽기 (디스크의 내용으로 바꾸고, 이 메모의 글은 30일 동안 보관)', action: () => reloadFromDisk(true) },
+      { label: '덮어쓰기 (이 메모의 글로 저장. 다른 곳에서 고친 내용은 사라짐)', action: () => save(false, true) },
+      { label: '그대로 두기', action: () => $text.focus() },
+    ]);
+  }
+
+  /**
+   * 연결된 파일을 다시 읽어 메모에 넣는다. 다시 읽었으면 참.
+   * `discard`이면(사용자가 [다시 읽기]를 골랐다) 고치던 글을 버리고 읽는다. 버리는 글은 닫은 메모 보관 폴더에 30일 동안 남긴다.
+   * 아니면(스스로 다시 읽는 경우) 그사이 사용자가 글을 고쳤을 때 읽지 않고 표시만 해 둔다.
+   */
+  async function reloadFromDisk(discard) {
+    const watched = path;
+    if (!watched) return false;
+    try {
+      const file = await invoke('text_open', { path: watched, start: null });
+      if (disposed || watched !== path) return false;
+      if (!discard && dirty()) { setChanged(true); return false; }
+      const same = file.text === $text.value;
+      let kept = null;
+      if (discard && !same && $text.value.trim()) {
+        await invoke('memo_write', { id, text: $text.value });
+        kept = await invoke('memo_remove', { id, keep: true, before: true });
+        if (disposed || watched !== path) return false;
+      }
+      load(file);
+      if (!same) {
+        // 보던 자리와 커서를 될 수 있는 대로 지킨다(값을 통째로 넣으면 커서가 글 끝으로 간다).
+        const scroll = $text.scrollTop, at = Math.min($text.selectionStart, file.text.length);
+        $text.value = file.text;
+        $text.setSelectionRange(at, at);
+        $text.scrollTop = scroll;
+      }
+      touch();
+      if (kept) setStatus(`디스크의 내용으로 다시 읽었습니다: ${baseName(watched)} · 그 전의 글은 30일 동안 보관합니다: ${kept}`);
+      else if (!same) setStatus(`다른 곳에서 바뀐 내용을 다시 읽었습니다: ${baseName(watched)}`);
+      return true;
+    } catch (err) {
+      setStatus(`다시 읽지 못했습니다: ${err}`);
+      return false;
+    }
+  }
+
+  /** 연결된 파일이 다른 곳에서 바뀌었는지 본다. 고치지 않은 메모는 바로 다시 읽고, 고치던 메모는 표시만 해 둔다(저장할 때 묻는다). */
+  async function checkDisk() {
+    if (!started || disposed || !path || checking || saving) return;
+    checking = true;
+    const watched = path, seq = diskSeq;
+    try {
+      // 문서 항목이 쓰는 것과 같은 명령이다(고친 시각의 기준이 text_open이 돌려준 것과 같다).
+      const now = await invoke('reader_stamp', { path: watched });
+      // 그사이 저장했거나 다시 읽었으면 이 결과는 옛것이다. 없어진 파일은 그대로 둔다(저장하면 다시 만들어진다).
+      if (disposed || watched !== path || seq !== diskSeq || saving || now == null || now === stamp) return;
+      if (dirty()) setChanged(true);
+      else await reloadFromDisk(false);
+    } catch { /* 다음에 초점을 받을 때 다시 본다 */ } finally {
+      checking = false;
+    }
   }
 
   /** 파일을 연다. 이 메모에 쓰던 것이 있으면 새 메모 항목으로 연다. */
@@ -603,9 +698,19 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
     }
   }
 
-  /** 파일에 저장한다. 연결된 파일이 없거나 `as`이면 저장할 곳을 묻는다. */
-  async function save(as) {
+  /**
+   * 파일에 저장한다. 연결된 파일이 없거나 `as`이면 저장할 곳을 묻는다.
+   * 연결된 파일이 마지막으로 본 뒤에 다른 곳에서 바뀌었으면 저장하지 않고 묻는다. `force`이면(덮어쓰기를 골랐다) 견주지 않고 쓴다.
+   */
+  let saveQueue = Promise.resolve(); // 저장은 한 번에 하나씩: 앞의 저장이 끝나 본 시각이 갱신된 뒤에 다음 저장을 보낸다.
+  function save(as, force = false) {
+    const done = saveQueue.then(() => saveNow(as, force));
+    saveQueue = done.catch(() => {});
+    return done;
+  }
+  async function saveNow(as, force) {
     const text = $text.value;
+    saving += 1;
     try {
       const target = as ? null : path;
       // 읽지 못한 글자가 있던 파일을 원본에 덮어쓰면 그 부분이 영영 바뀐다. 먼저 확인한다.
@@ -613,21 +718,36 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
       const name = path ? baseName(path) : `${title().replace(/^메모 · /, '').replace(/[\\/:*?"<>|]/g, '_') || '메모'}.txt`;
       const written = await invoke('text_save', {
         path: target, name, start: path ? path.slice(0, path.lastIndexOf('\\')) : item.startCwd, text, encoding, eol,
+        // 연결된 파일에 쓸 때는 마지막으로 본 판의 시각을 함께 보낸다(본 적이 없으면 0: 파일이 이미 있으면 묻는다).
+        expected: target && !force ? (stamp ?? 0) : null,
+        stamped: true,
       });
       if (!written) { $text.focus(); return false; }
-      path = written;
+      path = written.path;
       stored = text;
       storedFormat = format();
+      stamp = written.modified ?? null;
+      diskSeq++;
+      setChanged(false);
       lossy = false;
       $note.textContent = '';
       refreshTitle();
       store();
-      setStatus(`저장했습니다: ${written}`);
+      setStatus(`저장했습니다: ${written.path}`);
       $text.focus();
       return true;
     } catch (err) {
+      if (String(err).startsWith(CHANGED_ON_DISK)) {
+        // 다른 곳에서 바뀐 파일이다: 저장하지 않았다. 다시 읽을지 덮어쓸지 고르게 한다.
+        setChanged(true);
+        setStatus(`저장하지 않았습니다: "${baseName(path)}" 파일이 다른 곳에서 바뀌었습니다. [다시 읽기]나 [덮어쓰기]를 고르세요.`);
+        askChanged($save);
+        return false;
+      }
       setStatus(`저장 실패: ${err}`);
       return false;
+    } finally {
+      saving -= 1;
     }
   }
 
@@ -674,7 +794,27 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
   $text.addEventListener('blur', () => { if (storeTimer) store(); }); // 다른 곳으로 가기 전에 임시 저장을 밀어 넣는다.
   $text.addEventListener('scroll', syncBack);
   for (const name of ['keyup', 'mouseup', 'select', 'focus']) $text.addEventListener(name, refreshPosition);
-  const observer = new ResizeObserver(() => { syncBack(); if ($back.firstChild) paint(); });
+  // 초점을 받을 때(다른 항목이나 다른 프로그램에 갔다 왔을 때) 연결된 파일이 그사이 바뀌었는지 본다.
+  $text.addEventListener('focus', () => { checkDisk(); });
+  // 찾기 칸에서 한글을 조합하는 동안에는 초점을 옮기지 않는다(select 참고). 한글은 한 글자가 끝나자마자 다음 글자의 조합이
+  // 시작되므로, 조합이 끝나고 잠깐 지나도 다시 조합하지 않을 때(입력을 마쳤을 때) 찾은 곳을 보여 준다.
+  $query.addEventListener('compositionstart', () => { composing = true; clearTimeout(revealTimer); });
+  $query.addEventListener('compositionend', () => {
+    composing = false;
+    clearTimeout(revealTimer);
+    revealTimer = setTimeout(() => {
+      if (!composing && !disposed && find.open && document.activeElement === $query) select();
+    }, REVEAL_AFTER_COMPOSE_MS);
+  });
+  $query.addEventListener('blur', () => { composing = false; clearTimeout(revealTimer); });
+  const observer = new ResizeObserver(() => {
+    syncBack();
+    if ($back.firstChild) paint();
+    // 가려졌다가 다시 보이면(다른 항목을 보다 돌아왔을 때) 연결된 파일이 그사이 바뀌었는지 본다.
+    const now = $text.clientHeight > 0;
+    if (now && !shown) checkDisk();
+    shown = now;
+  });
   observer.observe($text);
 
   // 오른쪽 클릭: 편집 메뉴
@@ -725,13 +865,22 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
         if (saved.encoding) encoding = saved.encoding;
         if (saved.eol) eol = saved.eol;
         if (path) {
+          // 지난번에 본 판의 고친 시각. 파일을 읽지 못하더라도 저장할 때 이것과 견준다.
+          const seen = typeof saved.stamp === 'number' ? saved.stamp : null;
+          stamp = seen;
           try {
             const file = await invoke('text_open', { path, start: null });
             load(file);
             // 지난번에 저장하지 않은 변경이 없었으면 파일의 지금 내용을 보여 준다.
             if (!saved.dirty || working == null) text = file.text;
-            // 저장하지 않은 변경에는 바꿔 둔 인코딩·줄 끝 형식도 들어 있다.
-            else { encoding = saved.encoding || encoding; eol = saved.eol || eol; }
+            else {
+              // 저장하지 않은 변경에는 바꿔 둔 인코딩·줄 끝 형식도 들어 있다.
+              encoding = saved.encoding || encoding;
+              eol = saved.eol || eol;
+              // 쓰던 내용은 지난번에 본 판을 고친 것이다. 꺼져 있는 사이 파일이 다른 곳에서 바뀌었으면
+              // 본 판의 시각을 그대로 두고 표시해 둔다(저장할 때 덮어쓸지 묻는다).
+              if (seen != null && file.modified !== seen) { stamp = seen; setChanged(true); }
+            }
           } catch (err) {
             setStatus(`연결된 파일을 읽지 못했습니다: ${err}`);
           }
@@ -741,6 +890,7 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
       setStatus(`메모를 열지 못했습니다: ${err}`);
     }
     $text.value = text;
+    started = true;
     refreshStats();
     refreshPosition();
     if (text) store();
@@ -766,19 +916,32 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
       let kept = null;
       if (replace && $text.value.trim()) {
         await invoke('memo_write', { id, text: $text.value });
-        kept = await invoke('memo_remove', { id, keep: true });
+        // 닫은 메모와 다른 이름으로 보관한다("닫은 항목 다시 열기"가 이 보관본을 되찾아 가 버리지 않게).
+        kept = await invoke('memo_remove', { id, keep: true, before: true });
       }
       const before = $text.value;
-      $text.value = replace ? added : `${before}${before && !before.endsWith('\n') ? '\n' : ''}${added}`;
+      // 사용자가 이 메모를 고치는 중일 수 있다: 커서·선택과 보던 자리를 지킨다(값을 통째로 넣으면 커서가 글 끝으로 간다).
+      const scroll = $text.scrollTop, from = $text.selectionStart, to = $text.selectionEnd, direction = $text.selectionDirection;
+      if (replace) {
+        $text.value = added;
+        $text.setSelectionRange(Math.min(from, added.length), Math.min(to, added.length), direction);
+      } else {
+        $text.setRangeText(`${before && !before.endsWith('\n') ? '\n' : ''}${added}`, before.length, before.length, 'preserve');
+      }
+      $text.scrollTop = scroll;
       touch();
       return kept;
     },
-    /** 다시 시작할 때 되살릴 내용. */
-    state: () => ({ memo: id, path, dirty: dirty(), encoding, eol }),
-    /** 앱이 꺼질 때: 임시 저장을 밀어 넣어 본다(끝까지 기다릴 수는 없다). */
-    flush: () => { if (storeTimer) store(); },
+    /** 연결된 파일의 경로(없으면 null). 같은 파일을 연 메모가 이미 있는지 찾을 때 쓴다(main.js의 openMemo). */
+    file: () => path,
+    /** 다시 시작할 때 되살릴 내용. `stamp`는 연결된 파일을 마지막으로 본 때의 고친 시각이다(그 뒤로 바뀌었는지 견준다). */
+    state: () => ({ memo: id, path, dirty: dirty(), encoding, eol, stamp }),
+    /** 앱이 꺼질 때: 기다리던 임시 저장을 바로 한다. 돌려주는 약속은 저장이 끝나면 끝난다(기다리던 것이 없으면 값 없음). */
+    flush: () => (storeTimer ? store() : undefined),
     /** 닫기 전에 부른다. 거짓을 돌려주면 닫지 않는다. 내용이 있으면 30일 동안 보관한다. */
     close: async () => {
+      // 처음 읽기가 끝난 뒤에 닫는다. 끝나기 전에는 편집기가 비어 있어, 그대로 닫으면 쓰던 내용(임시 저장본)을 빈 글로 덮어쓴다.
+      await ready;
       if (dirty() && !confirm(`"${baseName(path)}"에 저장하지 않은 변경이 있습니다. 저장하지 않고 닫을까요?\n(닫은 메모의 내용은 30일 동안 보관됩니다)`)) return false;
       clearTimeout(storeTimer);
       const text = $text.value;
@@ -791,6 +954,6 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
       }
       return true;
     },
-    dispose: () => { clearTimeout(storeTimer); clearTimeout(statTimer); observer.disconnect(); },
+    dispose: () => { disposed = true; clearTimeout(storeTimer); clearTimeout(statTimer); clearTimeout(revealTimer); observer.disconnect(); },
   };
 }

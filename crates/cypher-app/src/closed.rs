@@ -22,6 +22,9 @@ fn is_id(id: &str) -> bool {
 /// `dir\closed`에 보관된 `<닫은 시각>-<id>.<ext>`를 `dir\<id>.<ext>`로 되돌린다.
 /// 되돌렸거나 이미 제자리에 있으면 true, 보관된 것이 없으면(30일이 지났거나 내용 없이 닫음) false.
 /// 같은 번호가 여러 번 닫혔으면 가장 나중에 닫은 것을 되돌린다.
+///
+/// 이름이 `-<id>.<ext>`로 끝나는 것만 되돌린다. 메모를 통째로 바꾸기 전에 보관한 글(`<시각>-<id>.before.txt`,
+/// `memo.rs`의 `archive`)은 닫은 메모가 아니므로 되돌리지 않고 그 자리에 둔다.
 pub fn restore_in(dir: &Path, id: &str, ext: &str) -> Result<bool, String> {
     let live = dir.join(format!("{id}.{ext}"));
     if live.exists() {
@@ -73,6 +76,12 @@ mod tests {
         // 보관된 것이 없으면 false.
         assert_eq!(restore_in(&dir, "m1", "txt"), Ok(false));
 
+        // 바꾸기 전에 보관한 글은 닫은 메모가 아니다: 가장 나중 것이어도 되돌리지 않고 그대로 둔다.
+        fs::write(dir.join("closed").join("2026-11-15-09-00-00-m1.before.txt"), "바꾸기 전").unwrap();
+        fs::write(dir.join("closed").join("2026-11-15-09-00-00-m1.before-2.txt"), "바꾸기 전 2").unwrap();
+        assert_eq!(restore_in(&dir, "m1", "txt"), Ok(false));
+        assert!(!dir.join("m1.txt").exists());
+
         // 같은 번호가 두 번 닫혔으면 나중 것을 되돌린다. 번호가 다른 것(끝이 같은 것 포함)은 건드리지 않는다.
         fs::write(dir.join("closed").join("2026-11-12-09-00-00-m1.txt"), "예전").unwrap();
         fs::write(dir.join("closed").join("2026-11-13-09-00-00-m1.txt"), "나중").unwrap();
@@ -86,6 +95,8 @@ mod tests {
         // 이미 제자리에 있으면 그대로 두고 true(보관된 예전 것으로 덮어쓰지 않는다).
         assert_eq!(restore_in(&dir, "m1", "txt"), Ok(true));
         assert_eq!(fs::read_to_string(dir.join("m1.txt")).unwrap(), "나중");
+        assert!(dir.join("closed").join("2026-11-15-09-00-00-m1.before.txt").exists());
+        assert!(dir.join("closed").join("2026-11-15-09-00-00-m1.before-2.txt").exists());
     }
 
     #[test]

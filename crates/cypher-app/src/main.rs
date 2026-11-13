@@ -30,7 +30,7 @@ use std::ffi::OsString;
 use std::hash::{BuildHasher, Hasher};
 use std::os::windows::ffi::{OsStrExt, OsStringExt};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::AtomicU32;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use cypher_core::config::Config;
@@ -130,20 +130,25 @@ fn short_path(path: &Path) -> Option<PathBuf> {
 }
 
 /// 상태줄·훅 명령으로 쓸 전달 프로그램 호출문.
-/// Claude Code가 어떤 셸로 실행하든 통하도록 슬래시 경로를 쓰고, 공백이 있으면
-/// 짧은 경로로 바꾼다. 그래도 공백이 남으면 따옴표로 감싼다(bash·cmd에서 동작).
+/// Claude Code가 어떤 셸로 실행하든 통하도록 슬래시 경로를 쓰고, 셸이 달리 읽는 글자(공백, 괄호, `&`, `;`, `'` 등)가
+/// 있으면 짧은 경로로 바꾼다. 그래도 남으면 따옴표로 감싼다(bash·cmd에서 동작).
 fn bridge_command(bridge: &Path) -> String {
     let slash = |p: &Path| p.to_string_lossy().replace('\\', "/");
     let mut command = slash(bridge);
-    if command.contains(' ') {
+    if !is_plain_for_shell(&command) {
         if let Some(short) = short_path(bridge) {
             command = slash(&short);
         }
     }
-    if command.contains(' ') {
+    if !is_plain_for_shell(&command) {
         command = format!("\"{command}\"");
     }
     command
+}
+
+/// 따옴표 없이 적어도 셸이 한 낱말로 읽는 경로인지: 글자·숫자(한글 포함)와 `/ : . _ - ~`뿐일 때.
+fn is_plain_for_shell(command: &str) -> bool {
+    command.chars().all(|c| c.is_alphanumeric() || "/:._-~".contains(c))
 }
 
 /// 상태줄·훅 명령으로 쓸 전달 프로그램 호출문. 전달 프로그램이 실행 파일 옆에 없으면 None.
@@ -193,6 +198,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         .build()?;
     let settings = SubmenuBuilder::new(app, "설정")
         .item(&item("look", "모양: 테마·글꼴·글자 크기…")?)
+        .item(&item("home", "브라우저 시작 페이지…")?)
         .item(&item("settings", "Cypher 설정 파일 열기")?)
         .separator()
         .item(&item("claude-settings", "Claude 공통 설정 열기 (settings.json)")?)
@@ -205,15 +211,48 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
     MenuBuilder::new(app).items(&[&tools, &settings, &help]).build()
 }
 
+/// 본창을 닫아 달라는 요청을 받아 화면에 저장할 틈을 주고 있는지.
+static CLOSING: AtomicBool = AtomicBool::new(false);
+/// 화면이 저장을 마쳤다고 알려 오기를 기다리는 시간. 넘으면 그냥 닫는다.
+const CLOSE_WAIT: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// 화면이 쓰던 것을 모두 저장했다: 본창을 닫는다(닫히면 앱이 끝난다).
+#[tauri::command]
+fn app_close(app: tauri::AppHandle) {
+    if let Some(window) = app.get_window("main") {
+        let _ = window.destroy();
+    }
+}
+
 fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
         // 본창을 닫으면 앱을 끝낸다.
         .on_window_event(|window, event| {
-            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
-                chrome::shutdown(); // "chrome" 엔진으로 띄워 둔 브라우저도 함께 닫는다.
-                window.app_handle().exit(0);
+            if window.label() != "main" {
+                return;
+            }
+            match event {
+                // 닫으려 할 때 바로 닫지 않고 화면에 알린다. 화면은 방금 친 글(자동 저장을 기다리던 메모·요청 파일·브레인스토밍)과
+                // 배치를 저장한 뒤 `app_close`로 닫는다. 그러지 않으면 닫기 직전에 친 글이 사라진다.
+                // 화면이 답하지 않으면 잠시 뒤에 그냥 닫고, 그 전에 다시 닫으려 하면 바로 닫는다.
+                tauri::WindowEvent::CloseRequested { api, .. } => {
+                    if !CLOSING.swap(true, Ordering::SeqCst) {
+                        api.prevent_close();
+                        let _ = window.emit_to("main", "app-closing", ());
+                        let window = window.clone();
+                        std::thread::spawn(move || {
+                            std::thread::sleep(CLOSE_WAIT);
+                            let _ = window.destroy();
+                        });
+                    }
+                }
+                tauri::WindowEvent::Destroyed => {
+                    chrome::shutdown(); // "chrome" 엔진으로 띄워 둔 브라우저도 함께 닫는다.
+                    window.app_handle().exit(0);
+                }
+                _ => {}
             }
         })
         .setup(|app| {
@@ -258,6 +297,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            app_close,
             commands::app_config,
             commands::open_config,
             commands::open_claude_file,
@@ -354,5 +394,16 @@ mod tests {
         // 존재하지 않는 경로라 짧은 경로로 바꿀 수 없다.
         let command = bridge_command(Path::new(r"C:\없는 폴더\cypher-bridge.exe"));
         assert_eq!(command, "\"C:/없는 폴더/cypher-bridge.exe\"");
+    }
+
+    #[test]
+    fn 셸이_달리_읽는_글자가_있으면_따옴표로_감싼다() {
+        // 공백이 없어도 괄호·&·;·작은따옴표는 셸이 낱말을 끊거나 달리 읽는다(없는 경로라 짧은 경로로는 못 바꾼다).
+        for path in [r"D:\없는(new)\cypher-bridge.exe", r"D:\없는&곳\cypher-bridge.exe", r"D:\없는;곳\cypher-bridge.exe", r"D:\it's\cypher-bridge.exe"] {
+            let command = bridge_command(Path::new(path));
+            assert!(command.starts_with('"') && command.ends_with('"'), "{command}");
+        }
+        // 한글·숫자·점·밑줄·붙임표뿐인 경로는 그대로 쓴다.
+        assert_eq!(bridge_command(Path::new(r"D:\도구_v1.2-b\cypher-bridge.exe")), "D:/도구_v1.2-b/cypher-bridge.exe");
     }
 }

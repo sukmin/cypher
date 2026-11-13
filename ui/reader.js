@@ -20,7 +20,40 @@ const esc = (text) => String(text).replace(/[&<>"']/g, (c) => ESCAPES[c]);
 const MAX_MARKDOWN = 1_500_000;
 /** 한 문단이 이보다 길면 강조·링크를 찾지 않는다(병적인 입력에서 화면이 멈추지 않게). */
 const MAX_INLINE = 20_000;
+/** 한 문단 안에 공백이 이만큼 이어져 있으면 강조·링크를 찾지 않는다(링크 괄호 안의 공백을 되짚느라 멈추지 않게). */
+const MAX_BLANK_RUN = 200;
+/** 한 줄이 이보다 길면 서식으로 그리지 않고 글자 그대로 보여 준다(줄 길이에 따라 느려지는 곳이 남아 있어도 화면이 멈추지 않게). */
+const MAX_LINE = 100_000;
 const MAX_DEPTH = 30;
+
+/** 정규식의 `\s`에 맞는 글자인지(글자 번호로 본다). */
+const isBlankCode = (c) => c === 32 || (c >= 9 && c <= 13) || c === 0xA0 || c === 0x1680 || (c >= 0x2000 && c <= 0x200A)
+  || c === 0x2028 || c === 0x2029 || c === 0x202F || c === 0x205F || c === 0x3000 || c === 0xFEFF;
+
+/** 공백이 `limit`개 이상 이어진 곳이 있는지. */
+function hasBlankRun(text, limit) {
+  let run = 0;
+  for (let i = 0; i < text.length; i++) {
+    if (!isBlankCode(text.charCodeAt(i))) run = 0;
+    else if (++run >= limit) return true;
+  }
+  return false;
+}
+
+const LINE_SEPARATOR = String.fromCharCode(0x2028), PARAGRAPH_SEPARATOR = String.fromCharCode(0x2029);
+/** 줄 구분 문자(정규식의 `.`이 건너지 못하는 글자)가 들어 있는지. */
+const hasLineBreakChar = (text) => text.includes(LINE_SEPARATOR) || text.includes(PARAGRAPH_SEPARATOR);
+
+/** `limit`자보다 긴 줄이 있는지. */
+export function hasLongLine(text, limit = MAX_LINE) {
+  let start = 0;
+  for (;;) {
+    const end = text.indexOf('\n', start);
+    if ((end < 0 ? text.length : end) - start > limit) return true;
+    if (end < 0) return false;
+    start = end + 1;
+  }
+}
 
 // 이미 만든 HTML 조각을 잠시 치워 두는 자리 표시: 사용자 영역 문자만 쓴다(입력에서는 미리 지운다).
 const HOLD_OPEN = '\uE000', HOLD_CLOSE = '\uE001';
@@ -66,12 +99,15 @@ function cleanDest(raw) {
   return safeTarget(dest.replace(/\\([()[\]<> ])/g, '$1'));
 }
 
+/** 글 속에 그냥 적힌 주소의 끝에 붙어 있으면 주소에서 빼는 문장 부호. */
+const URL_TAIL = '.,;:!?\'"*_~';
+
 const anchor = (target, inner, extra = '') =>
   `<a class="reader-link${extra}" data-href="${esc(target)}" title="${esc(target)}">${inner}</a>`;
 
 /** 문단 안의 서식(굵게·기울임·취소선·코드·링크)을 HTML로 바꾼다. `nested`이면(링크 글 안) 링크를 다시 만들지 않는다. */
 function inline(source, ctx, nested = false) {
-  if (source.length > MAX_INLINE) return esc(source);
+  if (source.length > MAX_INLINE || hasBlankRun(source, MAX_BLANK_RUN)) return esc(source);
   const held = [];
   const hold = (html) => { held.push(html); return holdKey(held.length - 1); };
   const link = (dest, inner, extra) => {
@@ -100,14 +136,19 @@ function inline(source, ctx, nested = false) {
     }
     if (g.auto != null) return link(g.auto, esc(g.auto));
     // 글 속에 그냥 적힌 주소: 끝에 붙은 문장 부호와 짝이 맞지 않는 닫는 괄호는 주소에서 뺀다.
-    let url = g.bare, tail = '';
-    for (;;) {
-      const cut = /[.,;:!?'"*_~]+$/.exec(url);
-      if (cut) { tail = cut[0] + tail; url = url.slice(0, cut.index); continue; }
-      if (url.endsWith(')') && url.split('(').length < url.split(')').length) { tail = `)${tail}`; url = url.slice(0, -1); continue; }
+    // (끝에서부터 한 번만 훑는다. 부호가 아주 길게 붙어 있어도 느려지지 않는다.)
+    const bare = g.bare;
+    let end = bare.length;
+    const opens = bare.split('(').length - 1;
+    let closes = bare.split(')').length - 1;
+    for (; end > 0; end--) {
+      const c = bare[end - 1];
+      if (URL_TAIL.includes(c)) continue;
+      if (c === ')' && closes > opens) { closes--; continue; }
       break;
     }
-    return link(url, esc(url)) + tail;
+    const url = bare.slice(0, end);
+    return link(url, esc(url)) + bare.slice(end);
   });
 
   text = esc(text)
@@ -126,12 +167,64 @@ function inline(source, ctx, nested = false) {
 }
 
 const FENCE = /^( {0,3})(`{3,}|~{3,})[ \t]*(.*)$/;
-const HEADING = /^ {0,3}(#{1,6})(?:[ \t]+(.*?))?(?:[ \t]+#+)?[ \t]*$/;
+const HEADING_OPEN = /^ {0,3}(#{1,6})(?=[ \t]|$)/;
 const RULE = /^ {0,3}([-*_])(?:[ \t]*\1){2,}[ \t]*$/;
 const QUOTE = /^ {0,3}>/;
 const LIST = /^( *)([-*+]|\d{1,9}[.)])( +|$)(.*)$/;
-const TABLE_SEP = /^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*$/;
 const ALERTS = { note: '참고', tip: '팁', important: '중요', warning: '경고', caution: '주의' };
+
+const isGap = (c) => c === ' ' || c === '\t';
+
+/**
+ * 그 줄이 제목(`# 제목`, `## 제목 ##`)이면 { level, text }, 아니면 null.
+ * 제목 글 앞뒤의 공백과, 공백을 두고 끝에 붙인 닫는 `#`들은 뗀다. 정규식 하나로 하면 줄 가운데에 공백이 아주 길게
+ * 이어진 줄에서 길이의 제곱만큼 느려지므로, 여는 `#`만 정규식으로 보고 나머지는 앞뒤에서 직접 센다.
+ */
+function headingOf(line) {
+  const m = HEADING_OPEN.exec(line);
+  if (!m) return null;
+  const rest = line.slice(m[0].length);
+  if (hasLineBreakChar(rest)) return null; // 줄 구분 문자(U+2028, U+2029)가 든 줄은 제목으로 보지 않는다.
+  let start = 0, end = rest.length;
+  while (start < end && isGap(rest[start])) start++;
+  while (end > start && isGap(rest[end - 1])) end--;
+  let cut = end;
+  while (cut > start && rest[cut - 1] === '#') cut--;
+  if (cut < end && cut > start && isGap(rest[cut - 1])) {
+    end = cut;
+    while (end > start && isGap(rest[end - 1])) end--;
+  }
+  return { level: m[1].length, text: rest.slice(start, end) };
+}
+
+/**
+ * 표의 머리와 본문을 가르는 줄(`|---|:-:|`)인지: 칸마다 `-`가 하나 이상 있고 양 끝에 `:`를 붙일 수 있다.
+ * 맨 앞의 `|`는 공백 세 칸까지만 들여쓸 수 있다. (정규식 하나로 하면 공백이 길게 이어진 줄에서 느려져 직접 읽는다.)
+ */
+function isTableSep(line) {
+  const n = line.length;
+  let i = 0;
+  const gap = () => { while (i < n && isGap(line[i])) i++; };
+  gap();
+  if (line[i] === '|') {
+    if (i > 3 || line.slice(0, i).includes('\t')) return false;
+    i++;
+  }
+  for (;;) {
+    gap();
+    if (line[i] === ':') i++;
+    const dashes = i;
+    while (line[i] === '-') i++;
+    if (i === dashes) return false;
+    if (line[i] === ':') i++;
+    gap();
+    if (i >= n) return true;
+    if (line[i] !== '|') return false;
+    i++;
+    gap();
+    if (i >= n) return true; // 맨 끝의 `|`
+  }
+}
 
 const indentOf = (line) => line.length - line.trimStart().length;
 /** 그 줄이 코드 울타리를 여는지. 열면 { indent, mark, info }. */
@@ -145,7 +238,7 @@ const closesFence = (line, mark) => {
   return !!m && m[1][0] === mark[0] && m[1].length >= mark.length;
 };
 /** 문단을 끊고 새 덩어리를 시작하는 줄인지(제목, 코드 울타리, 가로줄, 인용). */
-const startsBlock = (line) => HEADING.test(line) || !!fenceOf(line) || RULE.test(line) || QUOTE.test(line);
+const startsBlock = (line) => !!headingOf(line) || !!fenceOf(line) || RULE.test(line) || QUOTE.test(line);
 
 function codeBlock(text, lang) {
   const name = lang ? `<span class="reader-lang">${esc(lang)}</span>` : '';
@@ -254,9 +347,10 @@ function list(lines, start, ctx, depth) {
 }
 
 /** 줄들을 덩어리(제목, 문단, 목록, 인용, 코드, 표 …)로 읽어 HTML로 바꾼다. `tight`이면(빽빽한 목록 안) 문단을 <p>로 감싸지 않는다. */
-function blocks(lines, ctx, tight, depth = 0) {
+function blocks(lines, ctx, tight, depth = 0, raw = null) {
   if (depth > MAX_DEPTH) return `<p>${esc(lines.join('\n'))}</p>\n`;
   let out = '', para = [], i = 0;
+  let openComment = false; // 닫는 표시(-->)가 끝까지 없는 주석 줄을 이미 만났다.
   const flush = () => {
     if (!para.length) return;
     const html = inline(para.map((line) => line.trimStart()).join('\n').trimEnd(), ctx);
@@ -271,15 +365,17 @@ function blocks(lines, ctx, tight, depth = 0) {
     if (fence) {
       flush();
       const body = [];
+      // 문서 맨 바깥의 들여쓰지 않은 울타리 안은 탭을 바꾸기 전의 줄을 그대로 쓴다(Makefile처럼 탭이 뜻을 가진 코드를 복사해 쓸 수 있게).
+      const asWritten = !!raw && !fence.indent;
       for (i++; i < lines.length && !closesFence(lines[i], fence.mark); i++) {
-        body.push(lines[i].slice(Math.min(indentOf(lines[i]), fence.indent)));
+        body.push(asWritten ? raw[i] : lines[i].slice(Math.min(indentOf(lines[i]), fence.indent)));
       }
       i++; // 닫는 줄(닫히지 않았으면 글 끝까지가 코드다)
       out += codeBlock(body.join('\n'), fence.info.split(/\s+/)[0]);
       continue;
     }
-    let m = HEADING.exec(line);
-    if (m) { flush(); out += heading(m[1].length, m[2] || '', ctx); i++; continue; }
+    const head = headingOf(line);
+    if (head) { flush(); out += heading(head.level, head.text, ctx); i++; continue; }
     // 문단 바로 아래의 === 나 --- 는 그 문단을 제목으로 만든다.
     if (para.length && /^ {0,3}(?:=+|-+)[ \t]*$/.test(line)) {
       const text = para.map((l) => l.trim()).join(' ');
@@ -290,10 +386,11 @@ function blocks(lines, ctx, tight, depth = 0) {
     }
     if (RULE.test(line)) { flush(); out += '<hr>\n'; i++; continue; }
     // 주석(<!-- … -->)은 보이지 않게 넘긴다.
-    if (/^ {0,3}<!--/.test(line)) {
+    if (!openComment && /^ {0,3}<!--/.test(line)) {
       let end = i;
       while (end < lines.length && !lines[end].includes('-->')) end++;
       if (end < lines.length) { flush(); i = end + 1; continue; } // 닫히지 않은 주석은 글로 둔다.
+      openComment = true; // 여기서부터 끝까지 닫는 표시가 없다. 뒤의 주석 줄에서 다시 찾지 않는다.
     }
     if (QUOTE.test(line)) {
       flush();
@@ -311,7 +408,7 @@ function blocks(lines, ctx, tight, depth = 0) {
         : `<blockquote>\n${blocks(inner, ctx, false, depth + 1)}</blockquote>\n`;
       continue;
     }
-    if (line.includes('|') && i + 1 < lines.length && lines[i + 1].includes('-') && TABLE_SEP.test(lines[i + 1])
+    if (line.includes('|') && i + 1 < lines.length && lines[i + 1].includes('-') && isTableSep(lines[i + 1])
       && (lines[i + 1].includes('|') || splitRow(line).length === 1) && splitRow(line).length === splitRow(lines[i + 1]).length) {
       flush();
       const made = table(lines, i, ctx);
@@ -319,7 +416,7 @@ function blocks(lines, ctx, tight, depth = 0) {
       i = made.next;
       continue;
     }
-    m = LIST.exec(line);
+    const m = LIST.exec(line);
     // 문단을 끊고 시작하는 목록은 글이 있는 글머리 목록이나 1번으로 시작하는 번호 목록뿐이다.
     if (m && m[1].length <= 3 && (!para.length || (m[4] && (!/\d/.test(m[2]) || /^1[.)]$/.test(m[2]))))) {
       flush();
@@ -343,10 +440,13 @@ function blocks(lines, ctx, tight, depth = 0) {
   return out;
 }
 
-/** `[이름]: 주소` 꼴의 참조 정의를 모으고 그 줄은 뺀다(코드 울타리 안은 건드리지 않는다). */
+/**
+ * `[이름]: 주소` 꼴의 참조 정의를 모은다(코드 울타리 안은 건드리지 않는다).
+ * 줄마다 남길 줄인지(참조 정의가 아닌지)를 돌려준다. 참조 정의 줄은 화면에 그리지 않는다.
+ */
 function takeRefs(lines, ctx) {
   let fence = null;
-  return lines.filter((line) => {
+  return lines.map((line) => {
     if (fence) { if (closesFence(line, fence)) fence = null; return true; }
     fence = fenceOf(line)?.mark || null;
     if (fence) return true;
@@ -361,11 +461,13 @@ function takeRefs(lines, ctx) {
 /** Markdown 글을 HTML로 바꾼다. 글 속의 HTML은 실행되지 않고 글자 그대로 보인다. */
 export function renderMarkdown(text) {
   const ctx = { slugs: new Map(), refs: new Map() };
-  let lines = String(text ?? '')
+  const clean = String(text ?? '')
     .replace(/\r\n?/g, '\n')
-    .replace(/[\uE000-\uE01F]/g, '')
-    .replace(/^[ ]*\t[ \t]*/gm, (lead) => lead.replace(/\t/g, '    '))
-    .split('\n');
+    .replace(/[\uE000-\uE01F]/g, '');
+  // 줄 앞의 탭은 공백 네 칸으로 센다(들여쓰기를 칸 수로 가리기 위해). 탭을 바꾸기 전의 줄(raw)도 나란히 들고 있다가,
+  // 들여쓰지 않은 코드 울타리 안의 줄은 그것으로 보여 준다(복사한 코드에 탭이 살아 있게).
+  let raw = clean.split('\n');
+  let lines = clean.replace(/^[ ]*\t[ \t]*/gm, (lead) => lead.replace(/\t/g, '    ')).split('\n');
   let out = '';
   // 맨 앞의 머리말(--- 사이의 `이름: 값` 줄들)은 코드처럼 그대로 보여 준다.
   if (lines[0]?.trim() === '---' && /^[A-Za-z_][\w-]*[ \t]*:/.test(lines[1] || '')) {
@@ -373,9 +475,12 @@ export function renderMarkdown(text) {
     if (end > 0) {
       out += codeBlock(lines.slice(1, end).join('\n'), '머리말');
       lines = lines.slice(end + 1);
+      raw = raw.slice(end + 1);
     }
   }
-  return out + blocks(takeRefs(lines, ctx), ctx, false);
+  const keep = takeRefs(lines, ctx);
+  const kept = (list) => list.filter((_, index) => keep[index]);
+  return out + blocks(kept(lines), ctx, false, 0, kept(raw));
 }
 
 /** 글자 그대로(고정폭) 보여 줄 HTML. */
@@ -537,7 +642,9 @@ export function createReader(item, host, saved = {}, onChange = () => {}) {
   }
 
   function draw(text, scroll) {
-    let rich = isMarkdown(path) && text.length <= MAX_MARKDOWN;
+    // 아주 긴 줄이 있는 글은 서식으로 그리지 않는다(줄 길이에 따라 느려지는 곳이 남아 있어도 화면이 멈추지 않게).
+    const longLine = isMarkdown(path) && text.length <= MAX_MARKDOWN && hasLongLine(text);
+    let rich = isMarkdown(path) && text.length <= MAX_MARKDOWN && !longLine;
     let html;
     try {
       html = rich ? renderMarkdown(text) : renderPlain(text);
@@ -548,6 +655,7 @@ export function createReader(item, host, saved = {}, onChange = () => {}) {
     $body.className = `reader-body${rich ? '' : ' plain'}`;
     $body.innerHTML = html;
     loaded = true;
+    if (longLine) note(`한 줄이 ${MAX_LINE.toLocaleString('ko-KR')}자를 넘는 글이라 서식 없이 글자 그대로 보여 줍니다`);
     setScroll(scroll);
     if (findOpen) search(true);
   }

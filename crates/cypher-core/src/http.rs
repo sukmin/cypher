@@ -30,7 +30,8 @@ pub struct HttpRequest {
     pub body: String,
     /// 이 요청이 시작하는 줄(0부터). `###` 줄이거나, 첫 요청이면 파일 첫 줄.
     pub line: usize,
-    /// 이 요청 구역이 끝나는 줄의 다음 줄(다음 `###` 줄이거나 파일 끝).
+    /// 이 요청 구역이 끝나는 줄의 다음 줄(다음 `###` 줄이거나 파일 끝). 글이 줄 바꿈으로 끝나면
+    /// 편집기에 보이는 맨 끝의 빈 줄까지가 마지막 구역이다.
     pub end: usize,
     /// 값을 채우지 못한 까닭들(모르는 알고리즘, 없는 환경 변수, 주소가 아닌 글자 등). 비어 있어야 보낼 수 있다.
     pub problems: Vec<String>,
@@ -106,6 +107,12 @@ fn is_comment(line: &str) -> bool {
     line.starts_with('#') || line.starts_with("//")
 }
 
+/// 글 맨 앞의 BOM(메모장 등이 붙이는 U+FEFF)을 뗀다. 첫 줄 안에 있는 글자라 줄 번호는 달라지지 않는다.
+/// 떼지 않으면 첫 줄의 `@변수`·`### 이름`·요청 줄을 알아보지 못한다(`trim`은 이 글자를 지우지 않는다).
+fn without_bom(text: &str) -> &str {
+    text.strip_prefix('\u{feff}').unwrap_or(text)
+}
+
 /// 요청 파일의 요청을 모두 읽는다. 변수와 내장 값은 지금 시각 기준으로 채워진 상태로 돌려준다.
 pub fn parse(text: &str) -> Vec<HttpRequest> {
     parse_at(text, Now::system())
@@ -113,6 +120,7 @@ pub fn parse(text: &str) -> Vec<HttpRequest> {
 
 /// 정해진 시각을 기준으로 읽는다.
 pub fn parse_at(text: &str, now: Now) -> Vec<HttpRequest> {
+    let text = without_bom(text);
     let vars: HashMap<String, String> = text.lines().filter_map(var_line).collect();
 
     let mut requests = Vec::new();
@@ -132,20 +140,40 @@ pub fn parse_at(text: &str, now: Now) -> Vec<HttpRequest> {
             None => block.push(line),
         }
     }
+    // 글이 줄 바꿈으로 끝나면 편집기에는 그 뒤에 빈 줄이 하나 더 보인다. 마지막 구역이 그 줄까지 덮게 한다
+    // (마지막 요청 아래의 빈 줄에서 실행해도 그 요청이 나가도록).
+    if text.ends_with('\n') {
+        total += 1;
+    }
     requests.extend(parse_block(&name, start, total.max(start + 1), &block, &vars, now));
     requests
 }
 
-/// 편집기에서 커서가 있는 줄(0부터)이 속한 요청의 번호.
+/// 편집기에서 커서가 있는 줄(0부터)이 속한 요청의 번호. `requests`는 같은 `text`를 읽은 결과여야 한다.
 ///
 /// 그 줄이 어느 요청 구역에도 들어 있지 않으면 None이다(가까운 다른 요청을 대신 고르지 않는다. 엉뚱한 요청이
-/// 전송되면 안 되기 때문이다). 단, 첫 요청보다 위(변수·설명 부분)에 있으면 첫 요청으로 본다.
-pub fn index_at(requests: &[HttpRequest], line: usize) -> Option<usize> {
-    let first = requests.first()?;
-    if line < first.line {
-        return Some(0);
+/// 전송되면 안 되기 때문이다). 단, 파일 머리말(첫 `###` 앞이고 빈 줄·주석·변수 정의뿐인 부분)에 있으면
+/// 바로 아래의 첫 구역을 고른다. 그 구역이 요청이 되지 못했으면(주소를 잘못 적은 줄, 설명만 있는 구역)
+/// 이때도 None이다. 그 뒤의 다른 요청을 "첫 요청"이라며 대신 보내지 않는다.
+pub fn index_at(text: &str, requests: &[HttpRequest], line: usize) -> Option<usize> {
+    if let Some(found) = requests.iter().position(|r| r.line <= line && line < r.end) {
+        return Some(found);
     }
-    requests.iter().position(|r| r.line <= line && line < r.end)
+    let below = preamble_end(text)?;
+    (line < below && requests.first()?.line == below).then_some(0)
+}
+
+/// 머리말 바로 아래 줄(첫 `###` 줄)의 번호. 그 앞에 빈 줄·주석·변수 정의가 아닌 글이 있으면 머리말이 아니다.
+fn preamble_end(text: &str) -> Option<usize> {
+    for (number, line) in without_bom(text).lines().enumerate() {
+        if line.starts_with("###") {
+            return Some(number);
+        }
+        if !(line.trim().is_empty() || is_comment(line) || var_line(line).is_some()) {
+            return None;
+        }
+    }
+    None
 }
 
 fn parse_block(
@@ -638,11 +666,13 @@ fn masked_header<'a>(key: &str, value: &'a str) -> &'a str {
 
 /// 실행 한 번의 기록. 그 자체로 `.http` 형식이라 요청 부분은 다시 실행할 수 있고,
 /// 응답은 `<>` 줄 아래 주석으로 남는다. 인증 헤더 값과 환경 변수에서 읽은 값은 `***`로 가린다.
+/// `final_url`은 리다이렉트를 따라가 응답을 받은 주소다(요청 주소와 같으면 None). `<>` 줄 끝에 `→ 주소`로 적는다.
 pub fn record(
     request: &HttpRequest,
     when: &str,
     status: &str,
     elapsed_ms: u64,
+    final_url: Option<&str>,
     response_headers: &[(String, String)],
     response_body: &str,
 ) -> String {
@@ -653,7 +683,11 @@ pub fn record(
     if !request.body.is_empty() {
         out.push_str(&format!("\n{}\n", request.masked(&request.body)));
     }
-    out.push_str(&format!("\n<> {status} · {elapsed_ms}ms\n"));
+    out.push_str(&format!("\n<> {status} · {elapsed_ms}ms"));
+    if let Some(url) = final_url {
+        out.push_str(&format!(" → {}", request.masked(url)));
+    }
+    out.push('\n');
     for (key, value) in response_headers {
         out.push_str(&format!("# {key}: {}\n", masked_header(key, value)));
     }
@@ -720,6 +754,7 @@ mod tests {
             "2026-11-11 22:40:12",
             "200 OK",
             132,
+            None,
             &[("content-type".into(), "application/json".into()), ("set-cookie".into(), "sid=1".into())],
             "{\"ok\":true}\n### 응답 속 구분선처럼 보이는 줄",
         );
@@ -737,6 +772,7 @@ mod tests {
     #[test]
     fn 커서가_있는_줄의_요청을_찾는다() {
         let requests = parse(TEMPLATE);
+        let index_at = |requests: &[HttpRequest], line| index_at(TEMPLATE, requests, line);
         let lines: Vec<&str> = TEMPLATE.lines().collect();
         let first = lines.iter().position(|l| l.starts_with("### 조회")).unwrap();
         let second = lines.iter().position(|l| l.starts_with("### 전송")).unwrap();
@@ -754,6 +790,7 @@ mod tests {
         // "조회"의 주소는 변수 오타로 채워지지 않는다. 그 줄에서 실행해도 앞의 "지우기"가 대신 나가면 안 된다.
         let text = "@host = https://a.example\n### 지우기\nDELETE {{host}}/items/1\n\n### 조회\nGET {{hsot}}/items\n\n### 설명만\n그냥 글자\n\n### 상대 주소\nGET /items\n";
         let requests = parse(text);
+        let index_at = |requests: &[HttpRequest], line| index_at(text, requests, line);
         let names: Vec<&str> = requests.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, ["지우기", "조회"]);
         assert!(requests[0].problems.is_empty());
@@ -763,10 +800,77 @@ mod tests {
         assert_eq!(index_at(&requests, 8), None); // 요청이 아닌 구역
         assert_eq!(index_at(&requests, 11), None); // 주소가 아닌 요청 줄
         // 환경 변수가 없어 주소를 못 채운 경우도 같다.
-        let requests = parse("### 가\nGET https://a.example/1\n### 나\nGET {{$env CYPHER_없는_환경_변수}}/2\n");
+        let text = "### 가\nGET https://a.example/1\n### 나\nGET {{$env CYPHER_없는_환경_변수}}/2\n";
+        let requests = parse(text);
         assert_eq!(requests.len(), 2);
-        assert_eq!(index_at(&requests, 3), Some(1));
+        assert_eq!(super::index_at(text, &requests, 3), Some(1));
         assert!(!requests[1].problems.is_empty());
+    }
+
+    #[test]
+    fn 첫_요청이_잘못_적혀_있으면_그_자리에서_다음_요청이_실행되지_않는다() {
+        let picks = |text: &str, lines: std::ops::Range<usize>| -> Vec<Option<usize>> {
+            let requests = parse(text);
+            lines.map(|line| index_at(text, &requests, line)).collect()
+        };
+        // "조회"는 http://가 빠져 요청이 되지 못했다. 그 구역이나 머리말에서 실행해도 뒤의 "지우기"가 나가면 안 된다.
+        let text = "# 설명\n@host = https://a.example\n\n### 조회\nGET localhost:8080/items\n\n### 지우기\nDELETE {{host}}/items/1\n";
+        assert_eq!(parse(text).iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["지우기"]);
+        assert_eq!(picks(text, 0..6), [None; 6]);
+        assert_eq!(picks(text, 6..9), [Some(0); 3]);
+        // 설명만 있는 구역이 첫 요청 앞에 있을 때도 같다.
+        let text = "@host = https://a.example\n### 메모\n# 나중에 정리\n\n### 지우기\nDELETE {{host}}/items/1\n";
+        assert_eq!(picks(text, 0..5), [None, None, None, None, Some(0)]);
+        // 머리말(빈 줄·주석·변수뿐)에서는 바로 아래의 첫 요청을 보낸다.
+        let text = "// 설명\n@host = https://a.example\n\n### 조회\nGET {{host}}/items\n\n### 지우기\nDELETE {{host}}/items/1\n";
+        assert_eq!(picks(text, 0..7), [Some(0), Some(0), Some(0), Some(0), Some(0), Some(0), Some(1)]);
+        // `###` 없이 적은 첫 줄이 요청이 되지 못했으면, 그 위아래는 머리말이 아니다.
+        let text = "@host = https://a.example\nlocalhost/items\n\n### 지우기\nDELETE {{host}}/items/1\n";
+        assert_eq!(picks(text, 0..4), [None, None, None, Some(0)]);
+    }
+
+    #[test]
+    fn bom이_붙은_파일도_첫_줄부터_읽는다() {
+        // 첫 줄이 변수인 경우
+        let text = "\u{feff}@host = https://a.example\n### 조회\nGET {{host}}/items\n";
+        let requests = parse(text);
+        assert_eq!((requests.len(), requests[0].url.as_str()), (1, "https://a.example/items"));
+        assert!(requests[0].problems.is_empty(), "{:?}", requests[0].problems);
+        assert_eq!(index_at(text, &requests, 0), Some(0)); // 머리말 판정도 같다.
+        // 첫 줄이 요청 이름인 경우. 줄 번호는 BOM이 없을 때와 같다.
+        let text = "\u{feff}### 조회\nGET https://a.example/items\n\n### 지우기\nDELETE https://a.example/items/1\n";
+        let requests = parse(text);
+        assert_eq!(requests.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["조회", "지우기"]);
+        assert_eq!((requests[0].line, requests[0].end, requests[1].line), (0, 3, 3));
+        assert_eq!(index_at(text, &requests, 0), Some(0));
+        // 첫 줄이 요청 줄이거나 주석인 경우
+        let requests = parse("\u{feff}GET https://a.example/ping\n");
+        assert_eq!((requests.len(), requests[0].method.as_str(), requests[0].url.as_str()), (1, "GET", "https://a.example/ping"));
+        let text = "\u{feff}# 설명\n### 조회\nGET https://a.example/items\n";
+        assert_eq!(index_at(text, &parse(text), 0), Some(0));
+    }
+
+    #[test]
+    fn 마지막_요청_아래_빈_줄도_그_요청이다() {
+        // 글이 줄 바꿈으로 끝나면 편집기에는 2번 줄(빈 줄)이 있다. 거기서 실행해도 마지막 요청이 나간다.
+        for text in ["### 가\nGET https://a.example/1\n", "### 가\r\nGET https://a.example/1\r\n"] {
+            let requests = parse(text);
+            assert_eq!((requests[0].line, requests[0].end), (0, 3), "{text:?}");
+            assert_eq!(index_at(text, &requests, 2), Some(0));
+            assert_eq!(index_at(text, &requests, 3), None); // 편집기에 없는 줄
+        }
+        // 줄 바꿈으로 끝나지 않으면 마지막 글자 줄까지다.
+        let text = "### 가\nGET https://a.example/1";
+        let requests = parse(text);
+        assert_eq!(requests[0].end, 2);
+        assert_eq!((index_at(text, &requests, 1), index_at(text, &requests, 2)), (Some(0), None));
+        // 앞 요청의 범위는 그대로다. 마지막 구역이 요청이 아니면 그 아래 빈 줄에서도 보내지 않는다.
+        let text = "### 가\nGET https://a.example/1\n### 나\nGET https://a.example/2\n\n";
+        let requests = parse(text);
+        assert_eq!((requests[0].end, requests[1].end), (2, 6));
+        assert_eq!(index_at(text, &requests, 5), Some(1));
+        let text = "### 가\nGET https://a.example/1\n### 메모\n";
+        assert_eq!(index_at(text, &parse(text), 3), None);
     }
 
     #[test]
@@ -819,8 +923,13 @@ mod tests {
         std::env::set_var("CYPHER_TEST_SECRET", "s3cr3t-value");
         let request = parse("GET https://a.example/x?api_key={{$env CYPHER_TEST_SECRET}}\nX-Auth-Token: {{$env CYPHER_TEST_SECRET}}\n").remove(0);
         assert!(request.url.contains("s3cr3t-value")); // 실제 전송에는 들어간다.
-        let text = record(&request, "2026-11-12 08:00:00", "200 OK", 1, &[], "echo s3cr3t-value");
+        let text = record(&request, "2026-11-12 08:00:00", "200 OK", 1, None, &[], "echo s3cr3t-value");
         assert!(!text.contains("s3cr3t-value"), "{text}");
+        // 리다이렉트를 따라간 최종 주소는 상태 줄에 남고, 거기 든 비밀 값도 가린다. 다시 읽어도 요청은 하나다.
+        let moved = "https://b.example/x?api_key=s3cr3t-value";
+        let text = record(&request, "2026-11-12 08:00:00", "200 OK", 1, Some(moved), &[], "");
+        assert!(text.contains("\n<> 200 OK · 1ms → https://b.example/x?api_key=***\n"), "{text}");
+        assert_eq!(parse(&text).len(), 1);
         assert!(text.contains("api_key=***") && text.contains("X-Auth-Token: ***"));
         assert_eq!(request.masked("주소 https://a.example/x?api_key=s3cr3t-value"), "주소 https://a.example/x?api_key=***");
     }

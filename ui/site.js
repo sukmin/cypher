@@ -86,6 +86,8 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
   }
   let opening = false;
   let retold = false;                             // 여는 동안 앱에 다른 프로필을 알렸는지(그랬다면 앱이 그 웹뷰를 닫았을 수 있다)
+  let wanted = null;                              // 웹뷰가 뜨기 전에 친 주소(뜨면 그리로 간다)
+  let failed = null;                              // 열지 못한 시도 { attempt(프로필 + 주소), note(오류 글) }. 같은 조건으로는 다시 열지 않는다.
   let last = '';                                  // 마지막으로 알린 자리
   let disposed = false;
 
@@ -192,8 +194,14 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
   }
 
   async function go(target) {
+    if (!opened) {
+      // 웹뷰가 아직 없다(만드는 중이거나 열지 못했다). 친 주소를 적어 두고 연다: 만드는 중이었으면 다 뜬 뒤에 그리로 간다.
+      // 열지 못한 뒤라면 주소가 그대로여도 다시 해 본다.
+      failed = null;
+      if (target.trim()) { wanted = target; setUrl(target); $address.value = target; }
+      return sync();
+    }
     if (!target.trim()) return;
-    if (!opened) { setUrl(target); $address.value = target; return sync(); }
     try {
       setUrl(await invoke('site_navigate', { id, url: target }));
       $address.value = url;
@@ -215,7 +223,8 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
     refresh();
     const rect = $view.getBoundingClientRect();
     const visible = rect.width > 8 && rect.height > 8 && !covered();
-    $note.textContent = visible || !opened ? '' : '메뉴나 창이 열려 있는 동안에는 페이지를 잠시 가립니다.';
+    if (opened) $note.textContent = visible ? '' : '메뉴나 창이 열려 있는 동안에는 페이지를 잠시 가립니다.';
+    else $note.textContent = failed ? failed.note : '';
     // 웹뷰의 자리는 창 기준 크기로 알려야 한다. 화면 글자 크기 설정(본창 배율)만큼 곱한다.
     const zoom = api.zoom();
     const bounds = { x: rect.left * zoom, y: rect.top * zoom, width: rect.width * zoom, height: rect.height * zoom };
@@ -229,29 +238,49 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
     }
     if (!opened) {
       if (!visible || opening) return;
+      // 같은 프로필·주소로 열다가 실패했으면 다시 열지 않고 오류 글을 그대로 둔다(해석할 수 없는 주소처럼 되지 않을 일을
+      // 화면을 그릴 때마다 되풀이하게 된다). 주소를 다시 치거나 그룹(프로필)이 바뀌면 다시 해 본다.
+      const sent = (wanted ?? url) || 'about:blank';
+      const attempt = `${profile}\n${sent}`;
+      if (failed) {
+        if (failed.attempt === attempt) return;
+        failed = null;
+        $note.textContent = '';
+      }
       opening = true;
       retold = false;
+      let typed = null;
       try {
         await told; // 앞서 알린 프로필이 앱에 닿은 뒤에 연다.
         // 기다리는 사이에 그룹이 또 바뀌었으면 이번에는 열지 않는다(아래의 syncSites가 새 프로필로 다시 온다).
         if (!disposed && !retold) {
-          const at = await invoke('site_open', { id, url: url || 'about:blank', ...bounds, profile });
+          const at = await invoke('site_open', { id, url: sent, ...bounds, profile });
           // 여는 사이에 다른 프로필을 알렸다면(그룹을 연달아 옮김) 앱이 이 웹뷰를 닫았을 수 있다.
           // 열린 것으로 치지 않고 지금의 프로필로 다시 연다(같은 프로필의 웹뷰가 남아 있으면 앱은 그것을 그대로 쓴다).
           if (!retold) {
             setUrl(at);
+            // 여는 사이에 주소를 쳤으면 그 주소는 아직 보내지 않았다(돌아온 것은 앞서 보낸 주소다). 아래에서 친 주소로 간다.
+            if (wanted != null && wanted !== sent) typed = wanted;
+            wanted = null;
             opened = true;
             openedProfile = profile;
             last = now;
           }
         }
       } catch (err) {
-        $note.textContent = `페이지를 열지 못했습니다: ${err}`;
+        // 여는 사이에 다른 프로필을 알렸다면 그 때문에 거절된 것일 수 있다(그룹이 옮겨졌다). 기억하지 않고 지금의 프로필로 다시 연다.
+        if (!retold) {
+          failed = { attempt, note: `페이지를 열지 못했습니다: ${err} (주소 칸에서 Enter를 누르면 다시 시도합니다)` };
+          $note.textContent = failed.note;
+        }
       } finally {
         opening = false;
       }
       if (disposed) invoke('site_close', { id });
-      else syncSites(); // 여는 사이에 자리나 그룹이 바뀌었을 수 있다.
+      else {
+        if (typed != null) go(typed);
+        syncSites(); // 여는 사이에 자리나 그룹이 바뀌었을 수 있다.
+      }
       return;
     }
     if (now === last) return;
@@ -266,7 +295,11 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
     /** 이 항목의 창이 지금 화면에 놓여 있는지. */
     shown: () => { const rect = $view.getBoundingClientRect(); return rect.width > 8 && rect.height > 8; },
     changed: (payload) => {
-      if (payload.url) setUrl(payload.url);
+      if (payload.url) {
+        setUrl(payload.url);
+        // 열지 못했다고 적어 둔 뒤에 웹뷰가 페이지를 읽었다(Claude의 도구가 만들었다). 이 창에도 다시 연다.
+        if (failed) { failed = null; wanted = null; syncSites(); }
+      }
       if (payload.title != null) title = blank(payload.title) ? '' : payload.title;
       onChange();
     },

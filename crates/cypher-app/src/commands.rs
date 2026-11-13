@@ -261,7 +261,10 @@ fn session(state: &State<'_, AppState>, id: u32) -> Result<Arc<PtySession>, Stri
     state.sessions.lock().unwrap().get(&id).cloned().ok_or_else(|| "끝난 세션입니다".to_string())
 }
 
-#[tauri::command]
+/// 창 스레드에서 하지 않는다: 세션이 입력을 받지 못하는 동안(출력이 밀려 읽기를 멈춰 둔 사이의 큰 붙여넣기)에는
+/// 쓰기가 막히는데, 창 스레드가 막히면 읽기를 다시 시작하라는 명령(`session_pause`)도 처리하지 못해 서로 기다리게 된다.
+/// 화면은 한 번에 하나씩 보내고 끝나기를 기다리므로 입력 순서는 그대로다.
+#[tauri::command(async)]
 pub fn session_write(state: State<'_, AppState>, id: u32, data: String) -> Result<(), String> {
     session(&state, id)?.write(data.as_bytes()).map_err(|e| e.to_string())
 }
@@ -272,7 +275,7 @@ pub fn session_resize(state: State<'_, AppState>, id: u32, cols: u16, rows: u16)
 }
 
 /// 화면이 출력을 못 따라갈 때 읽기를 잠시 멈춘다.
-#[tauri::command]
+#[tauri::command(async)]
 pub fn session_pause(state: State<'_, AppState>, id: u32, paused: bool) {
     if let Ok(s) = session(&state, id) {
         s.set_paused(paused);

@@ -441,7 +441,7 @@ export function createImage(item, host, saved = {}, onChange = () => {}) {
       { label: 'Claude 세션에 경로 넣기', action: () => api.toClaude(item, path, ev) },
       { label: '파일 위치 열기', action: () => invoke('link_open', { target: path, cwd: item.startCwd, openFile: false }).catch((err) => setStatus(String(err))) },
       ...(source.startsWith('http') ? [
-        { label: '원본 페이지를 브라우저로 열기', action: () => invoke('browser_open', { url: source }).catch((err) => setStatus(String(err))) },
+        { label: '원본 페이지를 브라우저로 열기', action: () => api.openSource(item, source) },
       ] : []),
     ]);
   });

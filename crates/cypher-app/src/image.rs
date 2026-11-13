@@ -85,7 +85,8 @@ pub fn sniff(head: &[u8]) -> Option<&'static str> {
     if head.len() >= 12 && &head[4..8] == b"ftyp" && (&head[8..12] == b"avif" || &head[8..12] == b"avis") {
         return Some("avif");
     }
-    if head.starts_with(b"BM") && head.len() >= 14 {
+    // BMP는 머리글의 예약 칸(6~9번째 바이트)이 0이다. "BM"으로 시작하는 글자 파일을 그림으로 보지 않게 함께 확인한다.
+    if head.starts_with(b"BM") && head.len() >= 14 && head[6..10] == [0; 4] {
         return Some("bmp");
     }
     if head.starts_with(&[0, 0, 1, 0]) {
@@ -133,6 +134,24 @@ pub fn import(path: &Path) -> Result<Stored, String> {
     store(&bytes, hint.as_deref(), &name)
 }
 
+/// 여러 개를 가져온 결과에서 된 것만 남긴다(안 된 것은 건너뛴다). 하나도 되지 않았으면 첫 오류를 돌려준다.
+fn only_done<T>(results: impl IntoIterator<Item = Result<T, String>>) -> Result<Vec<T>, String> {
+    let mut done = Vec::new();
+    let mut problem = None;
+    for result in results {
+        match result {
+            Ok(one) => done.push(one),
+            Err(first) => {
+                problem.get_or_insert(first);
+            }
+        }
+    }
+    match problem {
+        Some(problem) if done.is_empty() => Err(problem),
+        _ => Ok(done),
+    }
+}
+
 /// 닫은 지 30일이 넘은 이미지를 지운다(시작할 때 한 번).
 pub fn clean_closed() {
     let Ok(entries) = image_dir().and_then(|dir| fs::read_dir(dir.join("closed")).map_err(err)) else { return };
@@ -169,7 +188,10 @@ pub async fn image_pick(start: Option<String>) -> Result<Vec<Stored>, String> {
             dialog = dialog.set_directory(dir);
         }
         let picked = dialog.pick_files().unwrap_or_default();
-        picked.iter().take(20).map(|path| import(path)).collect()
+        // 되는 것만 넣는다: 하나가 안 된다고 전부 버리면, 앞서 저장소에 복사된 그림이 항목 없이 남는다.
+        only_done(picked.iter().take(20).map(|path| {
+            import(path).inspect_err(|problem| crate::log(&format!("이미지 가져오기 실패({}): {problem}", path.display())))
+        }))
     })
     .await
     .map_err(err)?
@@ -445,6 +467,31 @@ mod tests {
         assert_eq!(sniff(b"<svg width=\"1\"/>"), Some("svg"));
         assert_eq!(sniff("그냥 글자".as_bytes()), None);
         assert_eq!(sniff(b"<html><body>svg</body></html>"), None);
+    }
+
+    #[test]
+    fn bm으로_시작하는_글자_파일은_bmp가_아니다() {
+        // BMP 머리글: "BM", 파일 크기(4), 예약(4, 모두 0), 그림 내용이 시작하는 자리(4).
+        let mut bmp = b"BM".to_vec();
+        bmp.extend_from_slice(&70u32.to_le_bytes());
+        bmp.extend_from_slice(&[0; 4]);
+        bmp.extend_from_slice(&54u32.to_le_bytes());
+        assert_eq!(sniff(&bmp), Some("bmp"));
+        assert_eq!(sniff(b"BMW 320d, BMW X5 - price list"), None);
+        assert_eq!(sniff("BM 회의록: 다음 주 일정".as_bytes()), None);
+        // 머리글이 다 들어 있지 않으면 BMP로 보지 않는다.
+        assert_eq!(sniff(b"BM\x46\0\0\0\0\0\0\0"), None);
+    }
+
+    #[test]
+    fn 여러_개를_가져올_때_안_되는_것은_건너뛴다() {
+        let bad = |text: &str| Err::<u32, String>(text.to_string());
+        // 하나가 안 돼도 나머지는 넣는다(순서 그대로).
+        assert_eq!(only_done([Ok(1), bad("이미지 파일이 아닙니다"), Ok(3)]), Ok(vec![1, 3]));
+        // 전부 안 되면 첫 오류를 돌려준다.
+        assert_eq!(only_done([bad("첫째"), bad("둘째")]), Err("첫째".to_string()));
+        // 고른 것이 없으면(취소) 빈 목록이다.
+        assert_eq!(only_done(Vec::<Result<u32, String>>::new()), Ok(Vec::new()));
     }
 
     #[test]

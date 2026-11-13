@@ -247,6 +247,7 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
 #terms.multi .pane-head { display: flex; }
 .pane.active .pane-head { color: var(--text); border-bottom-color: var(--accent); }
 #terms.broadcast .pane:not(.hidden) .pane-head { border-bottom-color: var(--busy); }
+.pane-info { display: contents; } /* 제목·모델 글자만 다시 그리려고 묶은 것. 배치에는 끼지 않는다. */
 .pane-head .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pane-head .model { color: var(--accent); }
 /* 창 제목 줄의 단추: 이 창만 / 숨기기 */

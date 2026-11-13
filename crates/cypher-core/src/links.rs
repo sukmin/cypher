@@ -91,6 +91,15 @@ pub fn detect(text: &str, cwd: &Path) -> Vec<LinkSpan> {
             if raw.starts_with('@') {
                 variants.push((1, trimmed.len()));
             }
+            // 한국어 문장에서는 경로 뒤에 조사가 붙는다("src/main.rs를 고쳤습니다"). 끝에 붙은 한글 등(ASCII가 아닌 글자)을
+            // 뗀 모양도 시도한다. 있는 파일인지 확인하므로 틀리게 잡힐 일은 없고, 온전한 모양을 먼저 본다.
+            let bare = trimmed.trim_end_matches(|c: char| !c.is_ascii()).trim_end_matches('.');
+            if bare.len() < trimmed.len() {
+                variants.push((0, bare.len()));
+                if raw.starts_with('@') {
+                    variants.push((1, bare.len()));
+                }
+            }
             for (from, to) in variants {
                 if from >= to {
                     continue;
@@ -200,6 +209,7 @@ fn trim_url(mut s: &str) -> &str {
     loop {
         let before = s.len();
         s = s.trim_end_matches(['.', ',', ';', ':', '!', '?', '\'', '"']);
+        s = trim_particle(s);
         for (open, close) in [('(', ')'), ('[', ']')] {
             if s.ends_with(close) && s.matches(open).count() < s.matches(close).count() {
                 s = &s[..s.len() - 1];
@@ -208,6 +218,17 @@ fn trim_url(mut s: &str) -> &str {
         if s.len() == before {
             return s;
         }
+    }
+}
+
+/// 주소 끝에 붙은 조사를 뗀다("https://example.com/docs에서 확인"): 영문·숫자 바로 뒤에 이어진 한글은 주소가 아니라
+/// 문장의 일부로 본다. `/`·`=`·`#` 뒤의 한글(`…/wiki/서울`, `?q=서울`)은 주소의 일부이므로 그대로 둔다.
+fn trim_particle(s: &str) -> &str {
+    let stem = s.trim_end_matches(|c: char| ('\u{AC00}'..='\u{D7A3}').contains(&c));
+    if stem.len() < s.len() && stem.ends_with(|c: char| c.is_ascii_alphanumeric()) {
+        stem
+    } else {
+        s
     }
 }
 
@@ -330,6 +351,33 @@ mod tests {
         assert_eq!(urls[1].target, "https://example.org/x");
         // 한글이 앞에 있어도 UTF-16 위치가 맞아야 한다.
         assert_eq!(slice16(text, urls[0]), "https://example.com/a(b)/c?x=1");
+    }
+
+    #[test]
+    fn 조사가_붙은_주소와_경로() {
+        let cwd = fixture("particle");
+        // 주소: 영문·숫자 바로 뒤의 한글은 뗀다. 구두점과 섞여 있어도 같다.
+        let text = "https://example.com/docs에서 확인하고, (https://example.org/a.html을) 봅니다. https://example.net입니다.";
+        let urls: Vec<_> = detect(text, &cwd).into_iter().filter(|s| s.kind == LinkKind::Url).collect();
+        assert_eq!(urls.iter().map(|s| s.target.as_str()).collect::<Vec<_>>(), ["https://example.com/docs", "https://example.org/a.html", "https://example.net"]);
+        assert_eq!(slice16(text, &urls[0]), "https://example.com/docs");
+        // 주소의 일부인 한글은 그대로 둔다.
+        for whole in ["https://ko.example.org/wiki/서울", "https://example.com/search?q=서울", "https://example.com/문서#머리말"] {
+            let spans = detect(&format!("참고: {whole} 끝"), &cwd);
+            assert_eq!(spans[0].target, whole);
+        }
+        // 경로: 온전한 모양이 없는 파일이면 끝의 한글을 뗀 모양을 본다.
+        for text in ["src/main.rs를 고쳤습니다", "고친 파일은 src/main.rs입니다.", "@src/main.rs에 있습니다"] {
+            let spans = detect(text, &cwd);
+            assert_eq!(spans.len(), 1, "{text}");
+            assert_eq!(spans[0].target, path_string(&cwd.join("src").join("main.rs")), "{text}");
+            assert_eq!(slice16(text, &spans[0]), "src/main.rs", "{text}");
+        }
+        // 한글로 끝나는 이름의 파일은 그대로 잡힌다(온전한 모양이 먼저다).
+        fs::write(cwd.join("src").join("계획.md"), "x").unwrap();
+        let spans = detect("src/계획.md 그리고 src/계획.md를", &cwd);
+        assert_eq!(spans.len(), 2);
+        assert!(spans.iter().all(|s| s.target == path_string(&cwd.join("src").join("계획.md"))));
     }
 
     #[test]

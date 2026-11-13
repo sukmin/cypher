@@ -37,12 +37,12 @@ export async function saveTemplate(group) {
     const existing = await invoke('template_list');
     const same = existing.find((t) => t.name.toLowerCase() === name.toLowerCase());
     if (same && !confirm(`"${same.name}" 틀이 이미 있습니다(항목 ${same.items}개, ${when(same.saved)} 저장). 바꿔 쓸까요?`)) return false;
-    // 이름만 다르게 적힌 같은 틀(대/소문자)은 지우고 새로 쓴다.
-    if (same) await invoke('template_remove', { file: same.file }).catch(() => {});
     const path = await invoke('template_save', {
       name,
       body: { version: 1, name, savedAt: Date.now(), summary: packed.summary, items: packed.items },
     });
+    // 이름만 다르게 적혀 다른 파일로 저장된 옛 틀은 지운다. 저장에 성공한 뒤에 지운다(먼저 지우면 저장이 실패했을 때 옛 틀만 사라진다).
+    if (same && !path.toLowerCase().endsWith(`\\${same.file.toLowerCase()}`)) await invoke('template_remove', { file: same.file }).catch(() => {});
     setStatus(`틀로 저장했습니다: ${name} — 항목 ${packed.items.length}개${packed.skipped.length ? ` (담지 않은 것: ${packed.skipped.join(' · ')})` : ''} · ${path}`);
     return true;
   } catch (err) {

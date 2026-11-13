@@ -144,6 +144,70 @@
 :root[data-theme="win32"] .pane.active .pane-head { background: #000080; color: #ffffff; }
 :root[data-theme="win32"] .pane.active .pane-head .model { color: #ffffff; }
 
+/* ───────── 매트릭스 테마: 검은 바탕에 녹색 글자. 본창 맨 뒤에 흐르는 글자(matrix.js의 캔버스)가 깔리고,
+   그 위의 화면은 반투명한 바탕을 써서 글자가 은은하게 비친다. ───────── */
+:root[data-theme="matrix"] {
+  --bg: rgba(0, 9, 3, 0.62);
+  --panel: rgba(1, 16, 6, 0.66);
+  --line: #0c4a1f;
+  --text: #39f57a;
+  --dim: #1fa34e;
+  --accent: #00ff66;
+  --on-accent: #001a08;
+  --busy: #c8ff3d;
+  --idle: #167a38;
+  --attention: #d6ffe2;
+  --dead: #ff5f5f;
+  --ok: #00ff66;
+  --control: rgba(0, 36, 13, 0.82);
+  --hover: rgba(0, 70, 25, 0.55);
+  --select: rgba(0, 110, 40, 0.5);
+  --field: rgba(0, 6, 2, 0.4);
+  --group: rgba(0, 46, 16, 0.72);
+  --chip: #06301a;
+  --tree: #0f6a2c;
+  --scroll: #0f6a2c;
+  --scroll-hover: #1a9a44;
+  --stage: rgba(0, 5, 2, 0.6);
+  --term-bg: rgba(0, 4, 1, 0.6);
+  --add-text: #8dffb0;
+  --del-text: #ff8a8a;
+  --agent: #7dffe2;
+  --agent-text: #b6fff0;
+  --hit: #0d5c28;
+  --hit-cur: #1fae4c;
+  --ui-font: "Cascadia Mono", "D2Coding", Consolas, "Malgun Gothic", monospace;
+}
+:root[data-theme="matrix"] { background: #000; }
+/* 흐르는 글자를 켰을 때만 본창의 바탕을 비운다(끄면 검은 바탕 위에 색만 남는다). */
+:root[data-theme="matrix"][data-rain="on"] body { background: transparent; }
+#matrix-rain { position: fixed; inset: 0; width: 100%; height: 100%; z-index: -1; pointer-events: none; }
+/* 터미널 창은 터미널 칸의 바탕 한 겹만 덮는다(창의 바탕까지 겹치면 흐르는 글자가 거의 보이지 않는다). */
+:root[data-theme="matrix"] .pane:has(> .term) { background: transparent; }
+/* 창 사이의 틈과 빈 화면으로는 글자가 더 또렷하게 보인다. */
+:root[data-theme="matrix"] #terms,
+:root[data-theme="matrix"] .split,
+:root[data-theme="matrix"] .divider { background: rgba(0, 60, 20, 0.35); }
+:root[data-theme="matrix"] #empty { background: rgba(0, 5, 2, 0.3); color: var(--text); text-shadow: 0 0 8px rgba(0, 255, 102, 0.6); }
+/* 이름·제목에는 화면에 번지는 빛을 살짝 준다. */
+:root[data-theme="matrix"] #sessions li.group .name,
+:root[data-theme="matrix"] #sessions li.active .name,
+:root[data-theme="matrix"] .pane.active .pane-head .title,
+:root[data-theme="matrix"] #where .where-name,
+:root[data-theme="matrix"] #popup-head { text-shadow: 0 0 6px rgba(0, 255, 102, 0.55); }
+:root[data-theme="matrix"] .pane.active .pane-head { border-bottom-color: var(--accent); box-shadow: 0 1px 8px rgba(0, 255, 102, 0.25); }
+:root[data-theme="matrix"] button:hover { box-shadow: 0 0 6px rgba(0, 255, 102, 0.35); }
+/* 위에 뜨는 창(대화상자·메뉴·알림)은 글이 잘 읽히게 거의 불투명하게 둔다. */
+:root[data-theme="matrix"] #popup,
+:root[data-theme="matrix"] #ask,
+:root[data-theme="matrix"] #menu,
+:root[data-theme="matrix"] #search,
+:root[data-theme="matrix"] .toast { background: rgba(1, 14, 5, 0.97); border-color: #14803a; box-shadow: 0 0 18px rgba(0, 255, 102, 0.22); }
+:root[data-theme="matrix"] ::selection { background: rgba(0, 255, 102, 0.3); }
+.look-row[hidden] { display: none; }
+.look-check { display: flex; align-items: center; gap: 6px; color: var(--text); }
+.look-row .look-check input { width: auto; height: auto; }
+
 /* ───────── 모양 설정 창 ───────── */
 .look-row { display: grid; grid-template-columns: 120px 1fr; align-items: center; gap: 8px; padding: 4px 6px; }
 .look-row label { color: var(--dim); }

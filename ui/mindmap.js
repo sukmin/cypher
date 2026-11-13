@@ -116,6 +116,10 @@ const newNode = (text = '') => ({ text, children: [], color: '', fold: false, si
 // 글 안의 줄 바꿈은 "\n"으로 적는다. 글자 그대로의 "\n"이나 "\\"는 역슬래시를 하나 더 붙여 구분한다.
 const escapeText = (text) => text.replace(/\\(?=[n\\\r\n])/g, '\\\\').replace(/\r?\n/g, '\\n');
 const unescapeText = (text) => text.replace(/\\([n\\])/g, (all, char) => (char === 'n' ? '\n' : '\\'));
+/** 그림(SVG·XML)에 넣을 수 없는 제어 문자를 걸러 낸다(탭·줄 바꿈은 둔다). 세로 탭·쪽 바꿈은 빈칸으로 본다. */
+const cleanControls = (text) => text.replace(/[\v\f]/g, ' ').replace(/[\u0000-\u0008\u000e-\u001f]/g, '');
+/** 글의 앞 `count` 글자. 글자(코드 포인트) 단위로 세어 이모지 같은 대리 문자 쌍을 반으로 자르지 않는다. */
+const clip = (text, count) => Array.from(text).slice(0, count).join('');
 
 /** 꾸밈 낱말 하나를 읽어 out에 담는다. 모르는 낱말이면 false. */
 function readToken(token, out) {
@@ -174,14 +178,16 @@ const nodeOf = (attrs) => Object.assign(newNode(attrs.text), { color: attrs.colo
 /** 개요 글을 너그럽게 읽어 { root, logic }을 만든다. 빈 글이면 중심 주제 하나만 있는 그림이 된다. */
 export function parseOutline(source) {
   const rows = [];
-  for (const line of String(source ?? '').replace(/^﻿/, '').replace(/\r\n?/g, '\n').split('\n')) {
+  for (const raw of String(source ?? '').replace(/^﻿/, '').replace(/\r\n?/g, '\n').split('\n')) {
+    const line = cleanControls(raw);
     if (!line.trim()) continue;
     const lead = /^\s*/.exec(line)[0];
     const indent = lead.replace(/\t/g, '    ').length;
     let body = line.slice(lead.length).trim(), heading = 0;
-    const h = /^(#{1,6})(?:\s+(.*))?$/.exec(body);
+    // `s` 깃발: 글 안의 줄 구분 문자(U+2028·U+2029)도 `.`이 받게 한다(없으면 그 줄을 가지로 읽지 못한다).
+    const h = /^(#{1,6})(?:\s+(.*))?$/s.exec(body);
     if (h) { heading = h[1].length; body = h[2] ?? ''; }
-    else body = (/^(?:[-*+]|\d+[.)])(?:\s+(.*))?$/.exec(body) || [null, body])[1] ?? '';
+    else body = (/^(?:[-*+]|\d+[.)])(?:\s+(.*))?$/s.exec(body) || [null, body])[1] ?? '';
     rows.push({ indent, heading, ...readAttrs(unescapeText(body)) });
   }
   if (!rows.length) return { root: newNode('중심 주제'), logic: false };
@@ -227,7 +233,8 @@ export function readCode(source) {
   const errors = [];
   let root = null, logic = false;
   const stack = []; // 지금 줄기: [{ indent, node }] (중심 주제는 뺀다)
-  String(source ?? '').replace(/^﻿/, '').replace(/\r\n?/g, '\n').split('\n').forEach((raw, index) => {
+  String(source ?? '').replace(/^﻿/, '').replace(/\r\n?/g, '\n').split('\n').forEach((given, index) => {
+    const raw = cleanControls(given);
     if (!raw.trim()) return;
     const line = index + 1;
     const problems = [];
@@ -238,7 +245,7 @@ export function readCode(source) {
     const report = () => { for (const problem of problems) errors.push({ line, ...problem }); };
 
     if (!root) {
-      const h = /^#(?:\s+(.*))?$/.exec(body);
+      const h = /^#(?:\s+(.*))?$/s.exec(body); // `s`: 글 안의 U+2028·U+2029도 받는다(parseOutline과 같다).
       let words = h ? h[1] ?? '' : '';
       if (!h) {
         words = body.replace(/^(#+|[-*+])\s*/, '');
@@ -253,7 +260,7 @@ export function readCode(source) {
 
     if (lead.includes('\t')) fail('들여쓰기에 탭 문자가 있습니다.', '탭을 지우고 빈칸으로 들여 주세요(한 단계에 두 칸).');
     const indent = lead.replace(/\t/g, '  ').length; // 탭은 두 칸으로 센다(오류로 알린 뒤 나머지를 계속 읽으려고).
-    const bullet = /^[-*+](?:\s+(.*))?$/.exec(body);
+    const bullet = /^[-*+](?:\s+(.*))?$/s.exec(body);
     let words = bullet ? bullet[1] ?? '' : body;
     if (bullet) {
       // 그대로 읽는다.
@@ -302,7 +309,8 @@ export function toOutline(root, logic = false) {
   const out = [row('#', root, [...(logic ? ['logic'] : []), ...looks(root)])];
   (function walk(node, depth) {
     for (const child of node.children) {
-      out.push(row(`${'  '.repeat(depth)}-`, child, [...looks(child), ...(child.fold && child.children.length ? ['fold'] : []), ...(child.side ? [child.side] : [])]));
+      // 쪽(left·right)은 중심 주제 바로 아래 가지에만 적는다(더 깊은 곳에 적으면 엄격하게 읽을 때 오류가 된다).
+      out.push(row(`${'  '.repeat(depth)}-`, child, [...looks(child), ...(child.fold && child.children.length ? ['fold'] : []), ...(child.side && depth === 0 ? [child.side] : [])]));
       walk(child, depth + 1);
     }
   })(root, 0);
@@ -340,12 +348,14 @@ function wrap(text, font) {
       if (line.trim()) lines.push(line.trimEnd());
       line = '';
       token = token.trimStart();
-      // 한 낱말이 한 줄보다 길면(긴 주소 등) 글자 단위로 자른다.
+      // 한 낱말이 한 줄보다 길면(긴 주소 등) 글자 단위로 자른다. 글자는 코드 포인트로 세어 이모지를 반으로 자르지 않는다.
       while (measure(token, font) > MAX_TEXT_WIDTH) {
+        const chars = Array.from(token);
         let cut = 1;
-        while (cut < token.length && measure(token.slice(0, cut + 1), font) <= MAX_TEXT_WIDTH) cut += 1;
-        lines.push(token.slice(0, cut));
-        token = token.slice(cut);
+        while (cut < chars.length && measure(chars.slice(0, cut + 1).join(''), font) <= MAX_TEXT_WIDTH) cut += 1;
+        const head = chars.slice(0, cut).join('');
+        lines.push(head);
+        token = token.slice(head.length);
       }
       line = token;
     }
@@ -455,8 +465,11 @@ function screenColors(host) {
 
 const descendants = (node) => node.children.reduce((sum, child) => sum + 1 + descendants(child), 0);
 
-/** 보이는 가지와 이음선을 `group` 안에 그린다. `selected`가 있으면 그 가지에 테두리를 두른다. */
-function drawMap(group, nodes, colors, family, selected) {
+/**
+ * 보이는 가지와 이음선을 `group` 안에 그린다. `selected`(대표 가지)와 `picked`(함께 고른 가지들)에는 테두리를 두른다.
+ * 고른 가지의 요소에는 class `picked`가, 대표 가지에는 `main`도 붙는다. 내보낼 때는 둘 다 주지 않는다.
+ */
+function drawMap(group, nodes, colors, family, selected, picked = null) {
   const links = el('g', { fill: 'none', 'stroke-linecap': 'round' });
   const boxes = el('g', { 'font-family': family });
   for (const node of nodes) {
@@ -473,13 +486,21 @@ function drawMap(group, nodes, colors, family, selected) {
         stroke: node.branch, 'stroke-width': node.depth === 1 ? 2.6 : 1.8, 'stroke-opacity': 0.9,
       }));
     }
-    const g = el('g', { class: 'mm-node', 'data-id': node.id, transform: `translate(${node.x} ${node.y})` });
+    const chosen = node === selected || !!picked?.has(node);
+    const g = el('g', {
+      class: `mm-node${chosen ? ' picked' : ''}${node === selected ? ' main' : ''}`, 'data-id': node.id,
+      transform: `translate(${node.x} ${node.y})`,
+    });
     const rect = { width: node.w, height: node.h, rx: [12, 9, 7][l] };
     if (node.depth === 0) g.append(el('rect', { ...rect, fill: node.color || colors.accent }));
     else if (node.depth === 1) g.append(el('rect', { ...rect, fill: colors.bg }), el('rect', { ...rect, fill: node.branch, 'fill-opacity': 0.2, stroke: node.branch, 'stroke-width': 1.6 }));
     else g.append(el('rect', { ...rect, fill: colors.panel, stroke: node.branch, 'stroke-width': 1.2, 'stroke-opacity': 0.75 }));
-    if (node === selected) {
-      g.append(el('rect', { x: -3.5, y: -3.5, width: node.w + 7, height: node.h + 7, rx: rect.rx + 3, fill: 'none', stroke: colors.ring, 'stroke-width': 2 }));
+    if (chosen) {
+      // 함께 고른 가지는 대표 가지보다 조금 옅은 테두리로 그린다.
+      g.append(el('rect', {
+        class: 'mm-ring', x: -3.5, y: -3.5, width: node.w + 7, height: node.h + 7, rx: rect.rx + 3, fill: 'none',
+        stroke: colors.ring, 'stroke-width': 2, 'stroke-opacity': node === selected ? 1 : 0.6,
+      }));
     }
     const lineHeight = SIZE[l] * LINE;
     const text = el('text', {
@@ -549,6 +570,8 @@ async function svgToPng(svg, width, height) {
 const newId = () => `b${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 const MIN_ZOOM = 0.2, MAX_ZOOM = 3;
 const MAX_UNDO = 200;
+const SAVE_RETRY_MS = 5000;       // 자동 저장에 실패했을 때 다시 해 보기까지의 시간
+const MAX_PDF_SIDE = 190 * 96;    // PDF 한 쪽의 한 변 한도(CSS 픽셀). mindmap.rs의 MAX_PAGE_INCHES와 같다.
 
 /**
  * 브레인스토밍 항목의 화면을 host 안에 만든다.
@@ -561,10 +584,15 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
   let logic = false;
   let path = saved.path || '';     // 연결된 파일(저장하면 여기에 쓴다)
   let fileText = null;             // 그 파일에 마지막으로 쓴(또는 읽은) 내용
-  let stored = '';                 // 자동 저장소에 마지막으로 쓴 내용
+  let stored = '';                 // 자동 저장소에 마지막으로 쓴 내용(쓰지 못했으면 null: 저장소에 무엇이 들었는지 모른다)
+  let unread = false;              // 시작할 때 저장소를 읽지 못했다(다시 읽을 때까지 자동 저장하지 않는다)
   let nodes = [];                  // 화면에 보이는 가지
-  let selected = null;             // 고른 가지
+  let selected = null;             // 고른 가지(여러 개를 골랐으면 그 대표: 키보드 이동·고치기·접기의 기준)
+  let picked = new Set();          // 함께 고른 가지들. 대표 가지를 늘 품고, 보이는 가지만 담는다(render가 맞춘다).
+  let spaceHeld = false;           // Space를 누르고 있다(이때 끌면 그림이 움직인다)
+  let spaceUsed = false;           // Space를 누른 채 그림을 끌었다(떼어도 글 고치기를 시작하지 않는다)
   let editing = null;              // 글을 고치고 있는 가지
+  let pristine = false;            // 글자를 쳐서 고치기 시작했지만 아직 글자가 하나도 들어오지 않았다
   let seq = 0;
   let view = { x: 0, y: 0, k: 1 }; // 그림의 이동·배율
   let fitted = false;
@@ -674,7 +702,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
   $svg.append($view);
   const $edit = make('textarea', 'mm-edit');
   Object.assign($edit, { spellcheck: false, autocomplete: 'off', hidden: true, rows: 1 });
-  const $hint = make('div', 'mm-hint', 'Tab: 하위 · Enter: 형제 · 글자 입력·F2·두 번 누르기: 고치기(Shift+Enter: 줄 바꿈, Esc: 취소) · Delete: 지우기 · 끌기: 옮기기 · 오른쪽 클릭: 표식·색 · Ctrl+E: 코드');
+  const $hint = make('div', 'mm-hint', 'Tab: 하위 · Enter: 형제 · 글자 입력·F2·두 번 누르기: 고치기(Shift+Enter: 줄 바꿈, Esc: 취소) · Delete: 지우기 · 끌기: 옮기기 · 빈 곳 끌기·Ctrl+클릭: 여러 개 고르기 · Space+끌기·가운데 단추: 그림 옮기기 · 오른쪽 클릭: 표식·색 · Ctrl+E: 코드');
   $stage.append($svg, $edit, $hint);
   const body = make('div', 'mm-body');
   body.append($codeView, $stage);
@@ -705,9 +733,13 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
       while (up && !nodes.includes(up)) up = up.parent;
       selected = up || root;
     }
-    drawMap($view, nodes, screenColors($stage), family(), editing ? null : selected);
+    // 대표 가지가 고른 것들 밖으로 바뀌었으면(방향키, 새 가지, 되돌리기 등) 하나만 고른 상태로 돌아간다.
+    if (!picked.has(selected)) picked = new Set();
+    for (const node of [...picked]) if (!nodes.includes(node)) picked.delete(node);
+    if (selected) picked.add(selected);
+    drawMap($view, nodes, screenColors($stage), family(), editing ? null : selected, editing ? null : picked);
     applyView();
-    $title.textContent = `${path ? `${baseName(path)}${fileDirty() ? ' *' : ''} · ` : ''}가지 ${countAll(root) - 1}개`;
+    $title.textContent = `${path ? `${baseName(path)}${fileDirty() ? ' *' : ''} · ` : ''}가지 ${countAll(root) - 1}개${picked.size > 1 ? ` · ${picked.size}개 고름` : ''}`;
     $fold.textContent = selected?.fold && selected.children.length ? '펴기' : '접기';
     $title.title = path || '아직 파일로 저장하지 않았습니다(내용은 자동으로 보관됩니다)';
   }
@@ -752,11 +784,36 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     applyView();
   }
 
+  /** 가지 하나만 고른다. */
   function select(node, show = true) {
     selected = node || root;
+    picked = new Set([selected]);
     render();
     if (show) reveal(selected);
   }
+
+  /** 가지를 고른 것들에 넣는다. `toggle`이면 이미 고른 가지는 뺀다(하나는 늘 고른 채로 둔다). 방금 넣은 가지가 대표가 된다. */
+  function pick(node, toggle) {
+    if (!picked.has(node)) { picked.add(node); selected = node; }
+    else if (toggle && picked.size > 1) {
+      picked.delete(node);
+      if (selected === node) selected = [...picked].pop();
+    } else selected = node;
+    render();
+  }
+
+  /** 고른 가지 가운데 맨 위의 것들(조상도 함께 골랐으면 조상만)을 그림에 적힌 차례로. 중심 주제는 뺀다. */
+  function topPicked() {
+    const out = [];
+    (function walk(node) {
+      if (node.parent && picked.has(node)) out.push(node);
+      else node.children.forEach(walk);
+    })(root);
+    return out;
+  }
+
+  /** 색·표식처럼 고른 가지 모두에 하는 일의 대상: 그 가지가 여러 개 고른 것 가운데 하나면 고른 것 모두, 아니면 그 가지만. */
+  const groupOf = (node) => (picked.size > 1 && picked.has(node) ? [...picked] : [node]);
 
   // ── 고치기(되돌릴 수 있게) ──
 
@@ -806,9 +863,18 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
   async function flush() {
     clearTimeout(saveTimer);
     const now = text();
-    if (disposed || now === stored) return;
+    if (disposed || unread || now === stored) return;
     stored = now;
-    try { await invoke('mindmap_write', { id, text: now }); } catch (err) { setStatus(`브레인스토밍 자동 저장 실패: ${err}`); }
+    try {
+      await invoke('mindmap_write', { id, text: now });
+    } catch (err) {
+      setStatus(`브레인스토밍 자동 저장 실패: ${err}`);
+      // 쓰지 못했으면 저장소의 내용을 모르는 것으로 둔다: 저장소의 옛 내용을 새것인 줄 알고 읽어 들이지 않고(reload),
+      // 같은 내용이라도 다시 쓴다. 그 사이 더 새 내용을 쓰고 있으면 그쪽에 맡긴다.
+      if (stored !== now) return;
+      stored = null;
+      if (!disposed) saveTimer = setTimeout(flush, SAVE_RETRY_MS);
+    }
   }
 
   // ── 가지 더하기·지우기·옮기기 ──
@@ -837,15 +903,25 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     beginEdit(node, { fresh: true });
   }
 
-  function removeNode(node) {
-    if (!node?.parent) return setStatus('중심 주제는 지울 수 없습니다.');
-    const list = node.parent.children, index = list.indexOf(node);
+  /** 가지들을(그 아래까지) 한 번에 지운다(되돌리기 한 번). `list`는 서로 조상·자손이 아닌 가지들이다. 중심 주제는 지우지 않는다. */
+  function removeNodes(list) {
+    list = list.filter((node) => node?.parent);
+    if (!list.length) return setStatus('중심 주제는 지울 수 없습니다.');
+    const home = list[0].parent, index = home.children.indexOf(list[0]);
     change(() => {
-      list.splice(index, 1);
-      selected = list[index] || list[index - 1] || node.parent;
+      if (list.some((node) => node.parent === root)) pinSides(); // 남은 가지가 반대쪽으로 넘어가지 않게 한다.
+      for (const node of list) {
+        const from = node.parent.children, at = from.indexOf(node);
+        if (at >= 0) from.splice(at, 1);
+      }
+      // 지운 자리의 다음 가지(없으면 앞 가지, 그것도 없으면 부모)를 고른다.
+      selected = home.children[index] || home.children[index - 1] || home;
+      picked = new Set();
     });
   }
-  const removeSelected = () => { if (editing) cancelEdit(); removeNode(selected); };
+  const removeNode = (node) => removeNodes([node]);
+  /** 고른 가지를 지운다. 여러 개를 골랐으면 모두(조상도 함께 골랐으면 조상째로). */
+  const removeSelected = () => { if (editing) cancelEdit(); removeNodes(picked.size > 1 ? topPicked() : [selected]); };
 
   function toggleFold(node = selected) {
     if (!node?.parent || !node.children.length) return;
@@ -861,6 +937,8 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     const other = same[same.indexOf(node) + offset];
     if (!other) return;
     change(() => {
+      // 쪽을 정하지 않은 가지는 순서에 따라 좌우로 나뉘므로, 순서를 바꾸기 전에 지금 놓인 쪽을 못박는다.
+      if (node.parent === root) pinSides();
       const a = list.indexOf(node), b = list.indexOf(other);
       [list[a], list[b]] = [list[b], list[a]];
     });
@@ -869,25 +947,36 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
 
   const within = (node, ancestor) => { for (let n = node; n; n = n.parent) if (n === ancestor) return true; return false; };
 
-  /** 가지를 다른 가지로 옮긴다. zone: 'child'(그 아래로), 'before'/'after'(그 가지의 앞·뒤 형제로). */
-  function moveNode(node, target, zone, leftOfRoot) {
-    if (!node.parent || node === target || within(target, node)) return;
+  /** 그 자리에 놓을 수 있는가: 옮기는 가지 자신이나 그 자손 위에는 놓을 수 없다. */
+  const canDrop = (list, target) => !!target && !list.some((node) => within(target, node));
+
+  /**
+   * 가지들을 다른 가지로 한 번에 옮긴다(되돌리기 한 번). zone: 'child'(그 아래로), 'before'/'after'(그 가지의 앞·뒤 형제로).
+   * `list`는 서로 조상·자손이 아닌 가지들이고, 적힌 차례 그대로 놓인다. 중심 주제는 옮기지 않는다.
+   */
+  function moveNodes(list, target, zone, leftOfRoot) {
+    list = list.filter((node) => node.parent);
+    if (!list.length || !canDrop(list, target)) return;
     if (zone !== 'child' && !target.parent) zone = 'child';
     change(() => {
       // 중심 주제의 가지가 늘거나 줄거나 자리를 바꾸면 나머지는 지금 있는 쪽에 그대로 둔다.
-      if (node.parent === root || target === root || (zone !== 'child' && target.parent === root)) pinSides();
-      const from = node.parent.children;
-      from.splice(from.indexOf(node), 1);
+      if (target === root || (zone !== 'child' && target.parent === root) || list.some((node) => node.parent === root)) pinSides();
+      for (const node of list) {
+        const from = node.parent.children;
+        from.splice(from.indexOf(node), 1);
+      }
+      const home = zone === 'child' ? target : target.parent;
+      const side = home !== root || logic ? '' : zone === 'child' ? (leftOfRoot ? 'left' : 'right') : (target.dir < 0 ? 'left' : 'right');
+      for (const node of list) node.side = side;
       if (zone === 'child') {
         target.fold = false;
-        target.children.push(node);
-        node.side = target === root && !logic ? (leftOfRoot ? 'left' : 'right') : '';
+        home.children.push(...list);
       } else {
-        const list = target.parent.children;
-        list.splice(list.indexOf(target) + (zone === 'after' ? 1 : 0), 0, node);
-        node.side = target.parent === root && !logic ? (target.dir < 0 ? 'left' : 'right') : '';
+        home.children.splice(home.children.indexOf(target) + (zone === 'after' ? 1 : 0), 0, ...list);
       }
-      selected = node;
+      // 옮긴 가지들은 고른 채로 둔다. 대표 가지가 옮긴 것 밖에 있었으면 첫 가지를 대표로 삼는다.
+      if (!list.some((node) => within(selected, node))) selected = list[0];
+      picked.add(selected);
     });
   }
 
@@ -900,22 +989,35 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     for (const child of root.children) if (!child.side && child.dir) child.side = child.dir < 0 ? 'left' : 'right';
   }
 
-  function colorMenu(ev) {
-    const node = selected || root;
-    showMenu(ev, [{ colors: ['', ...BRANCH_COLORS.slice(0, 7)], action: (color) => change(() => { node.color = color; }) }]);
-  }
+  /** 색 메뉴의 한 줄. 여러 개를 골랐으면 고른 가지 모두의 색을 바꾼다. */
+  const colorItem = (node) => {
+    const list = groupOf(node);
+    return { colors: ['', ...BRANCH_COLORS.slice(0, 7)], action: (color) => change(() => { for (const other of list) other.color = color; }) };
+  };
+  const colorMenu = (ev) => showMenu(ev, [colorItem(selected || root)]);
 
-  /** 표식 메뉴: 줄마다 같은 모양의 색 다른 표식(깃발·별·순위·진행), 그 아래 이모지. 붙어 있는 것을 다시 누르면 뗀다. */
+  /**
+   * 표식 메뉴: 줄마다 같은 모양의 색 다른 표식(깃발·별·순위·진행), 그 아래 이모지. 붙어 있는 것을 다시 누르면 뗀다.
+   * 여러 개를 골랐으면 `node`(누른 가지)를 기준으로 고른 가지 모두에 붙이거나 모두에서 뗀다.
+   */
   function markItems(node) {
+    const list = groupOf(node);
+    const toggle = (id) => change(() => {
+      const off = node.marks.includes(id);
+      for (const other of list) {
+        if (off) other.marks = other.marks.filter((mark) => mark !== id);
+        else if (!other.marks.includes(id)) other.marks = toggledMarks(other.marks, id);
+      }
+    });
     return [
-      { caption: '표식 · 붙은 것을 다시 누르면 뗍니다' },
+      { caption: `표식${list.length > 1 ? ` · 고른 가지 ${list.length}개` : ''} · 붙은 것을 다시 누르면 뗍니다` },
       ...MARK_ROWS.map((row) => ({
         icons: row.map((mark) => ({
           node: markIcon(mark.id), title: `${mark.label}  {${mark.id}}`, on: node.marks.includes(mark.id),
-          action: () => change(() => { node.marks = toggledMarks(node.marks, mark.id); }),
+          action: () => toggle(mark.id),
         })),
       })),
-      ...(node.marks.length ? [{ label: '표식 모두 떼기', action: () => change(() => { node.marks = []; }) }] : []),
+      ...(list.some((other) => other.marks.length) ? [{ label: '표식 모두 떼기', action: () => change(() => { for (const other of list) other.marks = []; }) }] : []),
     ];
   }
 
@@ -959,6 +1061,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     selected = node;
     editing = node;
     editing.fresh = fresh;
+    pristine = typed;
     render();
     reveal(node);
     $edit.value = typed ? '' : node.text;
@@ -979,9 +1082,12 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     // 아무것도 적지 않아도 가지는 남는다(글 없는 가지). 만들지 않으려면 Esc.
     const node = endEdit();
     if (!node) return;
-    const value = $edit.value.replace(/\r\n?/g, '\n').trim();
     const fresh = !!node.fresh;
     delete node.fresh;
+    // 글자를 쳐서 시작했는데 글자가 하나도 들어오지 않았으면(한/영 글쇠처럼 글자를 내지 않는 글쇠) 있던 글을 지우지 않고 그만둔다.
+    if (pristine && !$edit.value) { pristine = false; return render(); }
+    // 줄 구분 문자(U+2028·U+2029)와 세로 탭·쪽 바꿈은 줄 바꿈으로, 그 밖의 제어 문자는 걸러 낸다.
+    const value = cleanControls($edit.value.replace(/\r\n?|[\p{Zl}\p{Zp}\v\f]/gu, '\n')).trim();
     if (value !== node.text) {
       // 방금 만든 가지에 글을 넣는 것은 만들 때 남긴 되돌리기 한 번으로 묶는다(전부터 있던 빈 가지는 따로 되돌린다).
       if (fresh && undo.length) { node.text = value; changed(); }
@@ -1002,7 +1108,8 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     }
   }
 
-  $edit.addEventListener('input', growEditor);
+  $edit.addEventListener('input', () => { pristine = false; growEditor(); });
+  $edit.addEventListener('compositionstart', () => { pristine = false; }); // 조합 중인 글자도 들어온 글자로 친다.
   $edit.addEventListener('keydown', (ev) => {
     ev.stopPropagation();
     if (ev.isComposing || ev.keyCode === 229) return; // 한글 조합 중
@@ -1064,15 +1171,35 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     else if (key === 'Delete' || key === 'Backspace') removeSelected();
     else if (key === 'Home') { select(root); fit(Math.max(view.k, 1)); }
     else if (key.startsWith('Arrow')) { const next = neighbor(node, key); if (next) select(next); }
-    else if (key === ' ') beginEdit(node);
+    else if (key === 'Escape' && picked.size > 1) select(node, false); // 여러 개 고른 것을 풀고 대표 가지만 남긴다.
+    // Space: 누른 채 끌면 그림이 움직인다. 끌지 않고 떼면 고른 가지의 글을 고친다(onKeyUp).
+    else if (key === ' ') { if (!spaceHeld) { spaceHeld = true; spaceUsed = false; $stage.classList.add('grab'); } }
     // 글자를 치면 바로 고치기 시작한다(있던 글을 바꾼다). 한글 입력기의 첫 글쇠도 여기로 온다.
     else if (key.length === 1 || key === 'Process') { beginEdit(node, { typed: true }); return; }
     else handled = false;
     if (handled) { ev.preventDefault(); ev.stopPropagation(); }
   });
 
+  /** Space를 뗐다. 누른 동안 그림을 끌지 않았으면 전처럼 고른 가지의 글을 고친다. */
+  const onKeyUp = (ev) => {
+    if (ev.key !== ' ' || !spaceHeld) return;
+    endSpace();
+    if (!spaceUsed && !press && !editing && !codeMode && !disposed && document.activeElement === $stage) beginEdit(selected || root);
+  };
+  const endSpace = () => { spaceHeld = false; $stage.classList.remove('grab'); };
+  // 그림 밖에서 떼거나 창이 가려져도 놓치지 않게 문서와 창에서 듣는다(dispose에서 뗀다).
+  document.addEventListener('keyup', onKeyUp);
+  window.addEventListener('blur', endSpace);
+
   async function copyNode(cut) {
-    const node = selected || root;
+    // 여러 개를 골랐으면 맨 위의 것들을 모두 복사한다: 중심 주제 줄 없이 가지들만 적는다(붙여 넣으면 줄마다 가지가 된다).
+    const tops = picked.size > 1 ? topPicked() : [];
+    if (tops.length > 1) {
+      await invoke('clipboard_write', { text: toOutline({ ...newNode(''), children: tops }, false).replace(/^.*\n/, '') });
+      if (cut) removeNodes(tops);
+      return setStatus(cut ? `가지 ${tops.length}개를 잘라 냈습니다.` : `가지 ${tops.length}개를 개요 글로 복사했습니다.`);
+    }
+    const node = tops[0] || selected || root;
     await invoke('clipboard_write', { text: toOutline(node, false) });
     if (cut && node.parent) removeNode(node);
     setStatus(cut && node.parent ? '가지를 잘라 냈습니다.' : '가지를 개요 글로 복사했습니다.');
@@ -1093,10 +1220,14 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     }
     if (!forest.length) return;
     const parent = selected || root;
+    // 쪽(left·right)은 중심 주제 바로 아래에서만 뜻이 있다. 중심 주제를 복사한 글에는 그 가지들의 쪽이 적혀 있으므로 하위까지 지운다.
+    const clearSides = (node) => { node.side = ''; node.children.forEach(clearSides); };
     change(() => {
       parent.fold = false;
-      for (const node of forest) { node.side = ''; parent.children.push(node); }
+      for (const node of forest) { clearSides(node); parent.children.push(node); }
+      // 붙여 넣은 가지들을 고른 채로 둔다(여러 개면 이어서 함께 옮기거나 지울 수 있다).
       selected = forest[0];
+      picked = new Set(forest);
     });
     reveal(selected);
   }
@@ -1105,7 +1236,8 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
 
   const pointOf = (ev) => { const rect = $stage.getBoundingClientRect(); return { x: ev.clientX - rect.left, y: ev.clientY - rect.top }; };
   const nodeOfEvent = (ev) => byId(ev.target.closest?.('.mm-node')?.dataset.id);
-  let press = null; // { node | null, x, y, moved, ghost }
+  // 누르고 있는 것: { pan } 그림 옮기기 · { box } 빈 곳에서 범위 상자로 고르기 · { node } 가지 누르기·끌어 옮기기. 공통: x, y, moved
+  let press = null;
   let lastDown = null; // 바로 앞에 누른 곳 { node, at, x, y }
 
   function dropZone(ev) {
@@ -1119,43 +1251,86 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
   }
 
   $stage.addEventListener('mousedown', (ev) => {
-    if (ev.button !== 0 || ev.target === $edit) return;
+    if ((ev.button !== 0 && ev.button !== 1) || ev.target === $edit) return;
     if (editing) commitEdit();
     $stage.focus();
+    if (ev.button === 1 || spaceHeld) {
+      // 가운데 단추로 끌거나 Space를 누른 채 끌면 어디를 눌렀든 그림이 움직인다.
+      ev.preventDefault();
+      lastDown = null;
+      if (spaceHeld) spaceUsed = true;
+      press = { pan: true, x: ev.clientX, y: ev.clientY, moved: false, from: { ...view } };
+      return;
+    }
     const fold = ev.target.closest?.('.mm-fold');
     const node = nodeOfEvent(ev);
     if (fold && node) { ev.preventDefault(); lastDown = null; toggleFold(node); return; }
     ev.preventDefault();
+    const add = ev.ctrlKey || ev.shiftKey;
+    if (node && add) {
+      // Ctrl+클릭: 고른 것에 넣거나 뺀다. Shift+클릭: 넣기만 한다.
+      lastDown = null;
+      pick(node, ev.ctrlKey && !ev.shiftKey);
+      return;
+    }
     // 두 번 누르기: 가지를 고르면 그림을 다시 그려 눌린 요소가 바뀌므로 브라우저의 dblclick에 기대지 않고 직접 센다.
     const again = node && lastDown && lastDown.node === node && ev.timeStamp - lastDown.at < 450 && Math.hypot(ev.clientX - lastDown.x, ev.clientY - lastDown.y) < 6;
     lastDown = again ? null : { node, at: ev.timeStamp, x: ev.clientX, y: ev.clientY };
     if (again) { beginEdit(node); return; }
+    if (!node) {
+      // 빈 곳: 끌면 범위 상자로 고른다(Ctrl·Shift를 누르고 있으면 이미 고른 것에 더한다). 끌지 않고 떼면 여러 개 고른 것이 풀린다.
+      press = { box: true, x: ev.clientX, y: ev.clientY, moved: false, at: pointOf(ev), add, base: new Set(add ? picked : []), main: selected };
+      return;
+    }
     // 표식은 이미 고른 가지에서 누를 때만 메뉴를 띄운다(표식이 많은 가지를 고르려고 누를 때 방해되지 않게).
-    const mark = !!node && node === selected && !!ev.target.closest?.('.mm-mark');
-    if (node) select(node, false);
+    const mark = node === selected && !!ev.target.closest?.('.mm-mark');
+    // 여러 개 고른 것 가운데 하나를 누르면 고른 것을 그대로 둔다(함께 끌어 옮길 수 있게). 끌지 않고 떼면 그 가지만 고른다.
+    if (picked.size > 1 && picked.has(node)) { selected = node; render(); } else select(node, false);
     press = { node, x: ev.clientX, y: ev.clientY, moved: false, from: { ...view }, mark };
   });
+
+  /** 범위 상자를 끄는 동안: 상자를 그리고, 상자에 닿은 보이는 가지들을 바로 고른 모습으로 보여 준다. */
+  function dragBox(ev) {
+    const from = press.at, now = pointOf(ev);
+    const left = Math.min(from.x, now.x), top = Math.min(from.y, now.y), width = Math.abs(now.x - from.x), height = Math.abs(now.y - from.y);
+    if (!press.band) { press.band = el('rect', { class: 'mm-band' }); $svg.append(press.band); }
+    for (const [key, value] of Object.entries({ x: left, y: top, width, height })) press.band.setAttribute(key, value);
+    // 상자를 그림의 좌표로 바꿔 가지의 상자와 겹치는지 본다.
+    const x0 = (left - view.x) / view.k, y0 = (top - view.y) / view.k, x1 = x0 + width / view.k, y1 = y0 + height / view.k;
+    const hits = nodes.filter((node) => node.x < x1 && node.x + node.w > x0 && node.y < y1 && node.y + node.h > y0);
+    const next = new Set([...press.base, ...hits]);
+    if (!next.size) next.add(press.main || root); // 하나는 늘 고른 채로 둔다.
+    const main = next.has(selected) ? selected : next.has(press.main) ? press.main : hits[0];
+    if (main === selected && next.size === picked.size && [...next].every((node) => picked.has(node))) return;
+    picked = next;
+    selected = main;
+    render();
+  }
 
   const onMove = (ev) => {
     if (!press) return;
     const dx = ev.clientX - press.x, dy = ev.clientY - press.y;
     if (!press.moved && Math.hypot(dx, dy) < 5) return;
     press.moved = true;
-    if (!press.node || !press.node.parent) {
-      // 빈 곳(또는 중심 주제)을 끌면 그림이 움직인다.
+    if (press.pan || (press.node && !press.node.parent)) {
+      // 그림 옮기기: 가운데 단추, Space+끌기, 중심 주제 끌기.
       view = { ...view, x: press.from.x + dx, y: press.from.y + dy };
       auto = false;
       $stage.classList.add('panning');
       return applyView();
     }
-    if (!press.ghost) {
-      press.ghost = make('div', 'drag-ghost', press.node.text.split('\n')[0].slice(0, 30) || '(빈 가지)');
+    if (press.box) return dragBox(ev);
+    if (!press.moving) {
+      // 여러 개 고른 것 가운데 하나를 끌면 고른 것 모두를 옮긴다(조상도 함께 골랐으면 조상만: 그 아래는 따라간다).
+      press.moving = picked.size > 1 && picked.has(press.node) ? topPicked() : [press.node];
+      const label = press.moving.length > 1 ? `가지 ${press.moving.length}개` : clip(press.moving[0].text.split('\n')[0], 30) || '(빈 가지)';
+      press.ghost = make('div', 'drag-ghost', label);
       document.body.append(press.ghost);
     }
     press.ghost.style.left = `${ev.clientX + 12}px`;
     press.ghost.style.top = `${ev.clientY + 8}px`;
     const hit = dropZone(ev);
-    const ok = hit && hit.target !== press.node && !within(hit.target, press.node);
+    const ok = hit && canDrop(press.moving, hit.target);
     $view.querySelector('.mm-drop')?.remove();
     if (ok) {
       const { target, zone } = hit;
@@ -1168,16 +1343,25 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
   };
   const onUp = (ev) => {
     if (!press) return;
-    const { node, moved, ghost, mark } = press;
+    const { node, moved, ghost, mark, band, box, pan, add, moving } = press;
     press = null;
     $stage.classList.remove('panning');
     ghost?.remove();
+    band?.remove();
     $view.querySelector('.mm-drop')?.remove();
+    if (pan) return;
+    if (box) {
+      // 범위 상자로 고른 것은 끄는 동안 이미 반영됐다. 빈 곳을 끌지 않고 눌렀다 뗐으면 여러 개 고른 것을 풀고 대표 가지만 남긴다.
+      if (!moved && !add && picked.size > 1) select(selected, false);
+      return;
+    }
     // 표식을 누르면 표식 메뉴가 뜬다(바꾸거나 떼기).
-    if (!moved && mark && node) return showMenu(ev, markItems(node));
-    if (!moved || !node?.parent) return;
+    if (!moved && mark) return showMenu(ev, markItems(node));
+    // 여러 개 고른 것 가운데 하나를 끌지 않고 눌렀다 뗐으면 그 가지만 고른다.
+    if (!moved) { if (picked.size > 1) select(node, false); return; }
+    if (!node.parent) return;
     const hit = dropZone(ev);
-    if (hit) moveNode(node, hit.target, hit.zone, hit.leftOfRoot);
+    if (hit) moveNodes(moving, hit.target, hit.zone, hit.leftOfRoot);
   };
   document.addEventListener('mousemove', onMove);
   document.addEventListener('mouseup', onUp);
@@ -1205,22 +1389,26 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
         { label: '되돌리기', action: () => step(undo, redo) },
       ]);
     }
-    select(node, false);
+    // 여러 개 고른 것 가운데 하나를 오른쪽 클릭하면 고른 것을 그대로 두고(그 가지가 대표가 된다), 아니면 그 가지만 고른다.
+    if (picked.size > 1 && picked.has(node)) { selected = node; render(); } else select(node, false);
     const onRoot = !node.parent;
+    const tops = picked.size > 1 ? topPicked() : []; // 여러 개를 골랐으면 복사·지우기는 고른 것 모두에, 색·표식도 모두에 한다.
+    const many = tops.length > 1 ? `고른 가지 ${tops.length}개 ` : '';
     showMenu(ev, [
       { label: '하위 가지 더하기 (Tab)', action: () => addChild() },
       ...(onRoot ? [] : [{ label: '형제 가지 더하기 (Enter)', action: () => addSibling(1) }]),
       { label: '글 고치기 (F2)', action: () => beginEdit(node) },
-      { colors: ['', ...BRANCH_COLORS.slice(0, 7)], action: (color) => change(() => { node.color = color; }) },
+      colorItem(node),
       ...markItems(node),
       ...(!onRoot && node.children.length ? [{ label: node.fold ? '펴기' : '접기', action: () => toggleFold(node) }] : []),
       ...(node.parent === root && !logic ? [{
         label: node.dir > 0 ? '왼쪽으로 옮기기' : '오른쪽으로 옮기기',
         action: () => { const side = node.dir > 0 ? 'left' : 'right'; change(() => { pinSides(); node.side = side; }); },
       }] : []),
-      { label: '복사 (Ctrl+C)', action: () => copyNode(false) },
+      { label: `${many}복사 (Ctrl+C)`, action: () => copyNode(false) },
       { label: '붙여넣기 (Ctrl+V)', action: () => pasteNode() },
-      ...(onRoot ? [] : [{ label: '지우기 (Delete)', action: () => removeNode(node) }]),
+      ...(tops.length ? [{ label: `${many}지우기 (Delete)`, action: () => removeNodes(tops) }]
+        : onRoot ? [] : [{ label: '지우기 (Delete)', action: () => removeNode(node) }]),
     ]);
   });
 
@@ -1466,7 +1654,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
 
   const fileDirty = () => !!path && fileText !== null && text() !== fileText;
   const startDir = () => (path ? path.slice(0, path.lastIndexOf('\\')) : item.startCwd);
-  const fileName = () => (root.text.split('\n')[0].trim().replace(/[\\/:*?"<>|]/g, '_').slice(0, 60) || '브레인스토밍');
+  const fileName = () => (clip(root.text.split('\n')[0].trim().replace(/[\\/:*?"<>|]/g, '_'), 60) || '브레인스토밍');
 
   async function openFile(given) {
     try {
@@ -1474,6 +1662,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
       if (!file) return;
       undo.push(snapshot());
       redo.length = 0;
+      unread = false; // 내용을 통째로 바꾸므로, 읽지 못한 저장소의 내용을 기다리지 않는다.
       load(file.text);
       path = file.path;
       fileText = text();
@@ -1536,13 +1725,17 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
   let pdfTarget = null; // 자동 검증용: 저장할 곳을 묻지 않고 이 경로에 쓴다.
   /** 인쇄용 영역에 그림만 펼쳐 놓고 PDF로 만든다(글자가 그대로 살아 있는 PDF). */
   async function printPdf(made) {
+    // 한 변이 한도를 넘는 큰 그림은 넘친 쪽이 잘려 나가므로, 같은 비율로 줄여 한 쪽에 담는다(벡터라 줄여도 또렷하다).
+    const scale = Math.min(1, MAX_PDF_SIDE / Math.max(made.width, made.height));
+    const width = Math.max(1, Math.floor(made.width * scale)), height = Math.max(1, Math.floor(made.height * scale));
+    if (scale < 1) { made.svg.setAttribute('width', width); made.svg.setAttribute('height', height); }
     const box = document.getElementById('print');
     const page = document.createElement('style');
-    page.textContent = `@page { size: ${made.width}px ${made.height}px; margin: 0; }`;
+    page.textContent = `@page { size: ${width}px ${height}px; margin: 0; }`;
     box.replaceChildren(made.svg);
     document.head.append(page);
     try {
-      return await invoke('mindmap_pdf', { name: fileName(), start: startDir(), width: made.width, height: made.height, target: pdfTarget });
+      return await invoke('mindmap_pdf', { name: fileName(), start: startDir(), width, height, target: pdfTarget });
     } finally {
       box.replaceChildren();
       page.remove();
@@ -1558,7 +1751,9 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
 
   /** 밖에서(같은 그룹의 Claude 세션 등) 저장소의 내용을 바꿨으면 그 내용을 읽어 들인다. */
   async function reload() {
-    if (disposed || editing || text() !== stored) return;
+    if (disposed || editing) return;
+    if (unread) return reread();
+    if (text() !== stored) return;
     if (codeMode && $codeText.value !== codeApplied) return; // 코드 화면에서 고치는 중인 글은 덮어쓰지 않는다.
     const base = stored;
     const found = await invoke('mindmap_read', { id }).catch(() => null);
@@ -1566,16 +1761,49 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     if (found == null || disposed || editing || found === base || stored !== base || text() !== base) return;
     if (codeMode && $codeText.value !== codeApplied) return;
     undo.push(snapshot());
+    redo.length = 0;
     load(found);
     stored = found;
     changed();
+  }
+
+  /**
+   * 시작할 때 읽지 못한 저장소를 다시 읽어 본다. 읽히면 그 내용으로 바꾸고(그 사이 여기서 고친 것은 되돌리기에 남긴다)
+   * 자동 저장을 다시 켠다. 아직 읽지 못하면 그대로 둔다(다음에 이 항목을 볼 때 다시 해 본다).
+   */
+  async function reread() {
+    if (codeMode && $codeText.value !== codeApplied) return;
+    let found = null;
+    try { found = await invoke('mindmap_read', { id }); } catch { return; }
+    if (disposed || editing || !unread) return;
+    if (codeMode && $codeText.value !== codeApplied) return;
+    unread = false;
+    stored = found ?? '';
+    const parsed = parseOutline(found ?? '');
+    if (found != null && toOutline(parsed.root, parsed.logic) !== text()) {
+      undo.push(snapshot());
+      redo.length = 0;
+      load(found);
+      changed();
+      fit(1);
+    } else if (text() !== stored) scheduleSave();
+    setStatus('브레인스토밍의 내용을 다시 읽었습니다.');
   }
 
   showMode();
   const ready = (async () => {
     // 처음 넣을 내용이 주어졌으면(끌어다 놓기, Claude 세션이 만든 것) 그것으로, 아니면 자동 저장소에서 읽는다.
     const given = saved.text ?? null;
-    const kept = given == null ? await invoke('mindmap_read', { id }).catch(() => null) : null;
+    let kept = null;
+    if (given == null) {
+      try {
+        kept = await invoke('mindmap_read', { id }); // 아직 적어 둔 것이 없으면 null, 읽지 못하면 오류다.
+      } catch (err) {
+        // 읽지 못한 것은 내용이 없는 것과 다르다. 기본 내용으로 덮어쓰지 않게 자동 저장을 멈추고, 이 항목을 다시 볼 때 다시 읽는다.
+        unread = true;
+        setStatus(`브레인스토밍의 내용을 읽지 못했습니다: ${err} · 이 항목을 다시 보면 다시 읽습니다(그때까지 자동 저장하지 않습니다).`);
+      }
+    }
     load(given ?? kept ?? '# 중심 주제\n');
     stored = kept ?? ''; // 저장소에 실제로 들어 있는 내용. 지금 내용과 다르면 아래에서 바로 적는다.
     if (saved.code) {
@@ -1598,22 +1826,26 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     ready,
     focus: () => { if (codeMode) $codeText.focus(); else if (!editing) $stage.focus(); if (!fitted) fit(1); reload(); },
     /** 사이드바에 보일 기본 이름: 중심 주제. */
-    title: () => root.text.split('\n')[0].trim().slice(0, 40) || '브레인스토밍',
+    title: () => clip(root.text.split('\n')[0].trim(), 40) || '브레인스토밍',
     state: () => ({ map: id, path, code: codeMode, ...(codeMode && $codeText.value !== codeApplied ? { draft: $codeText.value } : {}) }),
     /** 그림 ↔ 코드 화면을 바꾼다. 코드에 오류가 있어 그림으로 바꾸지 못했으면 false. */
     setMode: (code) => setMode(!!code),
     /** 지금 코드의 오류: [{ line, message, fix }] */
     problems: () => codeErrors.map((error) => ({ ...error })),
-    flush,
+    /** 저장할 것을 바로 저장한다(앱이 꺼지기 직전). 고치던 가지 글도 넣는다. */
+    flush: () => { if (editing) commitEdit(); return flush(); },
     /** 개요 글. */
     text,
     /** 내용을 통째로 바꾼다(되돌릴 수 있다). 같은 그룹의 Claude 세션이 고칠 때 쓴다. */
     setText: (source) => {
       // 코드 화면에 오류가 있어 반영하지 못한 글이 있으면 덮어쓰지 않는다(고치던 글이 사라진다). 바꾸지 못했으면 false.
+      if (codeMode) checkCode(); // 방금 쳐서 아직 검사하지 않은 올바른 글은 먼저 반영한다(오류로 잘못 보지 않게).
       if (codeMode && $codeText.value !== codeApplied) return false;
-      if (editing) cancelEdit();
+      // 고치던 가지 글은 버리지 않고 넣어 둔다: 그 글까지 든 모습이 되돌리기 목록에 남는다.
+      if (editing) commitEdit();
       undo.push(snapshot());
       redo.length = 0;
+      unread = false; // 내용을 통째로 바꾸므로, 읽지 못한 저장소의 내용을 기다리지 않는다.
       load(source);
       changed();
       fit(1);
@@ -1626,6 +1858,8 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     /** PDF로 내보낸다. `target`을 주면 저장할 곳을 묻지 않는다(자동 검증용). */
     exportPdf: async (target) => { pdfTarget = target || null; try { await exportAs('pdf'); } finally { pdfTarget = null; } },
     close: async () => {
+      if (editing) commitEdit(); // 고치던 가지 글도 보관되게 한다.
+      if (codeMode) checkCode(); // 방금 쳐서 아직 검사하지 않은 올바른 글은 먼저 반영한다.
       if (codeMode && $codeText.value !== codeApplied
         && !confirm('코드에 오류가 있어 아직 그림에 반영되지 않은 글이 있습니다.\n닫으면 그 글은 사라집니다(마지막으로 올바르던 내용은 30일 동안 보관됩니다). 닫을까요?')) return false;
       await flush();
@@ -1639,6 +1873,9 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
       window.removeEventListener('cypher-look', retheme);
       document.removeEventListener('mousemove', onMove);
       document.removeEventListener('mouseup', onUp);
+      document.removeEventListener('keyup', onKeyUp);
+      window.removeEventListener('blur', endSpace);
+      press?.ghost?.remove(); // 끌던 중에 닫히면 문서에 붙여 둔 딱지를 남기지 않는다.
       // 닫은 항목의 내용은 바로 지우지 않고 보관해 둔다(30일).
       invoke('mindmap_remove', { id, keep: true }).catch(() => {});
     },

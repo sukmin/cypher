@@ -211,6 +211,8 @@ impl Chrome {
         for (_, waiter) in self.pending.lock().unwrap().drain() {
             let _ = waiter.send(Err("브라우저가 닫혔습니다".into()));
         }
+        // 떠 있던 확인 창도 브라우저와 함께 사라졌다.
+        crate::browser::forget_dialogs(&crate::browser::chrome_dialogs(&self.key));
         let mut all = CHROMES.lock().unwrap();
         if all.get(&self.key).is_some_and(|current| Arc::ptr_eq(current, self)) {
             all.remove(&self.key);
@@ -274,7 +276,37 @@ impl Chrome {
         let reply = self.send("Target.attachToTarget", json!({ "targetId": target, "flatten": true }), None)?;
         let session = reply["sessionId"].as_str().ok_or("탭에 연결하지 못했습니다")?.to_string();
         self.sessions.lock().unwrap().insert(target.to_string(), session.clone());
+        // 이 탭이 띄우는 확인 창을 알 수 있게 한다(`on_event`). 켜 둔 뒤에 뜬 창만 알리고 닫을 수 있다.
+        let _ = self.send_within("Page.enable", json!({}), Some(&session), PROBE_TIMEOUT);
         Ok(session)
+    }
+
+    /// 명령을 보내기만 한다(답은 기다리지 않는다). 읽기 스레드에서 쓴다: 거기서 답을 기다리면 그 답을 읽을 수 없다.
+    fn post(&self, method: &str, params: Value, session: &str) {
+        let id = self.next.fetch_add(1, Ordering::Relaxed);
+        let mut bytes = json!({ "id": id, "method": method, "params": params, "sessionId": session }).to_string().into_bytes();
+        bytes.push(0);
+        let _ = self.writer.lock().unwrap().write_all(&bytes);
+    }
+
+    /// 브라우저가 알려 온 일(답이 아닌 것). 페이지가 확인 창을 띄웠을 때, Claude의 도구가 이 브라우저를 쓰는 중이면
+    /// 바로 닫는다(닫지 않으면 그 탭에 보낸 명령의 답이 오지 않는다). 쓰는 중이 아니면 사용자가 답하게 둔다.
+    fn on_event(&self, message: &Value) {
+        let dialogs = crate::browser::chrome_dialogs(&self.key);
+        let tab = message["sessionId"].as_str().unwrap_or("");
+        match message["method"].as_str() {
+            Some("Page.javascriptDialogOpening") => {
+                let dialog = crate::browser::Dialog::from_event(&message["params"], tab);
+                if let Some(answer) = crate::browser::dialog_opened(&dialogs, dialog.clone()) {
+                    self.post("Page.handleJavaScriptDialog", crate::browser::dialog_params(&dialog, &answer), tab);
+                    if let Some(script) = crate::browser::dialog_follow_up(&dialog, &answer) {
+                        self.post("Runtime.evaluate", script, tab);
+                    }
+                }
+            }
+            Some("Page.javascriptDialogClosed") => crate::browser::dialog_closed(&dialogs, Some(tab)),
+            _ => {}
+        }
     }
 
     fn is_visible(&self, target: &str) -> bool {
@@ -334,7 +366,11 @@ fn read_loop(reader: File, chrome: Arc<Chrome>) {
             buffer.pop();
         }
         let Ok(message) = serde_json::from_slice::<Value>(&buffer) else { continue };
-        let Some(id) = message["id"].as_u64() else { continue }; // 알림(이벤트)은 쓰지 않는다.
+        // 번호가 없는 것은 답이 아니라 브라우저가 알려 온 일이다.
+        let Some(id) = message["id"].as_u64() else {
+            chrome.on_event(&message);
+            continue;
+        };
         if let Some(waiter) = chrome.pending.lock().unwrap().remove(&id) {
             let reply = match message.get("error") {
                 Some(problem) => Err(problem["message"].as_str().unwrap_or("브라우저 오류").to_string()),
@@ -411,6 +447,8 @@ pub fn open(key: &str, configured_path: &str, home: &str, url: Option<&str>) -> 
             CHROMES.lock().unwrap().insert(key.to_string(), chrome.clone());
             crate::log(&format!("브라우저 엔진 chrome: {} ({})", version["product"].as_str().unwrap_or("?"), program.display()));
             wait_first_page(&chrome, &start);
+            // 첫 탭에 미리 붙어 둔다: 붙은 뒤에 뜬 확인 창만 알 수 있고 닫을 수 있다.
+            let _ = chrome.current_target();
             Ok(())
         }
         Err(problem) => {
@@ -440,6 +478,11 @@ pub fn cdp(key: &str, method: &str, params: Value) -> Result<Value, String> {
     let target = chrome.current_target()?;
     let session = chrome.session_for(&target)?;
     chrome.send(method, params, Some(&session))
+}
+
+/// 그 프로필의 브라우저에서 그 탭(조작 통로 번호)에 CDP 명령을 보낸다. 확인 창은 그 창이 뜬 탭에 답해야 한다.
+pub fn cdp_on(key: &str, session: &str, method: &str, params: Value) -> Result<Value, String> {
+    running(key).ok_or("브라우저가 열려 있지 않습니다")?.send(method, params, Some(session))
 }
 
 /// 떠 있는 브라우저(어느 그룹의 것이든)의 Chromium 버전(예: 157.0.8103.52). 떠 있는 것이 없으면 None.
@@ -500,6 +543,93 @@ mod tests {
         assert!(chrome.send("Browser.getVersion", json!({}), None).is_err());
         assert!(asked.elapsed() < Duration::from_secs(1));
         thread::sleep(Duration::from_millis(500));
+        let _ = std::fs::remove_dir_all(&profile);
+    }
+
+    /// 설치된 브라우저를 실제로 띄워, 페이지가 띄우는 확인 창을 도구가 닫고 지나가는지 본다(브라우저가 없으면 건너뛴다).
+    /// 창이 잠깐 뜨므로 평소 시험에서는 빼고, `cargo test -- --ignored`로 돌린다.
+    #[test]
+    #[ignore]
+    fn 페이지가_띄운_확인_창을_닫고_지나간다() {
+        let Ok(program) = find_browser("") else { return };
+        let profile = std::env::temp_dir().join("cypher-chrome-dialog-test-profile");
+        let _ = std::fs::remove_dir_all(&profile);
+        std::fs::create_dir_all(&profile).unwrap();
+        let (child, writer, reader) = spawn(&program, &profile, "about:blank").unwrap();
+        let key = "dialogtest";
+        let chrome = Chrome::connect(key, child, writer, reader);
+        chrome.send("Browser.getVersion", json!({}), None).unwrap();
+        CHROMES.lock().unwrap().insert(key.to_string(), chrome.clone());
+        let target = chrome.current_target().unwrap();
+        let session = chrome.session_for(&target).unwrap();
+        let page = "data:text/html,<title>시험</title><button style='width:300px;height:200px'>단추</button>";
+        chrome.send("Page.navigate", json!({ "url": page }), Some(&session)).unwrap();
+
+        let tool = |name: &str, args: Value| {
+            let asked = Instant::now();
+            let outcome = crate::browser::on_chrome(key, name, &args);
+            let took = asked.elapsed();
+            let text = match outcome {
+                Ok(content) => content.iter().filter_map(|c| c["text"].as_str()).collect::<Vec<_>>().join("\n"),
+                Err(problem) => format!("오류: {problem}"),
+            };
+            println!("── {name} {args} ({took:?})\n{text}");
+            (text, took)
+        };
+        let quick = Duration::from_secs(8);
+
+        // 조작 중에 뜬 확인 창: 기본은 취소. 도구가 멈추지 않고, 닫은 사실이 답에 실린다.
+        let (text, took) = tool("browser_eval", json!({ "script": "confirm('지울까요?') ? '지움' : '취소함'" }));
+        assert!(text.contains("취소함") && text.contains("(confirm): \"지울까요?\" → 취소했습니다."), "{text}");
+        assert!(took < quick, "{took:?}");
+
+        // 답을 정해 두면 다음 창 하나에 쓰인다.
+        tool("browser_dialog", json!({ "accept": true }));
+        let (text, _) = tool("browser_eval", json!({ "script": "confirm('지울까요?') ? '지움' : '취소함'" }));
+        assert!(text.contains("지움") && text.contains("→ 수락했습니다. (browser_dialog로 정해 둔 답입니다)"), "{text}");
+        let (text, _) = tool("browser_eval", json!({ "script": "confirm('또?') ? '지움' : '취소함'" }));
+        assert!(text.contains("취소함"), "{text}");
+
+        // 입력 창에 값을 넣는다. 알림은 확인으로 닫는다.
+        tool("browser_dialog", json!({ "accept": true, "text": "김철수" }));
+        let (text, _) = tool("browser_eval", json!({ "script": "prompt('이름?', '홍길동')" }));
+        assert!(text.contains("김철수") && text.contains("(prompt): \"이름?\" → 수락했습니다(입력값: \"김철수\")"), "{text}");
+        let (text, took) = tool("browser_eval", json!({ "script": "alert('저장했습니다'); '끝'" }));
+        assert!(text.contains("끝") && text.contains("(alert): \"저장했습니다\" → 확인을 눌렀습니다."), "{text}");
+        assert!(took < quick, "{took:?}");
+
+        // 정해 둔 답은 쓰이지 않아도 조작 한 번이 끝나면 지워진다.
+        tool("browser_dialog", json!({ "accept": true }));
+        tool("browser_eval", json!({ "script": "1 + 1" }));
+        let (text, _) = tool("browser_eval", json!({ "script": "confirm('지울까요?') ? '지움' : '취소함'" }));
+        assert!(text.contains("취소함"), "{text}");
+
+        // 누르기로 뜬 확인 창(마우스 입력의 답이 창이 닫힐 때까지 오지 않는 경우).
+        tool("browser_eval", json!({ "script": "document.querySelector('button').onclick = () => { document.title = confirm('누름?') ? '예' : '아니오'; }; 1" }));
+        let (text, took) = tool("browser_click_at", json!({ "x": 100, "y": 100 }));
+        assert!(text.contains("제목: 아니오") && text.contains("(confirm): \"누름?\" → 취소했습니다."), "{text}");
+        assert!(took < quick, "{took:?}");
+
+        // 도구가 쓰고 있지 않을 때 뜬 창은 그대로 둔다. 다음 도구가 시작할 때 닫고 그 사실을 적는다.
+        tool("browser_eval", json!({ "script": "setTimeout(() => { document.title = confirm('나중에 뜬 창') ? '예2' : '아니오2'; }, 300); 1" }));
+        thread::sleep(Duration::from_millis(1500));
+        let (text, took) = tool("browser_eval", json!({ "script": "document.title" }));
+        assert!(text.contains("아니오2") && text.contains("페이지에 확인 창이 떠 있었습니다(confirm): \"나중에 뜬 창\" → 취소했습니다."), "{text}");
+        assert!(took < quick, "{took:?}");
+
+        // 나갈지 묻는 창: 기본은 나가기(이동이 이어진다). 머무르기로 정해 두면 이동하지 않고, 기다리다 끝나지도 않는다.
+        let guard = "window.onbeforeunload = (e) => { e.preventDefault(); e.returnValue = '나갈까요'; }; 1";
+        tool("browser_eval", json!({ "script": guard }));
+        tool("browser_dialog", json!({ "accept": false }));
+        let (text, took) = tool("browser_navigate", json!({ "url": "about:blank" }));
+        assert!(text.contains("제목: 아니오2") && text.contains("(beforeunload)") && text.contains("→ 머무르기로 답했습니다."), "{text}");
+        assert!(took < quick, "{took:?}");
+        let (text, took) = tool("browser_navigate", json!({ "url": "about:blank" }));
+        assert!(text.contains("주소: about:blank") && text.contains("(beforeunload)") && text.contains("→ 나가기로 답했습니다."), "{text}");
+        assert!(took < quick, "{took:?}");
+
+        let _ = chrome.send("Browser.close", json!({}), None);
+        thread::sleep(Duration::from_millis(1500));
         let _ = std::fs::remove_dir_all(&profile);
     }
 }

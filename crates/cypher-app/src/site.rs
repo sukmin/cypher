@@ -6,6 +6,7 @@
 //!
 //! 같은 그룹의 Claude 세션은 이 웹뷰를 브라우저 도구로 조작할 수 있다(`browser.rs`). 화면에 보이지 않는
 //! 사이트를 조작할 때는 웹뷰를 창 밖 자리에 잠깐 꺼내 놓는다(숨긴 웹뷰는 화면을 그리지 않아 찍을 수 없다).
+//! 조작하는 중에 화면이 숨기라고 하면(메뉴·대화상자가 열림, 다른 항목으로 바뀜) 숨기는 대신 창 밖 자리로 옮긴다.
 //!
 //! 이 웹뷰가 여는 웹 페이지에는 어떤 앱 명령 권한도 주지 않는다.
 //!
@@ -21,9 +22,9 @@
 //! 화면이 알려 준 것이 없는 항목(닫힌 항목)의 웹뷰도 만들지 않는다.
 
 use serde::Serialize;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::{LazyLock, Mutex};
+use std::sync::{LazyLock, Mutex, PoisonError};
 use std::thread;
 use std::time::{Duration, Instant};
 use tauri::webview::{NewWindowResponse, PageLoadEvent, WebviewBuilder};
@@ -46,8 +47,10 @@ static PROFILES: LazyLock<Mutex<HashMap<u32, String>>> = LazyLock::new(Default::
 static ASSIGNED: LazyLock<Mutex<HashMap<u32, String>>> = LazyLock::new(Default::default);
 /// 공용 프로필의 데이터 폴더를 따로 지정해야 할 때의 그 폴더(`adopt_data_folder_override` 참고). 평소에는 None.
 static SHARED_DIR: Mutex<Option<PathBuf>> = Mutex::new(None);
-/// Claude가 지금 조작하고 있는 사이트(조작 중에는 숨기지 않는다).
-static BUSY: LazyLock<Mutex<HashSet<u32>>> = LazyLock::new(Default::default);
+/// 지금 조작하고 있는 사이트와, 그 사이트를 쓰고 있는 조작의 수(조작 중에는 숨기지 않는다).
+/// 같은 사이트를 여러 조작이 함께 쓸 수 있다(Claude 세션마다 연결이 따로이고, 화면의 캡처도 있다).
+/// 웹뷰를 꺼내 놓거나 숨기는 일은 이 잠금을 쥔 채로 한다(시작하는 조작과 끝나는 조작이 엇갈리지 않게).
+static BUSY: LazyLock<Mutex<HashMap<u32, usize>>> = LazyLock::new(Default::default);
 /// 사이트 웹뷰를 만들고 닫는 일은 한 번에 하나씩만 한다. 같은 사이트의 웹뷰를 화면과 도구가 동시에 만들지 않게 하고,
 /// 한 웹뷰를 닫는 일이 같은 프로필의 다른 웹뷰를 만드는 도중에 끼어들지 않게 한다(그 프로필의 마지막 웹뷰가 닫히면
 /// 엔진이 내려가는데, 그 순간에 만들고 있던 웹뷰는 끝내 만들어지지 않고 멈춘다).
@@ -123,12 +126,52 @@ struct Changed {
 }
 
 fn apply(webview: &tauri::Webview, place: Place) {
+    let busy = BUSY.lock().unwrap();
     if place.visible {
         let _ = webview.set_position(LogicalPosition::new(place.x, place.y));
         let _ = webview.set_size(LogicalSize::new(place.width.max(1.0), place.height.max(1.0)));
         let _ = webview.show();
-    } else if !BUSY.lock().unwrap().contains(&id_of(webview)) {
+    } else if busy.contains_key(&id_of(webview)) {
+        // 조작 중이면 숨기지 않는다(숨긴 웹뷰는 화면을 그리지 않는다). 제자리에 두면 메뉴·대화상자나 그 자리에 온
+        // 다른 항목을 덮으므로 창 밖 자리로 옮긴다. 조작이 끝나면 숨기고, 다시 보이게 되면 위에서 제자리에 놓는다.
+        let _ = webview.set_position(LogicalPosition::new(PARKED_X, 0.0));
+    } else {
         let _ = webview.hide();
+    }
+}
+
+/// 조작 하나가 그 사이트를 쓰기 시작한다. 그 사이트를 쓰는 조작이 이것뿐이면 true.
+fn enter(busy: &mut HashMap<u32, usize>, id: u32) -> bool {
+    let count = busy.entry(id).or_default();
+    *count += 1;
+    *count == 1
+}
+
+/// 조작 하나가 그 사이트를 다 썼다. 그 사이트를 쓰는 조작이 더 없으면 true.
+fn leave(busy: &mut HashMap<u32, usize>, id: u32) -> bool {
+    match busy.get_mut(&id) {
+        Some(count) if *count > 1 => {
+            *count -= 1;
+            false
+        }
+        _ => {
+            busy.remove(&id);
+            true
+        }
+    }
+}
+
+/// 조작하는 동안 들고 있는 것. 놓으면(조작이 패닉으로 끝나도) 수가 줄고, 그 사이트를 쓰는 조작이 더 없을 때만
+/// 화면에 없는 웹뷰를 다시 숨긴다(먼저 끝난 조작이 아직 도는 조작의 웹뷰를 숨기지 않게).
+struct Busy<'a>(&'a tauri::Webview);
+
+impl Drop for Busy<'_> {
+    fn drop(&mut self) {
+        let id = id_of(self.0);
+        let mut busy = BUSY.lock().unwrap_or_else(PoisonError::into_inner);
+        if leave(&mut busy, id) && !is_visible(id) {
+            let _ = self.0.hide();
+        }
     }
 }
 
@@ -155,7 +198,10 @@ fn may_use(assigned: &HashMap<u32, String>, id: u32, profile: &str) -> Result<()
 
 /// 그 사이트의 웹뷰를 닫고, 닫힌 것을 확인한다(같은 이름으로 새로 만들 수 있게).
 fn close_and_wait(app: &AppHandle, id: u32) -> Result<(), String> {
-    PROFILES.lock().unwrap().remove(&id);
+    if let Some(profile) = PROFILES.lock().unwrap().remove(&id) {
+        // 이 웹뷰에 떠 있던 확인 창과 정해 둔 답도 함께 사라진다.
+        crate::browser::forget_dialogs(&crate::browser::site_dialogs(id, &profile));
+    }
     if let Some(existing) = app.get_webview(&label(id)) {
         let _ = existing.close();
     }
@@ -216,6 +262,8 @@ fn create(app: &AppHandle, id: u32, url: &str, place: Option<Place>, profile: &s
     let (width, height) = shown.map_or(PARKED_SIZE, |p| (p.width.max(1.0), p.height.max(1.0)));
     let webview = window.add_child(builder, LogicalPosition::new(x, y), LogicalSize::new(width, height)).map_err(err)?;
     PROFILES.lock().unwrap().insert(id, profile.to_string());
+    // 페이지가 띄우는 확인 창(alert 등)을 지켜본다: Claude의 도구가 쓰는 중에 뜬 창은 바로 닫아야 도구가 멈추지 않는다.
+    crate::browser::watch_dialogs(&webview, crate::browser::site_dialogs(id, profile));
     if shown.is_none() {
         let _ = webview.hide();
     }
@@ -239,23 +287,29 @@ pub fn with_shown<T>(app: &AppHandle, id: u32, run: impl FnOnce(&tauri::Webview)
 /// 새 프로필로 다시 만들어졌다) 조작은 오류로 끝난다: 이름으로 다시 찾지 않으므로 다른 프로필의 웹뷰를 건드리지 않는다.
 pub fn with_shown_on<T>(webview: &tauri::Webview, run: impl FnOnce(&tauri::Webview) -> T) -> T {
     let id = id_of(webview);
-    BUSY.lock().unwrap().insert(id);
-    if !is_visible(id) {
-        let (width, height) = place_of(id)
-            .map(|p| (p.width, p.height))
-            .filter(|(w, h)| *w >= 320.0 && *h >= 240.0)
-            .unwrap_or(PARKED_SIZE);
-        let _ = webview.set_position(LogicalPosition::new(PARKED_X, 0.0));
-        let _ = webview.set_size(LogicalSize::new(width, height));
-        let _ = webview.show();
+    let parked = {
+        let mut busy = BUSY.lock().unwrap();
+        let first = enter(&mut busy, id);
+        let parked = !is_visible(id);
+        if parked {
+            let _ = webview.set_position(LogicalPosition::new(PARKED_X, 0.0));
+            // 크기는 처음 꺼낼 때만 정한다(먼저 시작한 조작이 도는 중에 페이지 크기가 바뀌지 않게).
+            if first {
+                let (width, height) = place_of(id)
+                    .map(|p| (p.width, p.height))
+                    .filter(|(w, h)| *w >= 320.0 && *h >= 240.0)
+                    .unwrap_or(PARKED_SIZE);
+                let _ = webview.set_size(LogicalSize::new(width, height));
+            }
+            let _ = webview.show();
+        }
+        parked
+    };
+    let _busy = Busy(webview);
+    if parked {
         thread::sleep(Duration::from_millis(150));
     }
-    let out = run(webview);
-    BUSY.lock().unwrap().remove(&id);
-    if !is_visible(id) {
-        let _ = webview.hide();
-    }
-    out
+    run(webview)
 }
 
 /// 기다리는 일(잠금, 웹뷰가 닫히기, 웹뷰 만들기)을 비동기 명령의 작업 스레드가 아닌, 막혀도 되는 스레드에서 한다.
@@ -379,6 +433,28 @@ mod tests {
         // 닫히면(화면이 알려 준 것을 지우면) 다시 거절한다.
         assigned.remove(&5);
         assert_eq!(may_use(&assigned, 5, "pb"), Err(GONE));
+    }
+
+    #[test]
+    fn 같은_사이트를_쓰는_조작이_모두_끝나야_숨긴다() {
+        let mut busy = HashMap::new();
+        // 처음 시작한 조작만 "처음"이다(그때만 꺼내 놓는 크기를 정한다).
+        assert!(enter(&mut busy, 5));
+        assert!(!enter(&mut busy, 5));
+        // 다른 사이트는 따로 센다.
+        assert!(enter(&mut busy, 6));
+        // 먼저 끝난 조작은 "마지막"이 아니다: 아직 도는 조작이 있으니 숨기지 않고, 조작 중이라는 표시도 남는다.
+        assert!(!leave(&mut busy, 5));
+        assert!(busy.contains_key(&5));
+        // 마지막 조작이 끝나면 숨겨도 되고, 조작 중이라는 표시가 지워진다.
+        assert!(leave(&mut busy, 5));
+        assert!(!busy.contains_key(&5));
+        assert!(busy.contains_key(&6));
+        // 다시 시작하면 또 처음이다.
+        assert!(enter(&mut busy, 5));
+        assert!(leave(&mut busy, 5));
+        assert!(leave(&mut busy, 6));
+        assert!(busy.is_empty());
     }
 
     #[test]

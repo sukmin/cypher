@@ -43,7 +43,10 @@ export function openPopup(title, nodes) {
 const SNIPPET_KEY = 'cypher.snippets';
 
 function loadSnippets() {
-  try { return JSON.parse(localStorage.getItem(SNIPPET_KEY) || '[]'); } catch { return []; }
+  let list = [];
+  try { list = JSON.parse(localStorage.getItem(SNIPPET_KEY) || '[]'); } catch { /* 깨진 기록은 버린다 */ }
+  // 목록이 아닌 값이 적혀 있거나 글이 아닌 것이 섞여 있어도 창은 열려야 한다.
+  return Array.isArray(list) ? list.filter((text) => typeof text === 'string' && text) : [];
 }
 
 function saveSnippets(list) {
@@ -333,6 +336,10 @@ export function parseDiff(text) {
     } else if (mark === '-' && oldLeft > 0) {
       push('del', oldNo++, null);
       oldLeft--;
+    } else if (line === '' && oldLeft > 0 && newLeft > 0) {
+      // 갈래 안의 빈 줄: 앞의 공백 없이 적힌 그대로인 빈 줄이다(git의 diff.suppressBlankEmpty 설정).
+      push('ctx', oldNo++, newNo++);
+      oldLeft--; newLeft--;
     } else {
       // 갈래 밖의 줄: 파일 머리(diff, index, ---, +++ …)나 덧붙은 안내 글.
       loose = false;
@@ -784,6 +791,8 @@ function showCommit() {
     run.textContent = busy ? '커밋하는 중…' : `커밋 (파일 ${n}개)`;
     run.title = !n ? '커밋할 파일을 고르세요' : !message.value.trim() ? '커밋 메시지를 적으세요' : 'Ctrl+Enter';
   };
+  // 이 커밋 창이 지금 화면에 떠 있는지. 창을 닫아도 내용은 그대로 붙어 있으므로(다른 창을 띄울 때 바뀐다) 열려 있는지도 본다.
+  const showing = () => message.isConnected && $('popup').open;
   const commit = async () => {
     if (run.disabled) return;
     busy = true;
@@ -792,13 +801,13 @@ function showCommit() {
     try {
       const made = await invoke('git_commit', { root, paths: chosen(), message: message.value.trim() });
       commitDraft = { root: '', text: '' };
-      if (message.isConnected) close();
+      if (showing()) close();
       setStatus(`커밋했습니다: ${made}`);
     } catch (err) {
       busy = false;
       problem.textContent = `커밋하지 못했습니다:\n${err}`;
       sync();
-      if (!message.isConnected) setStatus(`커밋하지 못했습니다: ${err}`); // 기다리는 사이 창을 닫았다.
+      if (!showing()) setStatus(`커밋하지 못했습니다: ${err}`); // 기다리는 사이 창을 닫았다.
     }
     loadDiff(); // 실패했더라도 색인에 올리는 데까지는 됐을 수 있으니 목록을 맞춘다.
   };

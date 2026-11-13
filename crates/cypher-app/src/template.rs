@@ -128,6 +128,11 @@ fn save_in(dir: &Path, name: &str, body: &Value) -> Result<PathBuf, String> {
         return Err(format!("틀이 너무 큽니다({}MB). 메모에 든 글을 줄이거나 파일로 저장한 뒤 다시 해 보세요.", text.len() >> 20));
     }
     let path = dir.join(file);
+    // 이름은 다른데 파일 이름이 같아지는 틀(`결제/개편`과 `결제_개편`, 앞 80자가 같은 이름)을 말없이 덮어쓰지 않는다.
+    // 화면은 틀 이름으로 겹치는지 묻기 때문에, 이 경우는 묻지 않고 여기까지 온다.
+    if let Some(other) = info_of(&path).filter(|other| other.name.to_lowercase() != name.to_lowercase()) {
+        return Err(format!("다른 틀 \"{}\"과(와) 파일 이름이 같아집니다. 틀 이름을 다르게 지어 주세요.", other.name));
+    }
     crate::memo::write_safely(&path, text.as_bytes())?;
     Ok(path)
 }
@@ -220,5 +225,10 @@ mod tests {
         assert_eq!(list_in(&dir).iter().find(|t| t.name == "결제 개편").unwrap().items, 0);
         assert_eq!(fs::read_dir(&dir).unwrap().count(), 5);
         assert!(save_in(&dir, "항목 없음", &json!({ "name": "x" })).is_err());
+        // 이름은 다른데 파일 이름이 같아지는 틀은 덮어쓰지 않는다. 대/소문자만 다른 이름은 같은 틀이다.
+        save_in(&dir, "a/b", &json!({ "name": "a/b", "items": [1] })).unwrap();
+        assert!(save_in(&dir, "a_b", &json!({ "name": "a_b", "items": [] })).is_err());
+        assert_eq!(list_in(&dir).iter().find(|t| t.name == "a/b").unwrap().items, 1);
+        save_in(&dir, "A/B", &json!({ "name": "A/B", "items": [] })).unwrap();
     }
 }

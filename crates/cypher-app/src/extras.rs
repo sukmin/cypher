@@ -39,7 +39,9 @@ pub struct Changes {
 /// git을 실행한다. `readonly`이면(보기만 하는 명령) 색인 잠금을 잡지 않는다.
 fn run_git(dir: &Path, args: &[&str], readonly: bool) -> Result<std::process::Output, String> {
     let mut command = Command::new("git");
-    command.arg("-C").arg(dir).args(["-c", "core.quotepath=false"]).args(args);
+    // 경로 인자는 글자 그대로 받는다(--literal-pathspecs). 그러지 않으면 git이 `[ ]`·`*`·`?`를 글롭으로 풀어서,
+    // `app/[id]/page.tsx`를 되돌리거나 커밋할 때 `app/i/page.tsx`까지 함께 처리된다.
+    command.arg("--literal-pathspecs").arg("-C").arg(dir).args(["-c", "core.quotepath=false"]).args(args);
     if readonly {
         command.env("GIT_OPTIONAL_LOCKS", "0");
     }
@@ -184,6 +186,10 @@ fn revert(root: &Path, path: &str, keep: &Path) -> Result<String, String> {
     // 고쳤거나(M), 지웠거나(D), 종류가 바뀐(T) 파일만 되돌린다.
     if !change.code.chars().all(|c| matches!(c, ' ' | 'M' | 'D' | 'T')) {
         return Err(format!("이 상태({})의 파일은 되돌리기를 지원하지 않습니다. 터미널에서 git으로 되돌리세요", change.status));
+    }
+    // 하위 모듈은 checkout이 성공으로 끝나도 안의 변경이 그대로 남는다("되돌렸습니다"라고 하면 거짓이 된다).
+    if root.join(path).is_dir() {
+        return Err("하위 모듈(폴더)의 변경은 되돌리기를 지원하지 않습니다. 그 폴더 안에서 git으로 되돌리세요".into());
     }
 
     // 되돌리기 전의 차이를 보관한다(이진 파일도 되살릴 수 있게 --binary).

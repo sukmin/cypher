@@ -8,7 +8,7 @@ use std::path::Path;
 
 /// 본창(세션 화면)이 쓰는 명령.
 const MAIN: &[&str] = &[
-    "app_config", "open_config", "open_claude_file", "home_dir", "autostart", "notify", "pick_folder",
+    "app_close", "app_config", "open_config", "open_claude_file", "home_dir", "autostart", "notify", "pick_folder",
     "session_create", "session_write", "session_resize", "session_pause", "session_close",
     "link_detect", "link_open",
     "git_changes", "git_diff", "save_text", "git_revert", "git_commit",
