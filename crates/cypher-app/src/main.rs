@@ -14,6 +14,7 @@ mod magnet;
 mod mcp;
 mod memo;
 mod memory;
+mod mindmap;
 mod site;
 mod monitor;
 mod status;
@@ -37,8 +38,8 @@ pub struct AppState {
     pub token: String,
     /// Claude 세션의 상태줄·훅에 넣을 전달 프로그램 호출문. 전달 프로그램이 없으면 None.
     pub bridge: Option<String>,
-    /// Claude 세션에 `--mcp-config`로 넘길 파일(브라우저 조작 도구). 꺼져 있으면 None.
-    pub mcp_config: Option<PathBuf>,
+    /// Claude 세션에 Cypher 도구(MCP)를 연결할지. 세션마다 `--mcp-config` 파일을 따로 만든다.
+    pub mcp: bool,
     pub config: Config,
     pub config_error: Option<String>,
     pub config_path: PathBuf,
@@ -91,7 +92,19 @@ fn clean_old_settings() {
     }
 }
 
+/// 전달 프로그램이 접속할 때 내는 확인값(128비트). 운영체제의 난수로 만든다.
 fn random_token() -> String {
+    #[link(name = "advapi32")]
+    extern "system" {
+        #[link_name = "SystemFunction036"]
+        fn rtl_gen_random(buffer: *mut u8, len: u32) -> u8;
+    }
+    let mut bytes = [0u8; 16];
+    // SAFETY: 길이가 맞는 유효한 버퍼를 넘긴다.
+    if unsafe { rtl_gen_random(bytes.as_mut_ptr(), bytes.len() as u32) } != 0 {
+        return bytes.iter().map(|b| format!("{b:02x}")).collect();
+    }
+    // 난수를 얻지 못하면(거의 없다) 실행마다 달라지는 해시 씨앗으로 대신한다.
     let a = std::collections::hash_map::RandomState::new().build_hasher().finish();
     let b = std::collections::hash_map::RandomState::new().build_hasher().finish();
     format!("{a:016x}{b:016x}")
@@ -133,9 +146,10 @@ fn bridge_for_claude() -> Option<String> {
     bridge.exists().then(|| bridge_command(&bridge))
 }
 
-/// Claude 세션에 브라우저 조작 도구를 연결하는 MCP 설정 파일을 만든다(`--mcp-config`로 넘긴다).
-/// 전달 프로그램이 MCP 서버 노릇을 하며 이 앱으로 요청을 나른다.
-fn write_mcp_config(port: u16, token: &str) -> Option<PathBuf> {
+/// Claude 세션에 Cypher 도구를 연결하는 MCP 설정 파일을 만든다(`--mcp-config`로 넘긴다).
+/// 전달 프로그램이 MCP 서버 노릇을 하며 이 앱으로 요청을 나른다. 어느 세션이 부른 도구인지 알 수 있게
+/// (같은 그룹의 브라우저·항목을 찾는다) 세션 번호를 넣어 세션마다 파일을 따로 만든다.
+pub fn write_mcp_config(port: u16, token: &str, session: u32) -> Option<PathBuf> {
     let bridge = std::env::current_exe().ok()?.with_file_name("cypher-bridge.exe");
     if !bridge.exists() {
         return None;
@@ -145,13 +159,13 @@ fn write_mcp_config(port: u16, token: &str) -> Option<PathBuf> {
             "cypher": {
                 "command": bridge.to_string_lossy(),
                 "args": ["mcp"],
-                "env": { "CYPHER_PORT": port.to_string(), "CYPHER_TOKEN": token }
+                "env": { "CYPHER_PORT": port.to_string(), "CYPHER_TOKEN": token, "CYPHER_SESSION": session.to_string() }
             }
         }
     });
     let dir = data_dir()?;
     std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join(format!("mcp-{}.json", std::process::id()));
+    let path = dir.join(format!("mcp-{}-{session}.json", std::process::id()));
     std::fs::write(&path, json.to_string()).ok()?;
     Some(path)
 }
@@ -167,6 +181,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         .item(&item("memory", "기억 내보내기·가져오기")?)
         .build()?;
     let settings = SubmenuBuilder::new(app, "설정")
+        .item(&item("look", "모양: 테마·글꼴·글자 크기…")?)
         .item(&item("settings", "Cypher 설정 파일 열기")?)
         .separator()
         .item(&item("claude-settings", "Claude 공통 설정 열기 (settings.json)")?)
@@ -183,7 +198,7 @@ fn main() {
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
-        // 본창을 닫으면 브라우저 창이 남아 있어도 앱을 끝낸다.
+        // 본창을 닫으면 앱을 끝낸다.
         .on_window_event(|window, event| {
             if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
                 chrome::shutdown(); // "chrome" 엔진으로 띄워 둔 브라우저도 함께 닫는다.
@@ -196,10 +211,10 @@ fn main() {
             clipboard::clean_old_pastes();
             clean_old_settings();
             memo::clean_closed();
+            mindmap::clean_closed();
             image::clean_closed();
             let config_path = config_path();
             let (config, config_error) = Config::load(&config_path);
-            let mcp_config = if config.browser.enabled { write_mcp_config(status_port, &token) } else { None };
             // 어느 판을 쓰고 있는지 알 수 있게 창 제목에 버전을 붙인다.
             if let Some(main) = app.get_webview_window("main") {
                 let _ = main.set_title(concat!("Cypher ", env!("CARGO_PKG_VERSION")));
@@ -220,7 +235,7 @@ fn main() {
                 status_port,
                 token,
                 bridge: bridge_for_claude(),
-                mcp_config,
+                mcp: config.browser.enabled,
                 config,
                 config_error,
                 config_path,
@@ -283,16 +298,16 @@ fn main() {
             http::http_run_at,
             browser::browser_open,
             browser::browser_where,
+            mcp::mcp_reply,
+            mindmap::mindmap_read,
+            mindmap::mindmap_write,
+            mindmap::mindmap_remove,
+            mindmap::mindmap_export,
+            mindmap::mindmap_pdf,
+            commands::store_dirs,
+            commands::ui_zoom,
             engine::browser_engine_info,
             engine::browser_latest_version,
-            browser::browser_navigate,
-            browser::browser_back,
-            browser::browser_forward,
-            browser::browser_reload,
-            browser::browser_current,
-            browser::browser_handoff,
-            browser::browser_page,
-            browser::browser_bar_height,
         ])
         .run(tauri::generate_context!())
         .expect("Cypher를 실행하지 못했습니다");

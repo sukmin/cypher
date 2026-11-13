@@ -45,6 +45,23 @@ pub struct HttpResponse {
     history: String,
 }
 
+/// 요청 파일을 글로 읽는다. 저장은 늘 UTF-8로 하지만, 다른 편집기가 다른 인코딩(CP949 등)으로 저장한 파일도 읽는다.
+fn read_text(path: &Path) -> Result<String, String> {
+    use cypher_core::textfile;
+    let bytes = fs::read(path).map_err(|e| e.to_string())?;
+    // UTF-8이면 손대지 않고 그대로 준다(줄 끝 형식도 그대로).
+    let other = match String::from_utf8(bytes) {
+        Ok(text) => return Ok(text),
+        Err(not_utf8) => not_utf8.into_bytes(),
+    };
+    let decoded = textfile::decode(&other)?;
+    Ok(match decoded.eol {
+        textfile::CRLF => decoded.text.replace('\n', "\r\n"),
+        textfile::CR => decoded.text.replace('\n', "\r"),
+        _ => decoded.text,
+    })
+}
+
 fn home_dir(cwd: &Path) -> PathBuf {
     cwd.join(".cypher").join("http")
 }
@@ -71,7 +88,7 @@ fn list(cwd: &Path) -> HttpFiles {
         .into_iter()
         .map(|path| HttpFile {
             name: path.file_name().unwrap_or_default().to_string_lossy().into_owned(),
-            requests: fs::read_to_string(&path).map(|t| http::parse(&t)).unwrap_or_default(),
+            requests: read_text(&path).map(|t| http::parse(&t)).unwrap_or_default(),
             path: path.to_string_lossy().into_owned(),
         })
         .collect();
@@ -176,9 +193,13 @@ fn send(request: &HttpRequest, headers: &[(String, String)]) -> Result<Sent, Str
     let mut bytes = Vec::new();
     response.into_reader().take(MAX_BODY_BYTES).read_to_end(&mut bytes).map_err(|e| e.to_string())?;
     let elapsed = started.elapsed().as_millis() as u64;
+    // 응답 글은 UTF-8로 읽고, 아니면 다른 인코딩(CP949 등)으로 읽어 본다.
     let body = match String::from_utf8(bytes) {
         Ok(text) => text,
-        Err(e) => format!("(글자가 아닌 데이터 {}바이트)", e.as_bytes().len()),
+        Err(e) => match cypher_core::textfile::decode(e.as_bytes()) {
+            Ok(decoded) if !decoded.lossy => decoded.text,
+            _ => format!("(글자가 아닌 데이터 {}바이트)", e.as_bytes().len()),
+        },
     };
     Ok((code, status, headers, body, elapsed))
 }
@@ -193,7 +214,7 @@ fn pretty(body: &str) -> String {
 
 /// 요청 파일에서 이름(또는 1부터 센 번호)으로 고른 요청을 실행하고 기록한다.
 pub fn run(file: &Path, pick: &str) -> Result<HttpResponse, String> {
-    let text = fs::read_to_string(file).map_err(|e| format!("요청 파일을 읽지 못했습니다: {e}"))?;
+    let text = read_text(file).map_err(|e| format!("요청 파일을 읽지 못했습니다: {e}"))?;
     let requests = http::parse(&text);
     let request = requests
         .iter()
@@ -208,7 +229,7 @@ pub fn run(file: &Path, pick: &str) -> Result<HttpResponse, String> {
 
 /// 편집기에서 커서가 있는 줄(0부터)의 요청을 실행하고 기록한다.
 pub fn run_at(file: &Path, line: usize) -> Result<HttpResponse, String> {
-    let text = fs::read_to_string(file).map_err(|e| format!("요청 파일을 읽지 못했습니다: {e}"))?;
+    let text = read_text(file).map_err(|e| format!("요청 파일을 읽지 못했습니다: {e}"))?;
     let requests = http::parse(&text);
     let index = http::index_at(&requests, line)
         .ok_or("이 줄에는 보낼 수 있는 요청이 없습니다. '### 이름' 아래에 'GET https://…'처럼 http:// 또는 https://로 시작하는 주소(또는 그런 주소가 되는 변수)를 적어 주세요.")?;
@@ -284,7 +305,7 @@ pub async fn http_read(cwd: String, file: String) -> Result<String, String> {
     if !readable(cwd, file) {
         return Err("이 폴더의 요청 파일이 아닙니다".into());
     }
-    let text = fs::read_to_string(file).map_err(|e| e.to_string())?;
+    let text = read_text(file)?;
     // 기록 파일만 끝부분을 잘라 준다. 요청 파일은 편집기에 통째로 들어가야 한다(잘린 채 저장되면 안 된다).
     const MAX: usize = 300_000;
     if text.len() <= MAX || file.file_name().is_none_or(|name| name != HISTORY) {

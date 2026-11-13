@@ -80,7 +80,7 @@ fn replace_file(target: &Path, replacement: &Path) -> bool {
 ///
 /// 이미 있는 파일은 속성·권한을 지키는 방식으로 바꿔치기하고, 그것이 안 되면(다른 프로그램이 열어 둔 파일 등)
 /// 그 파일에 직접 쓴다. 어느 경우든 임시 파일은 남기지 않는다.
-fn write_safely(path: &Path, bytes: &[u8]) -> Result<(), String> {
+pub(crate) fn write_safely(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut temp = path.as_os_str().to_owned();
     temp.push(".cypher-tmp");
     let temp = PathBuf::from(temp);
@@ -174,15 +174,19 @@ fn read_text_file(path: &Path) -> Result<TextFile, String> {
 
 /// 글자 파일을 연다. `path`가 없으면 고르는 창을 띄운다(취소하면 None).
 #[tauri::command]
-pub async fn text_open(path: Option<String>, start: Option<String>) -> Result<Option<TextFile>, String> {
+pub async fn text_open(path: Option<String>, start: Option<String>, kind: Option<String>) -> Result<Option<TextFile>, String> {
+    let mindmap = kind.as_deref() == Some("mindmap");
     tauri::async_runtime::spawn_blocking(move || {
         let path = match path {
             Some(path) => PathBuf::from(path),
             None => {
-                let mut dialog = rfd::FileDialog::new()
-                    .set_title("메모로 열 파일")
-                    .add_filter("글자 파일", &["txt", "md", "json", "log", "http", "toml", "yaml", "yml", "csv", "sql"])
-                    .add_filter("모든 파일", &["*"]);
+                let mut dialog = rfd::FileDialog::new().set_title(if mindmap { "브레인스토밍으로 열 개요 파일" } else { "메모로 열 파일" });
+                dialog = if mindmap {
+                    dialog.add_filter("개요 글(Markdown·글자 파일)", &["md", "markdown", "txt"])
+                } else {
+                    dialog.add_filter("글자 파일", &["txt", "md", "json", "log", "http", "toml", "yaml", "yml", "csv", "sql"])
+                };
+                dialog = dialog.add_filter("모든 파일", &["*"]);
                 if let Some(dir) = start.filter(|d| Path::new(d).is_dir()) {
                     dialog = dialog.set_directory(dir);
                 }
@@ -207,17 +211,20 @@ pub async fn text_save(
     text: String,
     encoding: String,
     eol: String,
+    kind: Option<String>,
 ) -> Result<Option<String>, String> {
+    let mindmap = kind.as_deref() == Some("mindmap");
     tauri::async_runtime::spawn_blocking(move || {
         let path = match path {
             Some(path) => PathBuf::from(path),
             None => {
-                let mut dialog = rfd::FileDialog::new()
-                    .set_title("메모 저장")
-                    .set_file_name(name)
-                    .add_filter("글자 파일", &["txt"])
-                    .add_filter("Markdown", &["md"])
-                    .add_filter("모든 파일", &["*"]);
+                let mut dialog = rfd::FileDialog::new().set_title(if mindmap { "브레인스토밍 저장" } else { "메모 저장" }).set_file_name(name);
+                dialog = if mindmap {
+                    dialog.add_filter("Markdown 개요", &["md"]).add_filter("글자 파일", &["txt"])
+                } else {
+                    dialog.add_filter("글자 파일", &["txt"]).add_filter("Markdown", &["md"])
+                };
+                dialog = dialog.add_filter("모든 파일", &["*"]);
                 if let Some(dir) = start.filter(|d| Path::new(d).is_dir()) {
                     dialog = dialog.set_directory(dir);
                 }

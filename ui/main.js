@@ -1,13 +1,15 @@
 // Cypher 화면: 세션 목록, 나란히 보는 터미널 창, 링크·붙여넣기·알림.
 // 빌드 단계 없이 그대로 실행 파일에 들어간다.
 import {
-  initExtras, showSnippets, showHelp, showEngine, showMemory, showMenu, toggleDiff, showDiff, diffRefreshFor,
+  initExtras, showSnippets, showHelp, showEngine, showMemory, showMenu, toggleDiff, showDiff, diffRefreshFor, openPopup,
 } from './extras.js';
 import { initHttp, createHttp } from './http.js';
 import { initMemo, createMemo } from './memo.js';
 import { initSite, createSite, syncSites } from './site.js';
 import { initImage, createImage } from './image.js';
 import { initDrop } from './drop.js';
+import { initMindmap, createMindmap } from './mindmap.js';
+import { initLook, showLook, setLook, currentLook } from './look.js';
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -21,14 +23,6 @@ const $ = (id) => document.getElementById(id);
 const $terms = $('terms'), $list = $('sessions'), $folder = $('folder');
 const $search = $('search'), $searchInput = $('search-input');
 
-const THEME = {
-  background: '#16181d', foreground: '#d7dae0', cursor: '#d97757',
-  selectionBackground: '#3e4451',
-};
-const SEARCH_COLORS = {
-  matchBackground: '#5c4a1f', activeMatchBackground: '#d97757',
-  matchOverviewRuler: '#5c4a1f', activeMatchColorOverviewRuler: '#d97757',
-};
 const BUSY_MS = 1200;           // 이 시간 안에 출력이 있었으면 "작업 중"으로 본다.
 const HELD_STOP_MS = 30000;      // 서브에이전트 때문에 미룬 완료 알림을, 이만큼 조용하면 그냥 알린다.
 const MAX_PANES = 8;            // 한 화면에 나눠 볼 수 있는 창 수
@@ -50,15 +44,9 @@ const COMPOSER_HEIGHT = 110;    // 프롬프트 편집기 기본 높이
 const KINDS = {
   memo: { label: '메모', icon: '✎', hint: '글자 편집기(찾기·바꾸기, 파일 열기·저장, 임시 저장)', create: createMemo },
   http: { label: 'HTTP', icon: '⇄', hint: 'HTTP 요청(.http 파일)을 쓰고 보내고 응답 보기', create: createHttp },
-  site: {
-    label: '사이트', icon: '◎', hint: '웹 페이지를 저장해 두고 창 안에서 보기', create: createSite,
-    // 만들기 전에 물어볼 것: 주소. 취소하면 만들지 않는다.
-    prepare: async () => {
-      const url = await ask('사이트 주소 (주소가 아니면 검색합니다)', 'https://…');
-      return url ? { url } : null;
-    },
-  },
-  image: { label: '이미지', icon: '▣', hint: '그림(파일, 붙여넣기, 브라우저·사이트 화면 캡처)을 항목으로 두고 보기', create: createImage },
+  site: { label: '사이트', icon: '◎', hint: '브라우저: 빈 페이지로 열고 위의 주소 칸에 주소를 쳐서 갑니다. 같은 그룹의 Claude 세션이 조작할 수 있습니다', create: createSite },
+  image: { label: '이미지', icon: '▣', hint: '그림(파일, 붙여넣기, 사이트 화면 캡처)을 항목으로 두고 보기', create: createImage },
+  mindmap: { label: '브레인스토밍', icon: '✺', hint: '마인드맵: 그림으로 가지를 뻗거나 코드(개요 글)로 쓰고, 표식을 붙이고, 저장하거나 PNG·PDF로 내보내기', create: createMindmap },
 };
 
 /** 그 종류의 항목을 새로 만든다. 종류에 따라 먼저 물어볼 것(사이트 주소 등)을 묻는다. */
@@ -91,6 +79,7 @@ let restoring = false;          // 지난번 항목을 되살리는 중(이 동�
 let renaming = null;            // 사이드바에서 별칭을 고치고 있는 항목의 번호
 let composerFor = null;         // 프롬프트 편집기가 지금 맡고 있는 세션
 try { collapsed = new Set(JSON.parse(localStorage.getItem('cypher.collapsed') || '[]')); } catch { /* 무시 */ }
+let storeDirs = {};            // 메모·브레인스토밍·이미지를 두는 폴더(같은 그룹의 Claude 세션에 경로를 알려 줄 때 쓴다)
 let groupList = [];            // 만들어 둔 그룹 이름(세션이 없어도 남는다)
 try { groupList = JSON.parse(localStorage.getItem('cypher.groups') || '[]'); } catch { /* 무시 */ }
 
@@ -102,6 +91,9 @@ async function init() {
   if (loaded.error) setStatus(`설정 파일 오류(기본값으로 동작): ${loaded.error}`);
   folder = localStorage.getItem('cypher.folder') || await invoke('home_dir');
   showFolder();
+  storeDirs = await invoke('store_dirs').catch(() => ({}));
+  // 테마·글꼴·글자 크기를 적용한다. 바뀔 때마다 열려 있는 터미널과 항목 화면을 맞춘다.
+  initLook({ invoke, make, openPopup, config, onChange: applyLook });
 
   const addButton = (label, title, onClick) => {
     const b = document.createElement('button');
@@ -138,7 +130,16 @@ async function init() {
     invoke, make, ask, setStatus, baseName, showMenu,
     openMemo: (path) => newItem('memo', { saved: { open: path }, show: 'split' }),
   });
-  initSite({ invoke, listen, make, ask, setStatus, captured: onCaptured });
+  initSite({
+    invoke, listen, make, setStatus, showMenu, captured: onCaptured,
+    zoom: () => currentLook().zoom,
+    // 이 브라우저를 넘겨받을 수 있는 Claude 세션: 같은 그룹에서 돌고 있는 것.
+    claudes: (item) => claudesOf(item).map((s) => ({ s, label: label(s) })),
+    // 지금 이 브라우저를 조작하는 Claude 세션의 이름(없으면 빈 글).
+    controller: (item) => { const by = [...sessions.values()].find((s) => s.browser === item.key && !s.exited); return by ? label(by) : ''; },
+    handoff: handoffSite,
+  });
+  initMindmap({ invoke, make, setStatus, showMenu, baseName, addImages });
   initImage({
     invoke, make, setStatus, showMenu, addImages, toClaude: imageToClaude,
     // 같은 묶음의 이미지 항목들(사이드바에 놓인 순서). 이미지 화면에서 이전/다음으로 넘길 때 쓴다.
@@ -154,42 +155,28 @@ async function init() {
   });
   initSidebarGrip();
   initComposer();
-  // 사이드바 아래에는 자주 쓰는 것만 둔다. 나머지는 창 상단 메뉴에 있다.
+  // 사이드바 아래에는 자주 쓰는 것만 둔다. 나머지는 창 상단 메뉴에 있다. 브라우저는 사이드바의 사이트 항목이다.
   $('waiting').onclick = () => { filterWaiting = !filterWaiting; render(); };
   $('changes').onclick = () => toggleDiff();
-  $('browser').onclick = openBrowser;
-  // 브라우저 단추를 오른쪽 클릭하면 지금 페이지를 Claude 세션에 넘길 수 있다.
-  const handoffMenu = (ev) => {
-    ev.preventDefault();
-    ev.stopPropagation();
-    showMenu(ev, [
-      { label: '브라우저 열기', action: openBrowser },
-      { label: '지금 페이지를 Claude에게 넘기기', action: () => handoffFromMain(false) },
-      { label: '지금 페이지를 새 Claude 세션에 넘기기', action: () => handoffFromMain(true) },
-      { label: '브라우저 화면 캡처 → 이미지 항목', action: () => captureBrowser(false) },
-      { label: '브라우저 페이지 전체 캡처 → 이미지 항목', action: () => captureBrowser(true) },
-    ]);
-  };
-  $('browser').oncontextmenu = handoffMenu;
-  if (config.browser.engine?.toLowerCase() === 'chrome') {
-    // 설치된 Chrome을 띄우는 엔진에는 Cypher 주소 줄이 없으므로, 넘기기 단추를 여기에 둔다.
-    $('browser').title = '설치된 Chrome(또는 Edge)을 Cypher 전용 프로필로 엽니다. 여기서 로그인하고 작업하던 것을 Claude 세션이 이어서 조작할 수 있습니다 (Ctrl+Shift+O)';
-    const handoff = make('button', '', '넘기기');
-    handoff.id = 'handoff';
-    handoff.title = '브라우저에서 보고 있는 페이지를 Claude 세션에 넘기기 (오른쪽 클릭: 새 Claude 세션에 넘기기)';
-    handoff.onclick = () => handoffFromMain(false);
-    handoff.oncontextmenu = handoffMenu;
-    const capture = make('button', '', '캡처');
-    capture.id = 'capture';
-    capture.title = '브라우저에 보이는 화면을 찍어 지금 보고 있는 항목의 묶음에 이미지 항목으로 넣기 (Shift+클릭: 페이지 전체)';
-    capture.onclick = (ev) => captureBrowser(ev.shiftKey);
-    $('tools').append(handoff, capture);
+  if (chromeEngine()) {
+    // 설정에서 브라우저 엔진을 "chrome"으로 바꿨을 때만: 사이트 항목 대신 설치된 Chrome을 띄워 Claude가 조작한다.
+    // 그 브라우저는 Cypher 창 밖에 있으므로 여는 단추·넘기기·캡처를 여기에 둔다.
+    const tool = (text, id, title, onClick, onMenu) => {
+      const b = make('button', '', text);
+      Object.assign(b, { id, title, onclick: onClick });
+      if (onMenu) b.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); onMenu(ev); };
+      return b;
+    };
+    $('tools').append(
+      tool('Chrome', 'browser', '설치된 Chrome(또는 Edge)을 Cypher 전용 프로필로 엽니다. 여기서 로그인하고 작업하던 것을 Claude 세션이 이어서 조작할 수 있습니다 (Ctrl+Shift+O)', openChrome),
+      tool('넘기기', 'handoff', 'Chrome에서 보고 있는 페이지를 Claude 세션에 넘기기 (오른쪽 클릭: 새 Claude 세션에 넘기기)', () => handoffChrome(false), () => handoffChrome(true)),
+      tool('캡처', 'capture', 'Chrome에 보이는 화면을 찍어 지금 보고 있는 항목의 묶음에 이미지 항목으로 넣기 (Shift+클릭: 페이지 전체)', (ev) => captureBrowser(ev.shiftKey)),
+    );
+    listen('image-captured', ({ payload }) => onCaptured(payload, null));
   }
-  listen('browser-handoff', ({ payload }) => handoffFromBrowser(payload));
-  // 브라우저 창에서 [캡처]를 눌렀을 때: 지금 보고 있는 항목의 묶음에 이미지 항목으로 넣는다.
-  listen('image-captured', ({ payload }) => onCaptured(payload, null));
-  listen('browser-outdated', ({ payload }) => notice('브라우저 엔진이 오래됐습니다',
-    `${payload.info.browser} ${payload.info.version} · 최신 안정판 ${payload.latest}. 도움말 → 브라우저 엔진 정보에서 갱신 방법을 볼 수 있습니다.`));
+  // 같은 그룹의 Claude 세션이 Cypher 도구로 물어 오는 것(조작할 브라우저, 그룹의 항목, 브레인스토밍 쓰기)에 답한다.
+  listen('mcp-request', ({ payload }) => onMcpRequest(payload));
+  initSidebarKeys();
   listen('menu', ({ payload }) => runMenu(payload));
 
   $('pick').onclick = pickFolder;
@@ -240,9 +227,10 @@ function runMenu(id) {
     snippets: showSnippets,
     broadcast: () => setBroadcast(!broadcast),
     memory: () => showMemory(),
+    look: showLook,
     settings: () => {
       invoke('open_config').catch((err) => setStatus(String(err)));
-      setStatus('설정은 저장한 뒤 Cypher를 다시 시작하면 적용됩니다.');
+      setStatus('설정 파일은 저장한 뒤 Cypher를 다시 시작하면 적용됩니다. (테마·글꼴·글자 크기는 설정 → 모양에서 바로 바꿉니다)');
     },
     // Claude Code의 사용자 공통 파일(모든 폴더에 적용되는 설정과 지침)
     'claude-settings': () => openClaudeFile('settings'),
@@ -333,9 +321,10 @@ async function newSession(profileId, opts = {}) {
   pane.append(head, host);
   $('parked').append(pane); // 화면에 놓이기 전까지 보관 칸에 둔다.
 
+  const look = currentLook();
   const term = new Terminal({
-    fontFamily: config.font.family, fontSize: config.font.size, theme: THEME, cursorBlink: true,
-    scrollback: config.session.scrollback, allowProposedApi: true,
+    fontFamily: look.termFamily, fontSize: look.termPixels, theme: look.termTheme, minimumContrastRatio: look.contrast,
+    cursorBlink: true, scrollback: config.session.scrollback, allowProposedApi: true,
   });
   const fitAddon = new FitAddon.FitAddon();
   const search = new SearchAddon.SearchAddon();
@@ -586,7 +575,7 @@ function layout() {
   $('empty').hidden = visible.length > 0;
   $('empty').textContent = sessions.size
     ? '화면에 띄운 항목이 없습니다. 사이드바에서 항목을 누르거나 화면으로 끌어다 놓으세요.'
-    : '왼쪽에서 세션이나 메모·HTTP·사이트 항목을 시작하세요.';
+    : '왼쪽에서 세션이나 메모·HTTP·사이트·이미지·브레인스토밍 항목을 시작하세요.';
   syncComposer();
   syncSites(); // 사이트 항목의 웹뷰를 새 창 자리에 맞춘다.
   requestAnimationFrame(() => {
@@ -668,19 +657,21 @@ function showDropHint(hit) {
   hint.textContent = DROP_TEXT[zone];
 }
 
-function activate(s) {
+/** 항목을 고른다(화면에 없으면 지금 창 자리에 놓는다). `keepFocus`이면 초점을 옮기지 않는다(사이드바에서 방향키로 오갈 때). */
+function activate(s, { keepFocus = false } = {}) {
   if (!visible.includes(s)) {
     placeInActive(s);
     layout();
   }
   active = s;
   s.attention = false;
+  s.usedAt = Date.now();
   for (const other of sessions.values()) other.pane.classList.toggle('active', other === s);
   renderShots();
   if (!$search.hidden) closeSearch();
   showDiff(s);
   syncComposer();
-  focusItem(s);
+  if (!keepFocus) focusItem(s);
   render();
   saveState();
 }
@@ -976,12 +967,8 @@ const gigabytes = (bytes) => (bytes / 2 ** 30).toFixed(1);
 const pad = (value, width) => String(value).padStart(width, ' ');
 const percent = (value) => `${pad(Math.min(999, Math.round(value)), 3)}%`;
 
-/** 시스템 전체 사용량은 창 아래에, 세션별 사용량은 사이드바에 보여 준다. */
-function onUsage({ cpu, memory_used: used, memory_total: total, sessions: perSession }) {
-  const memoryPct = total ? Math.round((used / total) * 100) : 0;
-  const $usage = $('status-usage');
-  $usage.textContent = `CPU ${percent(cpu)} · 메모리 ${pad(gigabytes(used), 5)}/${gigabytes(total)}GB (${percent(memoryPct)})`;
-  $usage.className = Math.max(cpu, memoryPct) >= 90 ? 'danger' : '';
+/** 세션별 사용량(그 세션이 띄운 프로세스 전부의 합)을 사이드바에 보여 준다. */
+function onUsage({ sessions: perSession }) {
   for (const item of perSession) {
     const s = byId(item.id);
     if (!s) continue;
@@ -1198,6 +1185,7 @@ function render() {
   $list.replaceChildren(...rows);
 
   // 창 아래 상태줄에도 지금 세션의 모델·effort를 항상 보여 준다.
+  renderWhere();
   $('status-model').textContent = active?.model
     ? [active.model, active.effort, active.context == null ? '' : `컨텍스트 ${percent(active.context)}`,
       active.agents.size ? `서브에이전트 ${active.agents.size}` : ''].filter(Boolean).join(' · ')
@@ -1226,6 +1214,66 @@ function render() {
     s.head.ondblclick = () => showOnly(s);
   }
   syncComposer();
+}
+
+/** 작업영역 맨 위에 지금 보고 있는 항목을 알려 준다: 그룹(또는 폴더 묶음) › 별칭·이름 · 원래 이름 · 폴더. */
+function renderWhere() {
+  const $where = $('where');
+  const s = active && sessions.has(active.key) ? active : null;
+  $where.hidden = !s;
+  if (!s) return;
+  const name = make('span', 'where-name', label(s));
+  if (s.color) name.style.color = s.color;
+  const parts = [
+    make('span', 'where-group', s.group ? `◆ ${s.group}` : baseName(s.startCwd)),
+    make('span', 'where-sep', '›'),
+  ];
+  if (!isTerm(s)) parts.push(make('span', 'where-kind', `${KINDS[s.kind].icon} ${KINDS[s.kind].label}`));
+  parts.push(name);
+  if (s.name) parts.push(make('span', 'where-origin', baseLabel(s)));
+  parts.push(make('span', 'where-path', `‎${s.cwd}`));
+  $where.replaceChildren(...parts);
+  $where.title = `${s.group ? `그룹: ${s.group}` : `폴더 묶음: ${s.startCwd}`}\n${s.name ? `별칭: ${s.name}\n` : ''}${baseLabel(s)}\n${s.cwd}`;
+}
+
+/**
+ * 사이드바의 빈 곳을 눌러 목록에 초점을 두면 ↑/↓(Home/End)로 항목 사이를 오간다.
+ * 고른 항목이 화면에 나오고, 초점은 목록에 남는다. Enter나 Esc를 누르면 그 항목으로 초점이 간다.
+ */
+function initSidebarKeys() {
+  $('sidebar').addEventListener('mousedown', (ev) => {
+    if (ev.button !== 0 || ev.target.closest('li, button, input')) return;
+    ev.preventDefault();
+    $list.focus();
+  });
+  $list.addEventListener('keydown', (ev) => {
+    if (ev.target !== $list || ev.ctrlKey || ev.altKey) return;
+    const rows = [...$list.querySelectorAll('li[data-key]')].map((li) => sessions.get(Number(li.dataset.key))).filter(Boolean);
+    const at = rows.indexOf(active);
+    let next = null;
+    if (ev.key === 'ArrowDown') next = rows[at < 0 ? 0 : Math.min(rows.length - 1, at + 1)];
+    else if (ev.key === 'ArrowUp') next = rows[at < 0 ? rows.length - 1 : Math.max(0, at - 1)];
+    else if (ev.key === 'Home') next = rows[0];
+    else if (ev.key === 'End') next = rows[rows.length - 1];
+    else if (ev.key === 'Enter' || ev.key === 'Escape') { ev.preventDefault(); return focusItem(active); }
+    else return;
+    ev.preventDefault();
+    if (!next) return;
+    if (next !== active) activate(next, { keepFocus: true });
+    $list.querySelector(`li[data-key="${next.key}"]`)?.scrollIntoView({ block: 'nearest' });
+  });
+}
+
+/** 테마·글꼴·글자 크기가 바뀌면 열려 있는 터미널과 항목 화면을 맞춘다. */
+function applyLook(look) {
+  for (const s of sessions.values()) {
+    if (!s.term) continue;
+    Object.assign(s.term.options, {
+      theme: look.termTheme, fontFamily: look.termFamily, fontSize: look.termPixels, minimumContrastRatio: look.contrast,
+    });
+  }
+  window.dispatchEvent(new Event('cypher-look')); // 브레인스토밍 그림처럼 색을 직접 칠하는 화면이 다시 그린다.
+  requestAnimationFrame(() => { fitVisible(); syncSites(); });
 }
 
 /** 분할을 풀고 이 세션 하나만 화면에 남긴다. 다른 세션은 닫지 않는다. */
@@ -1346,55 +1394,199 @@ function sessionMenu(s, ev) {
   ]);
 }
 
-// ───────────────────────── 내장 브라우저 ─────────────────────────
+// ───────────────────────── 브라우저(사이트 항목)와 Claude 세션 ─────────────────────────
+// 브라우저는 사이드바의 사이트 항목이다. 같은 그룹의 Claude 세션이 Cypher 도구로 그 브라우저를 조작한다.
+// 어느 브라우저를 조작할지: 사용자가 넘겨준 것 → 같은 그룹에서 마지막으로 본 것 → 없으면 새로 만든다.
 
-/** 브라우저 창을 연다. 실패하면 한 번 더 해 보고, 그래도 안 되면 눈에 띄게 알린다. */
-async function openBrowser() {
-  const slow = setTimeout(() => notice('브라우저', '창을 여는 데 시간이 걸리고 있습니다…'), 8000);
-  try {
-    await invoke('browser_open', { url: null });
-  } catch {
-    try {
-      await new Promise((resolve) => setTimeout(resolve, 700));
-      await invoke('browser_open', { url: null });
-    } catch (err) {
-      notice('브라우저를 열지 못했습니다', `${err} (다시 눌러 보세요)`);
-    }
-  } finally {
-    clearTimeout(slow);
+const chromeEngine = () => config.browser.engine?.toLowerCase() === 'chrome';
+const aliveClaude = (s) => !!s.profile?.claude && !s.exited;
+/** 그 항목과 같은 묶음에서 돌고 있는 Claude 세션들. */
+const claudesOf = (item) => [...sessions.values()].filter((s) => aliveClaude(s) && groupKey(s) === groupKey(item));
+/** 그 세션과 같은 묶음의 사이트 항목들. */
+const sitesOf = (s) => [...sessions.values()].filter((other) => other.kind === 'site' && groupKey(other) === groupKey(s));
+/** 그 항목과 같은 묶음에 새 항목을 만들 때 쓸 그룹 이름과 폴더. */
+const besideOf = (s) => ({ group: s.group, cwd: s.group ? (s.project || s.startCwd) : s.startCwd });
+
+/** 새로 연 Claude 세션이 입력을 받을 준비가 될 때까지(상태줄이 오면 준비된 것) 기다린다. */
+async function untilReady(s) {
+  for (let waited = 0; waited < 20000 && !s.model && !s.exited; waited += 300) {
+    await new Promise((resolve) => setTimeout(resolve, 300));
   }
 }
 
 /**
- * 브라우저 창에서 "Claude에게 넘기기"를 눌렀을 때: 활성 Claude 세션 입력창에 머리말을 넣는다.
- * 사용자가 이어서 할 일을 적고 Enter를 누르면 Claude가 브라우저 도구로 그 페이지를 조작한다.
+ * 사이트 항목의 [Claude에게]: 그 브라우저를 Claude 세션에 넘긴다. 세션이 없으면(target이 null) 같은 묶음에 새로 연다.
+ * 넘겨받은 세션의 브라우저 도구는 이 사이트를 조작하고, 입력창에는 이어서 할 일을 적을 머리말이 들어간다.
  */
-async function handoffFromBrowser({ url, fresh }) {
-  const current = active?.profile?.claude && !active.exited
-    ? active
-    : [...sessions.values()].find((s) => s.profile?.claude && !s.exited);
+async function handoffSite(item, target) {
+  if (!sessions.has(item.key)) return;
+  if (!target) {
+    target = await newSession('claude', { ...besideOf(item), show: 'split' });
+    if (!target || target.exited) return notice('브라우저', '새 Claude 세션을 열지 못했습니다.');
+    await untilReady(target);
+  }
+  // 한 브라우저는 한 세션이 맡는다(넘겨주면 앞서 맡던 세션에서는 떼어 낸다).
+  for (const other of sessions.values()) if (other.browser === item.key) other.browser = null;
+  target.browser = item.key;
+  // 세션이 화면에 없으면 브라우저 옆에 나란히 놓아 둘 다 보이게 한다.
+  if (!visible.includes(target) && visible.includes(item) && visible.length < MAX_PANES) {
+    splitAt(item, target, 'right');
+    layout();
+  }
+  activate(target);
+  const url = item.view.url();
+  target.term.paste(`Cypher 브라우저 "${label(item)}"${url ? `(${url})` : ''}에서 이어서 작업해줘: `);
+  syncSites();
+}
+
+/** 그 세션이 지금 조작하는 브라우저: 넘겨받은 것, 없으면 같은 묶음에서 마지막으로 본 것. */
+function browserOf(s) {
+  const bound = s.browser != null ? sessions.get(s.browser) : null;
+  if (bound?.kind === 'site') return bound;
+  return sitesOf(s).sort((a, b) => (b.usedAt || 0) - (a.usedAt || 0))[0] || null;
+}
+
+const siteLine = (site) => `#${site.key} "${label(site)}" — ${site.view.url() || '빈 페이지'}`;
+
+/** 브라우저 도구가 조작할 사이트를 정한다. `create`이면(주소로 이동하라는 요청) 묶음에 브라우저가 없을 때 새로 만든다. */
+async function browserTarget(s, create) {
+  let site = browserOf(s);
+  const created = !site;
+  if (!site) {
+    if (!create) throw new Error('이 세션의 그룹에 브라우저(사이트 항목)가 없습니다. browser_navigate로 주소를 열면 새 브라우저가 만들어집니다.');
+    site = await newItem('site', { ...besideOf(s), saved: {}, show: 'hidden' });
+    // 세션이 화면에 보이면 그 옆에 나란히 놓아 Claude가 하는 일을 볼 수 있게 한다(초점은 세션에 그대로 둔다).
+    if (visible.includes(s) && visible.length < MAX_PANES) {
+      splitAt(s, site, 'right');
+      layout();
+    }
+    reveal([site]);
+  }
+  if (s.browser !== site.key) {
+    for (const other of sessions.values()) if (other.browser === site.key) other.browser = null;
+    s.browser = site.key;
+    syncSites();
+  }
+  const others = sitesOf(s).filter((other) => other !== site);
+  return {
+    key: site.key,
+    url: site.view.url() || 'about:blank',
+    // 도구의 답 끝에 덧붙일 말: 새로 만들었거나, 브라우저가 여러 개라 어느 것을 조작했는지 알려야 할 때만.
+    note: created ? `이 그룹에 새 브라우저(사이트 항목 #${site.key})를 만들어 열었습니다.`
+      : others.length ? `조작한 브라우저: 사이트 항목 #${site.key}. 같은 그룹에 다른 브라우저가 ${others.length}개 더 있습니다(browser_tabs로 보고 browser_select로 바꿉니다).` : '',
+  };
+}
+
+function browserTabs(s) {
+  const sites = sitesOf(s);
+  if (!sites.length) return '이 세션의 그룹에 브라우저(사이트 항목)가 없습니다. browser_navigate로 주소를 열면 새로 만들어집니다.';
+  const current = browserOf(s);
+  return `이 세션의 그룹에 있는 브라우저(사이트 항목):\n${sites.map((site) => `${site === current ? '●' : ' '} ${siteLine(site)}${site === current ? '  ← 지금 조작 대상' : ''}`).join('\n')}`;
+}
+
+function browserSelect(s, id) {
+  const site = sessions.get(Number(id));
+  if (site?.kind !== 'site' || groupKey(site) !== groupKey(s)) throw new Error(`#${id}은(는) 이 세션의 그룹에 있는 브라우저가 아닙니다. browser_tabs로 번호를 확인하세요.`);
+  for (const other of sessions.values()) if (other.browser === site.key) other.browser = null;
+  s.browser = site.key;
+  syncSites();
+  return `조작 대상을 바꿨습니다: ${siteLine(site)}`;
+}
+
+/** 같은 묶음의 항목을 Claude 세션이 알 수 있게 글로 적는다: 종류, 이름, 파일 경로나 주소. */
+function groupItemsText(s) {
+  const dir = (name) => storeDirs[name] || `%APPDATA%\\cypher\\${name}`;
+  const lines = [...sessions.values()].filter((other) => groupKey(other) === groupKey(s)).map((other) => {
+    const head = `#${other.key}`;
+    const name = `"${label(other)}"`;
+    if (other === s) return `- ${head} 이 세션 ${name} — 폴더: ${other.cwd}`;
+    if (isTerm(other)) {
+      const state = other.exited ? '종료됨' : WAITING_TEXT[other.waiting] || (other.busy ? '작업 중' : '대기');
+      return `- ${head} ${other.profile.label} 세션 ${name} — 폴더: ${other.cwd} · ${state}`;
+    }
+    const state = other.view.state();
+    if (other.kind === 'memo') {
+      const file = state.path && !state.dirty ? state.path : `${dir('memos')}\\${state.memo}.txt`;
+      return `- ${head} 메모 ${name} — 파일: ${file}${state.path && state.dirty ? ` (저장하지 않은 고침이 있음. 원래 파일: ${state.path})` : ''}`;
+    }
+    if (other.kind === 'http') return `- ${head} HTTP 요청 ${name} — 요청 폴더: ${other.startCwd}${state.file ? ` · 열린 파일: ${state.file}` : ''} (http_list / http_run으로 다룬다)`;
+    if (other.kind === 'site') return `- ${head} 브라우저(사이트) ${name} — 주소: ${other.view.url() || '빈 페이지'} (browser_* 도구로 조작)`;
+    if (other.kind === 'image') return `- ${head} 이미지 ${name} — 파일: ${other.view.path() || '(아직 그림 없음)'}${state.source ? ` · 출처: ${state.source}` : ''}`;
+    if (other.kind === 'mindmap') return `- ${head} 브레인스토밍 ${name} — 개요 글 파일: ${dir('mindmaps')}\\${other.view.store()}.md (고칠 때는 mindmap_write에 id ${other.key})`;
+    return `- ${head} ${KINDS[other.kind]?.label || other.kind} ${name}`;
+  });
+  const where = s.group ? `그룹 "${s.group}"` : `폴더 묶음 ${s.startCwd} (이름 붙인 그룹은 아님)`;
+  return `${where}의 Cypher 항목 ${lines.length}개:\n${lines.join('\n')}`;
+}
+
+/** 브레인스토밍 항목을 개요 글로 만들거나 고친다. */
+async function mindmapWrite(s, { item, title, text }) {
+  if (item != null) {
+    const target = sessions.get(Number(item));
+    if (target?.kind !== 'mindmap') throw new Error(`#${item}은(는) 브레인스토밍 항목이 아닙니다. cypher_items로 번호를 확인하세요.`);
+    await target.view.ready;
+    if (target.view.setText(text) === false) {
+      throw new Error(`브레인스토밍 #${target.key}은(는) 사용자가 코드 화면에서 고치는 중이라 바꾸지 않았습니다(오류가 있어 아직 반영되지 않은 글이 있습니다). 사용자에게 알리고, 사용자가 고친 뒤에 다시 시도하세요.`);
+    }
+    if (title) target.name = title;
+    reveal([target]);
+    saveState();
+    return `브레인스토밍 #${target.key} "${label(target)}"의 내용을 바꿨습니다.`;
+  }
+  const made = await newItem('mindmap', { ...besideOf(s), saved: { text }, name: title || '', show: 'hidden' });
+  reveal([made]);
+  return `브레인스토밍 항목 #${made.key} "${label(made)}"을 만들었습니다(사이드바의 같은 그룹). 고칠 때는 mindmap_write에 id ${made.key}를 주세요.`;
+}
+
+/** Claude 세션의 Cypher 도구가 물어 온 것에 답한다. `req.session`은 도구를 부른 세션의 번호. */
+async function mcpAction(req) {
+  const s = (req.session != null && byId(req.session)) || (active && aliveClaude(active) ? active : null);
+  if (!s) throw new Error('이 도구를 부른 Claude 세션을 Cypher에서 찾지 못했습니다.');
+  switch (req.action) {
+    case 'browser_target': return browserTarget(s, !!req.create);
+    case 'browser_tabs': return { text: browserTabs(s) };
+    case 'browser_select': return { text: browserSelect(s, req.id) };
+    case 'items': return { text: groupItemsText(s) };
+    case 'mindmap_write': return { text: await mindmapWrite(s, req) };
+    default: throw new Error(`모르는 요청입니다: ${req.action}`);
+  }
+}
+
+async function onMcpRequest(req) {
+  let ok = true, value;
+  try {
+    value = await mcpAction(req);
+  } catch (err) {
+    ok = false;
+    value = String(err?.message || err);
+  }
+  invoke('mcp_reply', { id: req.id, ok, value });
+}
+
+// ── "chrome" 엔진(설정에서 바꿨을 때만): 설치된 Chrome을 Cypher 전용 프로필로 띄워 조작한다 ──
+
+async function openChrome() {
+  try {
+    await invoke('browser_open', { url: null });
+  } catch (err) {
+    notice('브라우저를 열지 못했습니다', String(err));
+  }
+}
+
+/** Chrome에 지금 열려 있는 페이지를 Claude 세션에 넘긴다. `fresh`이면 새 Claude 세션을 연다. */
+async function handoffChrome(fresh) {
+  const url = await invoke('browser_where').catch(() => null);
+  if (!url) return notice('브라우저', 'Chrome이 열려 있지 않습니다. 먼저 [Chrome]을 눌러 여세요.');
+  const current = active && aliveClaude(active) ? active : [...sessions.values()].find(aliveClaude);
   let target = fresh ? null : current;
   if (!target) {
-    // 새 세션으로 넘기기(또는 열린 Claude 세션이 없을 때): 지금 세션과 같은 폴더·그룹에 새로 연다.
     const base = current || active;
-    target = await newSession('claude', {
-      cwd: base ? (base.project || base.startCwd) : folder, group: base?.group, show: 'split',
-    });
+    target = await newSession('claude', { ...(base ? besideOf(base) : { cwd: folder }), show: 'split' });
     if (!target || target.exited) return notice('브라우저', '새 Claude 세션을 열지 못했습니다.');
-    // Claude Code가 입력을 받을 준비가 될 때까지(상태줄이 오면 준비된 것) 기다린다.
-    for (let waited = 0; waited < 20000 && !target.model && !target.exited; waited += 300) {
-      await new Promise((resolve) => setTimeout(resolve, 300));
-    }
+    await untilReady(target);
   }
   activate(target);
   target.term.paste(`Cypher 브라우저에 열려 있는 페이지(${url})에서 이어서 작업해줘: `);
-}
-
-/** 본창에서 넘기기: 브라우저에 지금 열려 있는 페이지 주소를 물어 Claude 세션에 넘긴다. */
-async function handoffFromMain(fresh) {
-  const url = await invoke('browser_where').catch(() => null);
-  if (!url) return notice('브라우저', '브라우저가 열려 있지 않습니다. 먼저 [브라우저]를 눌러 여세요.');
-  handoffFromBrowser({ url, fresh });
 }
 
 // ───────────────────────── 이미지 항목 ─────────────────────────
@@ -1440,7 +1632,7 @@ function reveal(items) {
 
 /**
  * 화면을 찍은 그림을 이미지 항목으로 넣는다. `near`가 있으면(사이트 항목에서 찍음) 그 항목의 묶음에,
- * 없으면(브라우저 창에서 찍음) 지금 보고 있는 항목의 묶음에 넣는다.
+ * 없으면("chrome" 엔진의 브라우저에서 찍음) 지금 보고 있는 항목의 묶음에 넣는다.
  */
 async function onCaptured(captured, near) {
   const [s] = await addImages([captured.image], { near, source: captured.source, shot: true, full: captured.full });
@@ -1885,7 +2077,7 @@ function closeSearch() {
 function find(backward) {
   const query = $searchInput.value;
   if (!query || !isTerm(active)) return;
-  const options = { decorations: SEARCH_COLORS };
+  const options = { decorations: currentLook().searchColors };
   const found = backward ? active.search.findPrevious(query, options) : active.search.findNext(query, options);
   setStatus(found ? '' : `찾는 내용이 없습니다: ${query}`);
 }
@@ -1984,7 +2176,7 @@ window.addEventListener('keydown', (ev) => {
   else if (combo && key === 'n') nextWaiting();
   else if (combo && key === 'g') toggleDiff();
   else if (combo && key === 'p') showSnippets();
-  else if (combo && key === 'o') openBrowser();
+  else if (combo && key === 'o') { if (chromeEngine()) openChrome(); else newItem('site'); }
   else if (combo && key === 'h') newItem('http');
   else if (combo && key === 'm') newItem('memo');
   else if (combo && key === 'e') focusComposer();
@@ -2005,6 +2197,7 @@ document.addEventListener('contextmenu', (ev) => ev.preventDefault());
 window.cypher = {
   sessions, newSession, newItem, activate, closeSession, toggleShown, send, setBroadcast, provideLinks, paste, moveToGroup, runMenu, showOnly,
   onHook, onStatus, nextWaiting, writeState, rename, sendPrompt, text: sessionText, addImages, onCaptured, captureBrowser,
+  setLook, currentLook, mcpAction, handoffSite, onMcpRequest,
   get visible() { return visible; },
   get active() { return active; },
 };

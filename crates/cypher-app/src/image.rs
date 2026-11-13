@@ -380,7 +380,7 @@ const MAX_SIDE: f64 = 16_000.0;
 const MAX_PAGE_HEIGHT: f64 = 30_000.0;
 
 /// 페이지를 찍어 저장소에 넣는다. `cdp`는 그 페이지에 개발자 도구 명령을 보내는 함수다
-/// (브라우저 창, 사이트 항목, 설치된 Chrome 어느 것이든 같은 방법으로 찍는다).
+/// (사이트 항목, 설치된 Chrome 어느 것이든 같은 방법으로 찍는다).
 /// `full`이면 화면에 보이는 부분이 아니라 페이지 전체를 찍는다.
 pub fn capture(cdp: &dyn Fn(&str, serde_json::Value) -> Result<serde_json::Value, String>, full: bool) -> Result<Captured, String> {
     use serde_json::json;

@@ -67,6 +67,20 @@ pub fn open_claude_file(which: String) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
+/// 사용자의 것을 두는 폴더들(메모·브레인스토밍·이미지). 같은 그룹의 Claude 세션에 파일 경로를 알려 줄 때 쓴다.
+#[tauri::command]
+pub fn store_dirs() -> serde_json::Value {
+    let dir = |name: &str| crate::user_dir().join(name).to_string_lossy().into_owned();
+    serde_json::json!({ "memos": dir("memos"), "mindmaps": dir("mindmaps"), "images": dir("images") })
+}
+
+/// 본창 화면 전체의 배율(화면 글자 크기 설정). 사이트 항목의 웹 페이지에는 영향이 없다.
+#[tauri::command]
+pub fn ui_zoom(app: AppHandle, factor: f64) -> Result<(), String> {
+    let webview = app.get_webview("main").ok_or("본창이 없습니다")?;
+    webview.set_zoom(factor.clamp(0.5, 3.0)).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn home_dir() -> String {
     std::env::var("USERPROFILE").unwrap_or_else(|_| "C:\\".into())
@@ -117,6 +131,17 @@ fn is_worktree_name(s: &str) -> bool {
     (1..=64).contains(&s.len())
         && !s.starts_with(['-', '.'])
         && s.chars().all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
+}
+
+/// PowerShell이 다른 프로그램과 글자를 주고받을 때 UTF-8을 쓰게 한다(받는 쪽·보내는 쪽 모두).
+/// Windows PowerShell의 기본값은 시스템 코드 페이지(한국어 Windows는 CP949)라, UTF-8로 출력하는 프로그램의
+/// 한글이 깨지고 `|`로 넘기는 글이 깨진다. 큰따옴표를 쓰지 않는다.
+const POWERSHELL_UTF8: &str = "[Console]::OutputEncoding = New-Object System.Text.UTF8Encoding $false; $OutputEncoding = [Console]::OutputEncoding; ";
+
+/// 인자 없이 띄우는 cmd인지(코드 페이지를 UTF-8로 바꿔도 되는지).
+fn is_plain_cmd(program: &str, args: &[String]) -> bool {
+    let name = Path::new(program).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase());
+    name.as_deref() == Some("cmd") && args.is_empty()
 }
 
 /// 인자 없이 띄우는 PowerShell인지(현재 폴더 알림을 심어도 되는지).
@@ -171,8 +196,8 @@ pub fn session_create(
             args.push(name);
         }
         env.push(("FORCE_HYPERLINK".into(), "1".into()));
-        if let Some(mcp) = &state.mcp_config {
-            // 내장 브라우저 조작 도구를 이 세션에 연결한다.
+        if let Some(mcp) = state.mcp.then(|| crate::write_mcp_config(state.status_port, &state.token, id)).flatten() {
+            // Cypher 도구(같은 그룹의 브라우저 조작, 항목 보기 등)를 이 세션에 연결한다.
             args.push("--mcp-config".into());
             args.push(mcp.to_string_lossy().into_owned());
         }
@@ -191,7 +216,11 @@ pub fn session_create(
             }
         }
     } else if wants_powershell_hook(&profile.program, &args) {
-        args.extend(["-NoExit".into(), "-Command".into(), POWERSHELL_CWD_HOOK.into()]);
+        // Claude 세션이 아닌 셸에서만 UTF-8을 기본으로 맞춘다(Claude Code는 스스로 UTF-8로 주고받는다).
+        let utf8 = if state.config.session.utf8 { POWERSHELL_UTF8 } else { "" };
+        args.extend(["-NoExit".into(), "-Command".into(), format!("{utf8}{POWERSHELL_CWD_HOOK}")]);
+    } else if state.config.session.utf8 && is_plain_cmd(&profile.program, &args) {
+        args.extend(["/K".into(), "chcp 65001 >nul".into()]);
     }
 
     let options = SpawnOptions {
@@ -343,7 +372,8 @@ mod tests {
         assert!(wants_powershell_hook(r"C:\Program Files\PowerShell\7\pwsh.exe", &none));
         assert!(!wants_powershell_hook("powershell.exe", &["-File".into(), "a.ps1".into()]));
         assert!(!wants_powershell_hook("cmd.exe", &none));
-        assert!(!POWERSHELL_CWD_HOOK.contains('"'));
+        assert!(!POWERSHELL_CWD_HOOK.contains('"') && !POWERSHELL_UTF8.contains('"'));
+        assert!(is_plain_cmd("cmd.exe", &[]) && !is_plain_cmd("cmd.exe", &none));
     }
 
     #[test]

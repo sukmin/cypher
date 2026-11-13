@@ -1,0 +1,149 @@
+/* 테마: 기본은 어두운 테마(style.css의 :root). 여기서는 밝은 테마와 Windows 고전(Win32) 테마의 값을 바꾼다.
+   고른 테마는 <html data-theme="…">에 적힌다(look.js). 화면 글자 크기는 본창 배율로, 글꼴은 --ui-font / --mono-font로 바꾼다. */
+
+/* ───────── 밝은 테마 ───────── */
+:root[data-theme="light"] {
+  --bg: #ffffff;
+  --panel: #f3f4f6;
+  --line: #d5d8de;
+  --text: #1f2328;
+  --dim: #656d76;
+  --accent: #c2410c;
+  --on-accent: #ffffff;
+  --busy: #9a6700;
+  --idle: #8c959f;
+  --attention: #0969da;
+  --dead: #cf222e;
+  --ok: #1a7f37;
+  --control: #ffffff;
+  --hover: #e9ebef;
+  --select: #dde3ea;
+  --field: #ffffff;
+  --group: #e6e8ec;
+  --chip: #d5d8de;
+  --tree: #c3c8d0;
+  --scroll: #c1c7cf;
+  --scroll-hover: #a4abb5;
+  --stage: #e9eaed;
+  --term-bg: #ffffff;
+  --add-text: #116329;
+  --del-text: #a40e26;
+  --agent: #8250df;
+  --agent-text: #6639ba;
+  --hit: #fff3b0;
+  --hit-cur: #ffb86b;
+}
+:root[data-theme="light"] #search,
+:root[data-theme="light"] .toast,
+:root[data-theme="light"] #menu { box-shadow: 0 4px 14px rgba(0, 0, 0, 0.18); }
+
+/* ───────── Windows 고전(Win32) 테마: 회색 입체 단추, 남색 제목 줄, 각진 모서리 ───────── */
+:root[data-theme="win32"] {
+  --bg: #ffffff;
+  --panel: #c0c0c0;
+  --line: #808080;
+  --text: #000000;
+  --dim: #404040;
+  --accent: #000080;
+  --on-accent: #ffffff;
+  --busy: #806000;
+  --idle: #808080;
+  --attention: #0000c0;
+  --dead: #c00000;
+  --ok: #006000;
+  --control: #c0c0c0;
+  --hover: #d8d8d8;
+  --select: #000080;
+  --field: #ffffff;
+  --group: #000080;
+  --chip: #ffffff;
+  --tree: #808080;
+  --scroll: #a0a0a0;
+  --scroll-hover: #808080;
+  --stage: #808080;
+  --term-bg: #000000;
+  --add-text: #006000;
+  --del-text: #a00000;
+  --agent: #800080;
+  --agent-text: #600060;
+  --hit: #ffff80;
+  --hit-cur: #ffb040;
+  --ui-font: "MS Sans Serif", Tahoma, "굴림", Gulim, "Malgun Gothic", sans-serif;
+  --mono-font: "굴림체", GulimChe, "Lucida Console", Consolas, "D2Coding", monospace;
+}
+:root[data-theme="win32"] * { border-radius: 0 !important; }
+/* 볼록한 단추, 오목한 입력칸 */
+:root[data-theme="win32"] button {
+  border: 1px solid;
+  border-color: #ffffff #404040 #404040 #ffffff;
+  box-shadow: inset -1px -1px 0 #808080, inset 1px 1px 0 #dfdfdf;
+}
+:root[data-theme="win32"] button:hover { border-color: #ffffff #404040 #404040 #ffffff; }
+:root[data-theme="win32"] button:active,
+:root[data-theme="win32"] button.on {
+  border-color: #404040 #ffffff #ffffff #404040;
+  box-shadow: inset 1px 1px 0 #808080;
+}
+:root[data-theme="win32"] .doc-bar button.on,
+:root[data-theme="win32"] #tools button.on,
+:root[data-theme="win32"] .find-toggle.on { background: #dfdfdf; color: #000000; }
+:root[data-theme="win32"] input,
+:root[data-theme="win32"] textarea,
+:root[data-theme="win32"] select {
+  background: #ffffff;
+  color: #000000;
+  border: 1px solid;
+  border-color: #808080 #ffffff #ffffff #808080;
+  box-shadow: inset 1px 1px 0 #404040;
+}
+/* 테두리 없는 작은 단추(닫기, 보이기, 실행 …)는 평평하게 둔다. */
+:root[data-theme="win32"] button.close,
+:root[data-theme="win32"] button.eye,
+:root[data-theme="win32"] button.eye.on,
+:root[data-theme="win32"] button.run,
+:root[data-theme="win32"] .shot button,
+:root[data-theme="win32"] #menu > button,
+:root[data-theme="win32"] .memo-status button.stat { border: none; box-shadow: none; }
+/* 고른 줄과 묶음 머리는 남색 바탕에 흰 글자(창 제목 줄처럼) */
+:root[data-theme="win32"] #sessions li.active,
+:root[data-theme="win32"] #sessions li.active .name,
+:root[data-theme="win32"] #sessions li.active .sub,
+:root[data-theme="win32"] #sessions li.active .badge,
+:root[data-theme="win32"] #sessions li.active .usage,
+:root[data-theme="win32"] #sessions li.active .origin,
+:root[data-theme="win32"] #sessions li.active .dot.kind,
+:root[data-theme="win32"] #sessions li.active button,
+:root[data-theme="win32"] #sessions li.group,
+:root[data-theme="win32"] #sessions li.group .name,
+:root[data-theme="win32"] #sessions li.group .close,
+:root[data-theme="win32"] #sessions li.group.logical .name,
+:root[data-theme="win32"] #menu > button:hover,
+:root[data-theme="win32"] .side-list li.selected,
+:root[data-theme="win32"] .side-list li.selected .status,
+:root[data-theme="win32"] .toast,
+:root[data-theme="win32"] .toast span { color: #ffffff; }
+:root[data-theme="win32"] #sessions li.group:hover { background: #1084d0; }
+:root[data-theme="win32"] #sessions li.group.new { color: #404040; background: none; }
+:root[data-theme="win32"] #sessions li.group.drop { background: #1084d0; }
+:root[data-theme="win32"] #sessions { background: #ffffff; }
+:root[data-theme="win32"] #sessions li:hover:not(.active):not(.group) { background: #e8e8e8; }
+:root[data-theme="win32"] #popup, :root[data-theme="win32"] #ask, :root[data-theme="win32"] #menu {
+  border: 2px solid;
+  border-color: #ffffff #404040 #404040 #ffffff;
+  box-shadow: 1px 1px 0 #000000;
+}
+:root[data-theme="win32"] #popup-head { background: #000080; color: #ffffff; }
+:root[data-theme="win32"] #popup-head .close { color: #ffffff; }
+:root[data-theme="win32"] #where { background: #000080; color: #ffffff; }
+:root[data-theme="win32"] #where .where-group, :root[data-theme="win32"] #where .where-kind, :root[data-theme="win32"] #where .where-origin, :root[data-theme="win32"] #where .where-path { color: #dfdfdf; }
+:root[data-theme="win32"] .pane.active .pane-head { background: #000080; color: #ffffff; }
+:root[data-theme="win32"] .pane.active .pane-head .model { color: #ffffff; }
+
+/* ───────── 모양 설정 창 ───────── */
+.look-row { display: grid; grid-template-columns: 120px 1fr; align-items: center; gap: 8px; padding: 4px 6px; }
+.look-row label { color: var(--dim); }
+.look-row select, .look-row input { width: 100%; height: 26px; padding: 0 6px; font: inherit; color: var(--text); background: var(--control); border: 1px solid var(--line); border-radius: 5px; }
+.look-row .look-size { display: flex; align-items: center; gap: 6px; }
+.look-row .look-size input { width: 70px; }
+.look-row .look-size span { color: var(--dim); font-size: 12px; }
+.look-sample { margin: 6px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 5px; background: var(--term-bg); font-family: var(--mono-font); white-space: pre; overflow: hidden; }

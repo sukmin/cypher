@@ -2,7 +2,7 @@
 //!
 //! - 인자 없이: 상태줄·훅 명령. 표준 입력으로 받은 JSON을 본체로 넘긴다.
 //!   사용자가 원래 쓰던 상태줄(HUD)이 있으면 그 명령을 이어서 실행해 출력을 그대로 내보낸다.
-//! - `mcp`: 브라우저 조작 도구를 내주는 MCP 서버. 표준 입출력과 본체 사이에서 줄을 그대로 나른다.
+//! - `mcp`: Cypher 도구(브라우저 조작 등)를 내주는 MCP 서버. 표준 입출력과 본체 사이에서 줄을 그대로 나른다.
 //!
 //! 본체가 세션을 띄울 때 넣어 준 환경 변수가 없으면 조용히 끝난다.
 
@@ -84,7 +84,9 @@ fn relay_mcp() {
         eprintln!("Cypher 본체에 연결하지 못했습니다");
         std::process::exit(1);
     };
-    if writeln!(stream, "{token}\nmcp").is_err() {
+    // 어느 Claude 세션이 띄운 것인지 함께 알린다(같은 그룹의 브라우저·항목을 찾는 데 쓴다).
+    let session = std::env::var("CYPHER_SESSION").unwrap_or_default();
+    if writeln!(stream, "{token}\nmcp {session}").is_err() {
         return;
     }
     let Ok(from_app) = stream.try_clone() else { return };

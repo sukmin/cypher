@@ -51,6 +51,8 @@ pub struct Session {
     pub restore: bool,
     /// 세션마다 기억할 지난 출력 줄 수.
     pub scrollback: u32,
+    /// PowerShell·cmd 세션이 다른 프로그램과 글자를 주고받을 때 UTF-8을 쓰게 한다(Claude 세션은 해당 없음).
+    pub utf8: bool,
 }
 
 impl Default for Config {
@@ -84,24 +86,22 @@ impl Default for Notify {
 
 impl Default for Session {
     fn default() -> Self {
-        Self { restore: true, scrollback: 10_000 }
+        Self { restore: true, scrollback: 10_000, utf8: true }
     }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Browser {
-    /// Claude 세션에 내장 브라우저 조작 도구를 연결할지.
+    /// Claude 세션에 Cypher 도구(같은 그룹의 브라우저 조작, 항목 보기 등)를 연결할지.
     pub enabled: bool,
-    /// 브라우저를 처음 띄울 때 여는 주소.
+    /// "chrome" 엔진의 브라우저를 처음 띄울 때 여는 주소. 기본은 빈 페이지(Cypher가 스스로 어떤 사이트에도 접속하지 않게).
     pub home: String,
     /// 브라우저 엔진. "webview": 앱에 내장된 웹뷰 창(주소 줄·즐겨찾기 포함, 기본값).
     /// "chrome": 설치된 Chrome·Edge·Chromium을 Cypher 전용 프로필로 띄워 조작한다(다른 OS에서도 쓸 수 있는 방식).
     pub engine: String,
     /// "chrome" 엔진이 쓸 브라우저 실행 파일. 비워 두면 Chrome → Edge → Chromium → Brave 순으로 찾는다.
     pub chrome_path: String,
-    /// 브라우저를 열 때 일주일에 한 번, 엔진의 Chromium 버전이 최신 안정판에서 뒤처졌는지 확인해 알린다.
-    pub update_check: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -121,7 +121,7 @@ impl Default for Window {
 
 impl Default for Browser {
     fn default() -> Self {
-        Self { enabled: true, home: "https://www.google.com".into(), engine: "webview".into(), chrome_path: String::new(), update_check: true }
+        Self { enabled: true, home: "about:blank".into(), engine: "webview".into(), chrome_path: String::new() }
     }
 }
 
@@ -129,6 +129,7 @@ impl Default for Browser {
 pub const DEFAULT_TEXT: &str = r#"# Cypher 설정. 고친 뒤 Cypher를 다시 시작하면 적용됩니다.
 # 줄 앞의 '#'을 지우면 그 항목이 켜집니다.
 
+# 테마·글꼴·글자 크기는 창 상단 메뉴 "설정 → 모양"에서 바꿉니다. 아래 [font]는 터미널 글꼴의 기본값입니다.
 [font]
 # family = '"Cascadia Mono", "D2Coding", Consolas, "Malgun Gothic", monospace'
 # size = 14
@@ -146,17 +147,17 @@ pub const DEFAULT_TEXT: &str = r#"# Cypher 설정. 고친 뒤 Cypher를 다시 �
 [session]
 # restore = true       # 다시 시작할 때 이전 세션과 배치를 되살림
 # scrollback = 10000   # 세션마다 기억할 지난 출력 줄 수
+# utf8 = true          # PowerShell·cmd 세션의 글자 인코딩을 UTF-8로 (Claude 세션은 해당 없음)
 
 [window]
 # magnet = true            # 창을 끌 때 화면 가장자리와 다른 Cypher 창에 달라붙기 (Ctrl을 누른 채 끌면 붙지 않음)
 # magnet_distance = 14     # 달라붙는 거리(픽셀). 작을수록 잘 떨어집니다
 
 [browser]
-# enabled = true                      # Claude 세션에 내장 브라우저 조작 도구를 연결
-# home = "https://www.google.com"     # 브라우저를 처음 띄울 때 여는 주소
-# engine = "webview"                  # "webview": 내장 웹뷰 창 / "chrome": 설치된 Chrome·Edge를 전용 프로필로 띄워 조작(최신 Chromium)
+# enabled = true                      # Claude 세션에 Cypher 도구(같은 그룹의 브라우저 조작, 항목 보기 등)를 연결
+# home = "about:blank"                # "chrome" 엔진의 브라우저를 처음 띄울 때 여는 주소(기본은 빈 페이지)
+# engine = "webview"                  # "webview": 사이드바의 사이트 항목을 조작 / "chrome": 설치된 Chrome·Edge를 전용 프로필로 띄워 조작
 # chrome_path = ""                    # "chrome" 엔진이 쓸 실행 파일. 비우면 Chrome, Edge, Chromium, Brave 순으로 찾음
-# update_check = true                 # 브라우저를 열 때 일주일에 한 번 Chromium 버전이 뒤처졌는지 확인해 알림
 
 # 프로필 추가 예시. 기본 프로필(claude, powershell)과 id가 같으면 바꿔 씁니다.
 # [[profile]]

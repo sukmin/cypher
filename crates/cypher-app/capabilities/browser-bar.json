@@ -1,6 +1,0 @@
-{
-  "identifier": "browser-bar",
-  "description": "브라우저 창 주소 줄 권한 (build.rs가 만든 파일). 웹 페이지 웹뷰에는 권한이 없다.",
-  "webviews": ["browser-bar"],
-  "permissions": ["allow-browser-navigate", "allow-browser-back", "allow-browser-forward", "allow-browser-reload", "allow-browser-current", "allow-browser-handoff", "allow-browser-page", "allow-browser-bar-height", "allow-browser-capture"]
-}

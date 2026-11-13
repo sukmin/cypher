@@ -1,4 +1,4 @@
-//! CPU·메모리 사용량: 시스템 전체와, 세션마다 그 세션이 띄운 프로세스 전부의 합계.
+//! CPU·메모리 사용량: 세션마다 그 세션이 띄운 프로세스 전부의 합계.
 
 use crate::AppState;
 use serde::Serialize;
@@ -21,9 +21,6 @@ struct SessionUsage {
 
 #[derive(Clone, Serialize)]
 struct UsagePayload {
-    cpu: f32,
-    memory_used: u64,
-    memory_total: u64,
     sessions: Vec<SessionUsage>,
 }
 
@@ -59,8 +56,6 @@ pub fn start(app: AppHandle) {
         let cores = thread::available_parallelism().map_or(1.0, |n| n.get() as f32);
         let kind = ProcessRefreshKind::nothing().with_cpu().with_memory();
         loop {
-            sys.refresh_cpu_usage();
-            sys.refresh_memory();
             sys.refresh_processes_specifics(ProcessesToUpdate::All, true, kind);
 
             let procs: HashMap<u32, (Option<u32>, f32, u64)> = sys
@@ -87,12 +82,7 @@ pub fn start(app: AppHandle) {
 
             let _ = app.emit(
                 "system-usage",
-                UsagePayload {
-                    cpu: sys.global_cpu_usage(),
-                    memory_used: sys.used_memory(),
-                    memory_total: sys.total_memory(),
-                    sessions,
-                },
+                UsagePayload { sessions },
             );
             thread::sleep(INTERVAL);
         }

@@ -2,7 +2,7 @@
 //!
 //! 접속마다 첫 줄은 확인값, 둘째 줄은 종류다.
 //! - 세션 번호: 뒤따르는 내용이 Claude Code 상태줄 JSON 또는 훅 JSON(한 번 보내고 끊는다)
-//! - `mcp`: 브라우저 조작 도구용 MCP 연결(계속 이어진다)
+//! - `mcp <세션 번호>`: Cypher 도구용 MCP 연결(계속 이어진다)
 
 use serde::Serialize;
 use serde_json::Value;
@@ -78,11 +78,13 @@ fn accept(app: AppHandle, token: &str, stream: TcpStream) {
         return;
     }
     let kind = line.trim_end();
-    if kind == "mcp" {
+    // `mcp` 또는 `mcp <세션 번호>`: 어느 Claude 세션이 연 연결인지 함께 온다(예전 전달 프로그램은 번호를 보내지 않는다).
+    if let Some(rest) = kind.strip_prefix("mcp").filter(|rest| rest.is_empty() || rest.starts_with(' ')) {
+        let session = rest.trim().parse::<u32>().ok();
         // MCP 연결은 요청 사이에 오래 조용할 수 있다. 읽는 쪽 손잡이의 시간 제한을 직접 푼다
         // (복제한 손잡이에서 풀어도 읽는 쪽에는 적용되지 않는다).
         let _ = reader.get_ref().set_read_timeout(None);
-        crate::mcp::serve(app, reader, writer);
+        crate::mcp::serve(app, session, reader, writer);
         return;
     }
     let mut body = String::new();

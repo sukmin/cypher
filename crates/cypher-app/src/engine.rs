@@ -4,21 +4,17 @@
 //! - `webview`: WebView2 런타임(Edge와 함께 Windows가 갱신)
 //! - `chrome`: 설치된 Chrome·Edge(브라우저 자체의 자동 업데이트)
 //!
-//! 그래서 여기서 하는 일은 "갱신이 멈춰 있지 않은지" 살피는 것이다. 도움말 메뉴에서 직접 확인할 수 있고,
-//! 브라우저를 열 때 일주일에 한 번 뒤에서 확인해 두 단계 이상 뒤처졌으면 알린다.
+//! 그래서 여기서 하는 일은 "갱신이 멈춰 있지 않은지" 살피는 것이다. 사용자가 도움말 메뉴의 엔진 정보 창에서
+//! [최신 버전 확인]을 눌렀을 때만 인터넷에서 최신 버전을 읽는다(Cypher가 스스로 확인하러 나가지 않는다).
 //! 최신 버전은 Google이 공개하는 Chrome for Testing 목록에서 읽는다(보내는 정보는 없다).
 
 use serde::Serialize;
 use serde_json::Value;
 use std::path::Path;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::{Duration, SystemTime};
-use tauri::{AppHandle, Emitter, Manager};
+use std::time::Duration;
+use tauri::{AppHandle, Manager};
 
 const LATEST_URL: &str = "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions.json";
-const CHECK_EVERY: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-/// 주 버전이 이만큼 이상 뒤처지면 알린다(안정판은 약 4주마다 한 단계 오른다).
-const BEHIND_LIMIT: u32 = 2;
 
 #[derive(Clone, Serialize)]
 pub struct EngineInfo {
@@ -30,11 +26,6 @@ pub struct EngineInfo {
     version: String,
     /// 실행 파일(chrome 엔진일 때).
     path: String,
-}
-
-/// 버전 글자의 주 버전(맨 앞 숫자).
-pub fn major(version: &str) -> Option<u32> {
-    version.trim().split('.').next()?.parse().ok()
 }
 
 /// 실행 파일 옆의 버전 이름 폴더(`157.0.8103.52`)에서 설치된 버전을 읽는다. 여러 개면 가장 높은 것.
@@ -109,50 +100,9 @@ pub async fn browser_latest_version() -> Result<String, String> {
     latest_stable()
 }
 
-/// 브라우저를 열 때 부른다: 마지막 확인에서 일주일이 지났으면 뒤에서 버전을 확인하고,
-/// 두 단계 이상 뒤처졌으면 본창에 알린다. 설정에서 끌 수 있다.
-pub fn check_in_background(app: &AppHandle) {
-    // 한 번 실행하는 동안에는 한 번만 본다(브라우저를 여러 번 열어도 확인과 알림이 겹치지 않게).
-    static CHECKED: AtomicBool = AtomicBool::new(false);
-    if !app.state::<crate::AppState>().config.browser.update_check || CHECKED.swap(true, Ordering::SeqCst) {
-        return;
-    }
-    let Some(stamp) = crate::data_dir().map(|dir| dir.join("engine-check")) else { return };
-    let recent = std::fs::metadata(&stamp)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|at| SystemTime::now().duration_since(at).ok())
-        .is_some_and(|age| age < CHECK_EVERY);
-    if recent {
-        return;
-    }
-    let app = app.clone();
-    std::thread::spawn(move || {
-        // 브라우저가 다 뜬 뒤에(실제로 돌고 있는 버전을 읽을 수 있을 때) 확인한다.
-        std::thread::sleep(Duration::from_secs(5));
-        let Ok(latest) = latest_stable() else { return }; // 다음에 열 때 다시 해 본다.
-        let _ = std::fs::write(&stamp, &latest);
-        let current = info(&app);
-        if let (Some(now), Some(newest)) = (major(&current.version), major(&latest)) {
-            if newest >= now + BEHIND_LIMIT {
-                crate::log(&format!("브라우저 엔진이 오래됐습니다: {} {} (최신 안정판 {latest})", current.browser, current.version));
-                let _ = app.emit_to("main", "browser-outdated", serde_json::json!({ "info": current, "latest": latest }));
-            }
-        }
-    });
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn 주_버전을_읽는다() {
-        assert_eq!(major("157.0.8103.52"), Some(157));
-        assert_eq!(major(" 99 "), Some(99));
-        assert_eq!(major(""), None);
-        assert_eq!(major("Chrome/157"), None);
-    }
 
     #[test]
     fn 설치된_버전은_가장_높은_버전_폴더() {
