@@ -361,16 +361,12 @@ const viewedGroup = () => (active && sessions.has(active.key) && active.group) |
 /** 그 그룹에 따로 정해 둔 폴더(그룹 폴더). 정해 두지 않았으면 빈 글. */
 const groupFolderOf = (name) => (name && typeof groupFolders[name] === 'string' ? groupFolders[name] : '');
 
-/** 폴더 줄: 지금 새 세션을 열면 시작될 폴더. 보고 있는 항목의 그룹에 그룹 폴더가 있으면 그 폴더다. */
+/** 사이드바 위의 폴더 줄: 새 세션 폴더. 그룹 폴더는 여기가 아니라 그 그룹 머리의 폴더 줄에 보이고 거기서 바꾼다. */
 function showFolder() {
   const group = viewedGroup(), own = groupFolderOf(group);
   // 오른쪽 정렬 말줄임에서 글자 순서가 뒤집히지 않도록 방향 표시 문자를 붙인다.
-  $folder.textContent = '‎' + (own || folder);
-  $folder.title = own
-    ? `새 세션 폴더(그룹 "${group}"): ${own}\n▾: 바꾸기·풀기`
-    : `새 세션 폴더: ${folder}`;
-  $('folder-tag').hidden = !own;
-  $('folder-tag').title = `그룹 "${group}"의 폴더`;
+  $folder.textContent = '‎' + folder;
+  $folder.title = `새 세션 폴더: ${folder}${own ? `\n지금 보는 그룹 "${group}"의 세션은 그 그룹의 폴더에서 시작합니다: ${own}` : ''}`;
 }
 
 /** 그룹 폴더를 정하거나(path) 푼다(빈 글). */
@@ -378,7 +374,7 @@ function setGroupFolder(name, path) {
   if (!name) return;
   if (path) groupFolders[name] = path; else delete groupFolders[name];
   localStorage.setItem('cypher.groupFolders', JSON.stringify(groupFolders));
-  render(); // 폴더 줄과 묶음 머리의 풍선말을 맞춘다.
+  render(); // 묶음 머리의 폴더 줄과 풍선말을 맞춘다.
   setStatus(path
     ? `그룹 "${name}"의 폴더: ${path} (이 그룹에서 여는 세션은 여기서 시작합니다)`
     : `그룹 "${name}"의 폴더를 풀었습니다. 이 그룹의 세션도 새 세션 폴더(${folder})에서 시작합니다.`);
@@ -416,18 +412,33 @@ function folderChoices(current = folder) {
   return choices;
 }
 
-/** 폴더 줄의 ▾ 단추: 최근 폴더에서 골라 새 세션 폴더를 바꾼다. */
-function folderMenu(ev) {
-  // 폴더 줄은 거기 보이는 폴더를 고친다: 그룹 폴더가 보이고 있으면 그 그룹의 폴더를, 아니면 새 세션 폴더를 바꾼다.
-  const group = viewedGroup(), own = groupFolderOf(group);
-  const use = own ? (path) => setGroupFolder(group, path) : useFolder;
+/**
+ * 폴더 줄의 ▾ 단추: 최근 폴더에서 골라 그 줄의 폴더를 바꾼다.
+ * 사이드바 위의 폴더 줄은 새 세션 폴더를, 그룹 머리의 폴더 줄(groupName)은 그 그룹의 폴더를 바꾼다.
+ */
+function folderMenu(ev, groupName = '') {
+  const choice = (use) => ({ path, note }) => ({
+    label: `${baseName(path)}  —  ${path}${note === '지금 항목의 폴더' ? '  (지금 항목)' : note === '새 세션 폴더' ? '  (새 세션 폴더)' : ''}`,
+    action: () => use(path),
+  });
+  if (!groupName) {
+    return showMenu(ev, [
+      { caption: `새 세션 폴더: ${folder}` },
+      ...folderChoices().map(choice(useFolder)),
+      { label: '다른 폴더 고르기…', action: pickFolder },
+    ]);
+  }
+  const own = groupFolderOf(groupName);
+  const choices = folderChoices(own);
+  // 새 세션 폴더도 고를 수 있게 한다(그룹 폴더로 못박아 두면 새 세션 폴더가 바뀌어도 따라가지 않는다).
+  if (folder.toLowerCase() !== own.toLowerCase() && !choices.some(({ path }) => path.toLowerCase() === folder.toLowerCase())) {
+    choices.push({ path: folder, note: '새 세션 폴더' });
+  }
   showMenu(ev, [
-    { caption: own ? `지금: ${own} (그룹 "${group}"의 폴더)` : `지금: ${folder}` },
-    ...folderChoices(own || folder).map(({ path, note }) => ({ label: `${baseName(path)}  —  ${path}${note === '지금 항목의 폴더' ? '  (지금 항목)' : ''}`, action: () => use(path) })),
-    { label: '다른 폴더 고르기…', action: pickFolder },
-    ...(own ? [{ label: `그룹 "${group}"의 폴더 풀기 (새 세션 폴더 ${baseName(folder)}을(를) 따르기)`, action: () => setGroupFolder(group, '') }]
-      : group ? [{ label: `그룹 "${group}"의 폴더를 따로 정하기…`, action: () => pickGroupFolder(group) }]
-        : []),
+    { caption: own ? `그룹 "${groupName}"의 폴더: ${own}` : `그룹 "${groupName}"의 폴더: 정하지 않음 (새 세션 폴더 ${folder}에서 시작)` },
+    ...choices.map(choice((path) => setGroupFolder(groupName, path))),
+    { label: '다른 폴더 고르기…', action: () => pickGroupFolder(groupName) },
+    ...(own ? [{ label: `그룹 폴더 풀기 (새 세션 폴더 ${baseName(folder)}을(를) 따르기)`, action: () => setGroupFolder(groupName, '') }] : []),
   ]);
 }
 
@@ -1942,6 +1953,25 @@ function render() {
     add.onclick = (ev) => { ev.stopPropagation(); showMenu(ev, addItems(group)); };
     head.append(add);
     head.append(make('span', 'count', String(group.list.length)));
+    // 그룹의 폴더 줄: 이름 바로 아래에 그룹 폴더를 보여 주고 거기서 바로 고른다(접어 두어도 보인다).
+    // 위쪽 폴더 줄은 새 세션 폴더만, 이 줄은 이 그룹의 폴더만 바꾼다.
+    if (group.logical) {
+      const row = make('div', ownFolder ? 'group-folder' : 'group-folder unset');
+      // 오른쪽 정렬 말줄임에서 글자 순서가 뒤집히지 않도록 방향 표시 문자를 붙인다.
+      const path = make('span', 'path', ownFolder ? '‎' + ownFolder : '폴더를 정하지 않음');
+      path.title = ownFolder
+        ? `그룹 "${group.name}"의 폴더: ${ownFolder}\n이 그룹에서 여는 세션은 여기서 시작합니다.\n클릭·▾: 바꾸기·풀기`
+        : `그룹 "${group.name}"의 폴더를 정하지 않았습니다. 이 그룹의 세션은 새 세션 폴더(${folder})에서 시작합니다.\n클릭·▾: 정하기`;
+      const recent = make('button', '', '▾');
+      recent.title = '최근 폴더에서 골라 이 그룹의 폴더로 정하기';
+      const pick = make('button', '', '폴더…');
+      pick.title = ownFolder ? '이 그룹의 폴더 바꾸기' : '이 그룹의 폴더 정하기';
+      path.onclick = recent.onclick = (ev) => folderMenu(ev, group.name);
+      pick.onclick = () => pickGroupFolder(group.name);
+      row.onclick = (ev) => ev.stopPropagation(); // 폴더 줄을 눌러도 묶음이 접히지 않게
+      row.append(path, recent, pick);
+      head.append(row);
+    }
     head.onclick = () => {
       if (folded) collapsed.delete(group.key); else collapsed.add(group.key);
       localStorage.setItem('cypher.collapsed', JSON.stringify([...collapsed]));
@@ -1962,7 +1992,7 @@ function render() {
 
   // 창 아래 상태줄에도 지금 세션의 모델·effort를 항상 보여 준다.
   renderWhere();
-  showFolder(); // 보고 있는 항목의 그룹이 바뀌면 폴더 줄도 그 그룹의 폴더로 바뀐다.
+  showFolder(); // 보고 있는 항목의 그룹이 바뀌면 폴더 줄의 풍선말(그 그룹의 세션이 시작될 곳)도 바뀐다.
   $('status-model').textContent = active?.model
     ? [active.model, active.effort, active.context == null ? '' : `컨텍스트 ${percent(active.context)}`,
       active.agents.size ? `서브에이전트 ${active.agents.size}` : ''].filter(Boolean).join(' · ')
@@ -2099,10 +2129,8 @@ function sidebarMenu(ev) {
   showMenu(ev, items);
 }
 
+/** 새 세션 폴더를 고른다. 그룹의 폴더는 그룹 머리의 폴더 줄에서 고른다(pickGroupFolder). */
 async function pickFolder() {
-  // 폴더 줄에 그룹 폴더가 보이고 있으면 그 그룹의 폴더를 바꾼다.
-  const group = viewedGroup();
-  if (groupFolderOf(group)) return pickGroupFolder(group);
   const picked = await invoke('pick_folder', { start: folder });
   if (picked) useFolder(picked);
 }
@@ -2151,7 +2179,7 @@ function paletteEntries() {
     command('Claude 공통 설정 열기 (settings.json)', () => runMenu('claude-settings'), '설정'),
     command('Claude 공통 지침 열기 (CLAUDE.md)', () => runMenu('claude-memory'), '설정'),
     command('단축키 보기', showHelp, '도움말 · F1'),
-    command('새 세션 폴더 고르기…', pickFolder, `폴더 · 지금: ${groupFolderOf(viewedGroup()) || folder}`),
+    command('새 세션 폴더 고르기…', pickFolder, `폴더 · 지금: ${folder}`),
     ...folderChoices().map(({ path, note }) => command(`새 세션 폴더를 ${baseName(path)}(으)로`, () => useFolder(path), `${note} · ${path}`)),
   ];
   return [...items, ...commands];

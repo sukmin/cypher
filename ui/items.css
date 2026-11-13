@@ -571,9 +571,33 @@ li.approval .sub .tool { color: inherit; }
 .sub .repeat { margin-right: 5px; padding: 0 4px; font-weight: normal; color: var(--on-accent); background: var(--busy); border-radius: 6px; }
 :root[data-theme="win32"] #sessions li.active .sub .tool { color: inherit; }
 
-/* 폴더 줄: 그룹 폴더가 보이고 있다는 표시 */
-#folder-tag { flex: none; color: var(--accent); font-size: 11px; }
-#folder-tag[hidden] { display: none; }
+/* 그룹의 폴더 줄: 그룹 이름 바로 아래에 그룹 폴더와 고르는 단추(▾, 폴더…)를 둔다. 사이드바 위의 폴더 줄과 같은 모양이다. */
+#sessions li.group .group-folder {
+  grid-column: 2 / -1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  margin-top: 2px;
+  font-weight: normal;
+  cursor: default;
+}
+/* 경로는 머리의 글자색을 그대로 써서 또렷하게 보인다. */
+#sessions li.group .group-folder .path {
+  flex: 1;
+  min-width: 0;
+  font: normal 11px/18px var(--mono-font);
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl; /* 긴 경로는 끝부분이 보이게 */
+  text-align: left;
+  cursor: pointer;
+}
+#sessions li.group .group-folder .path:hover { text-decoration: underline; }
+#sessions li.group .group-folder.unset .path { direction: ltr; font-family: inherit; opacity: 0.65; }
+#sessions li.group .group-folder button { flex: none; padding: 0 6px; font-size: 11px; line-height: 16px; }
 
 /* ───────── ERD 항목: 왼쪽은 코드(erDiagram 글), 오른쪽은 그림 ───────── */
 

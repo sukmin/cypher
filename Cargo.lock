@@ -760,7 +760,7 @@ checksum = "914a755b7c2d4af2bdcff7ce1739e2db9a1b81a9b07123d8015786ae03c0980d"
 
 [[package]]
 name = "cypher"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -783,11 +783,11 @@ dependencies = [
 
 [[package]]
 name = "cypher-bridge"
-version = "0.12.0"
+version = "0.12.1"
 
 [[package]]
 name = "cypher-core"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "base64 0.22.1",
  "encoding_rs",
@@ -803,7 +803,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-pty"
-version = "0.12.0"
+version = "0.12.1"
 dependencies = [
  "anyhow",
  "portable-pty",
