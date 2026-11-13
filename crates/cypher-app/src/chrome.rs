@@ -6,9 +6,12 @@
 //! (브라우저가 스스로 갱신한다) 배포 파일이 커지지 않는다.
 //!
 //! - 디버깅 포트를 열지 않는다. 이 프로세스와 브라우저만 아는 파이프로만 통신한다.
-//! - 프로필은 `%LOCALAPPDATA%\cypher\chrome-profile`에 따로 둔다(사용자의 평소 프로필은 건드리지 않는다.
-//!   Chrome 136부터는 기본 프로필에서 원격 조작이 막혀 있기도 하다).
-//! - Cypher가 끝나 파이프가 닫히면 이 브라우저도 함께 끝난다.
+//! - 프로필은 Cypher 전용으로 따로 둔다(사용자의 평소 프로필은 건드리지 않는다. Chrome 136부터는 기본 프로필에서
+//!   원격 조작이 막혀 있기도 하다). 브라우저는 그룹마다 따로 띄우고 프로필도 그룹마다 다르다
+//!   (`%LOCALAPPDATA%\cypher\chrome-profiles\<그룹의 프로필 번호>`). 그래서 한 그룹의 Claude 세션은 다른 그룹의
+//!   브라우저를 조작할 수 없고, 로그인 상태도 그룹끼리 섞이지 않는다. 그룹이 없는 곳에서 사용자가 띄운 브라우저는
+//!   `chrome-profile`을 쓰며, Claude 세션은 그것을 조작할 수 없다.
+//! - Cypher가 끝나 파이프가 닫히면 이 브라우저들도 함께 끝난다.
 //!
 //! 파이프를 넘기는 부분(`spawn`)만 OS에 따라 다르다. Windows는 상속할 핸들 번호를
 //! `--remote-debugging-io-pipes=<읽기>,<쓰기>`로 알려 주고, macOS·Linux는 파일 번호 3·4로 넘긴다.
@@ -21,7 +24,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::mpsc::{self, Sender};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, LazyLock, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -29,6 +32,8 @@ type Pending = Arc<Mutex<HashMap<u64, Sender<Result<Value, String>>>>>;
 
 /// 띄워 둔 브라우저 하나.
 pub struct Chrome {
+    /// 이 브라우저가 쓰는 프로필의 번호(그룹마다 다르다. 그룹이 없으면 빈 글).
+    key: String,
     child: Mutex<Child>,
     writer: Mutex<File>,
     pending: Pending,
@@ -41,7 +46,8 @@ pub struct Chrome {
     current: Mutex<Option<(String, Instant)>>,
 }
 
-static CHROME: Mutex<Option<Arc<Chrome>>> = Mutex::new(None);
+/// 띄워 둔 브라우저들: 프로필 번호 → 브라우저.
+static CHROMES: LazyLock<Mutex<HashMap<String, Arc<Chrome>>>> = LazyLock::new(Default::default);
 
 fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
@@ -68,8 +74,10 @@ pub fn find_browser(configured: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| "Chrome·Edge·Chromium·Brave를 찾지 못했습니다. 설치하거나 설정 파일의 [browser] chrome_path에 실행 파일 경로를 적어 주세요.".to_string())
 }
 
-fn profile_dir() -> Result<PathBuf, String> {
-    let dir = crate::data_dir().ok_or("데이터 폴더를 찾지 못했습니다")?.join("chrome-profile");
+/// 그 프로필 번호의 브라우저가 쓸 폴더. 번호가 비어 있으면(그룹 없음) 예전부터 쓰던 `chrome-profile`.
+fn profile_dir(key: &str) -> Result<PathBuf, String> {
+    let base = crate::data_dir().ok_or("데이터 폴더를 찾지 못했습니다")?;
+    let dir = if key.is_empty() { base.join("chrome-profile") } else { base.join("chrome-profiles").join(crate::site::profile_key(key)?) };
     std::fs::create_dir_all(&dir).map_err(err)?;
     Ok(dir)
 }
@@ -169,8 +177,9 @@ const PROBE_TIMEOUT: Duration = Duration::from_secs(3);
 
 impl Chrome {
     /// 띄운 브라우저와의 연결을 만들고, 읽기 스레드와 종료 감시 스레드를 붙인다.
-    fn connect(child: Child, writer: File, reader: File) -> Arc<Chrome> {
+    fn connect(key: &str, child: Child, writer: File, reader: File) -> Arc<Chrome> {
         let chrome = Arc::new(Chrome {
+            key: key.to_string(),
             child: Mutex::new(child),
             writer: Mutex::new(writer),
             pending: Arc::new(Mutex::new(HashMap::new())),
@@ -202,9 +211,9 @@ impl Chrome {
         for (_, waiter) in self.pending.lock().unwrap().drain() {
             let _ = waiter.send(Err("브라우저가 닫혔습니다".into()));
         }
-        let mut slot = CHROME.lock().unwrap();
-        if slot.as_ref().is_some_and(|current| Arc::ptr_eq(current, self)) {
-            *slot = None;
+        let mut all = CHROMES.lock().unwrap();
+        if all.get(&self.key).is_some_and(|current| Arc::ptr_eq(current, self)) {
+            all.remove(&self.key);
         }
     }
 
@@ -337,13 +346,13 @@ fn read_loop(reader: File, chrome: Arc<Chrome>) {
     chrome.retire();
 }
 
-fn running() -> Option<Arc<Chrome>> {
-    CHROME.lock().unwrap().clone()
+fn running(key: &str) -> Option<Arc<Chrome>> {
+    CHROMES.lock().unwrap().get(key).cloned()
 }
 
-/// 브라우저가 떠 있는지.
-pub fn is_open() -> bool {
-    running().is_some()
+/// 그 프로필의 브라우저가 떠 있는지.
+pub fn is_open(key: &str) -> bool {
+    running(key).is_some()
 }
 
 /// 같은 프로필의 브라우저가 이미 떠 있는지. Chromium은 실행 중에 프로필 폴더의 `lockfile`을 잡고 있고,
@@ -370,13 +379,13 @@ fn wait_first_page(chrome: &Chrome, start: &str) {
     }
 }
 
-/// 브라우저를 띄운다. 이미 떠 있으면 앞으로 가져오고, 주소가 있으면 그리로 간다.
-pub fn open(configured_path: &str, home: &str, url: Option<&str>) -> Result<(), String> {
+/// 그 프로필의 브라우저를 띄운다. 이미 떠 있으면 앞으로 가져오고, 주소가 있으면 그리로 간다.
+pub fn open(key: &str, configured_path: &str, home: &str, url: Option<&str>) -> Result<(), String> {
     // 띄우기는 한 번에 하나만 한다(두 세션이 동시에 도구를 불러 브라우저를 둘 띄우지 않게).
     static OPENING: Mutex<()> = Mutex::new(());
     let _opening = OPENING.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
 
-    if let Some(chrome) = running() {
+    if let Some(chrome) = running(key) {
         let target = chrome.current_target()?;
         if let Some(url) = url {
             let session = chrome.session_for(&target)?;
@@ -386,20 +395,20 @@ pub fn open(configured_path: &str, home: &str, url: Option<&str>) -> Result<(), 
         return Ok(());
     }
     let program = find_browser(configured_path)?;
-    let profile = profile_dir()?;
+    let profile = profile_dir(key)?;
     if profile_in_use(&profile) {
-        return Err("Cypher 전용 프로필의 브라우저가 이미 떠 있습니다(다른 Cypher 창이 띄운 것일 수 있습니다). \
+        return Err("이 그룹의 Cypher 전용 프로필로 띄운 브라우저가 이미 떠 있습니다(다른 Cypher 창이 띄운 것일 수 있습니다). \
                     그 브라우저 창을 모두 닫은 뒤 다시 해 보세요."
             .into());
     }
     let start = crate::browser::normalize_url(url.unwrap_or(home))?.to_string();
     let (child, writer, reader) = spawn(&program, &profile, &start)?;
-    let chrome = Chrome::connect(child, writer, reader);
+    let chrome = Chrome::connect(key, child, writer, reader);
 
     // 연결을 확인한 뒤에야 "떠 있음"으로 올린다.
     match chrome.send_within("Browser.getVersion", json!({}), None, Duration::from_secs(15)) {
         Ok(version) => {
-            *CHROME.lock().unwrap() = Some(chrome.clone());
+            CHROMES.lock().unwrap().insert(key.to_string(), chrome.clone());
             crate::log(&format!("브라우저 엔진 chrome: {} ({})", version["product"].as_str().unwrap_or("?"), program.display()));
             wait_first_page(&chrome, &start);
             Ok(())
@@ -412,30 +421,37 @@ pub fn open(configured_path: &str, home: &str, url: Option<&str>) -> Result<(), 
     }
 }
 
-/// Cypher가 끝날 때: 띄워 둔 브라우저를 닫는다(파이프가 닫히면 스스로 끝나지만, 확실히 해 둔다).
+/// Cypher가 끝날 때: 띄워 둔 브라우저를 모두 닫는다(파이프가 닫히면 스스로 끝나지만, 확실히 해 둔다).
 pub fn shutdown() {
-    if let Some(chrome) = running() {
-        let _ = chrome.send_within("Browser.close", json!({}), None, Duration::from_millis(1500));
+    let all: Vec<Arc<Chrome>> = CHROMES.lock().unwrap().values().cloned().collect();
+    // 닫으라는 말을 모두에게 한꺼번에 보내고 함께 기다린다(응답 없는 브라우저가 여럿이어도 기다리는 시간이 늘지 않게).
+    let closing: Vec<_> = all
+        .into_iter()
+        .map(|chrome| thread::spawn(move || drop(chrome.send_within("Browser.close", json!({}), None, Duration::from_millis(1500)))))
+        .collect();
+    for handle in closing {
+        let _ = handle.join();
     }
 }
 
-/// 지금 탭에 CDP 명령을 보낸다.
-pub fn cdp(method: &str, params: Value) -> Result<Value, String> {
-    let chrome = running().ok_or("브라우저가 열려 있지 않습니다")?;
+/// 그 프로필의 브라우저에서 지금 탭에 CDP 명령을 보낸다.
+pub fn cdp(key: &str, method: &str, params: Value) -> Result<Value, String> {
+    let chrome = running(key).ok_or("브라우저가 열려 있지 않습니다")?;
     let target = chrome.current_target()?;
     let session = chrome.session_for(&target)?;
     chrome.send(method, params, Some(&session))
 }
 
-/// 떠 있는 브라우저의 Chromium 버전(예: 157.0.8103.52). 떠 있지 않으면 None.
+/// 떠 있는 브라우저(어느 그룹의 것이든)의 Chromium 버전(예: 157.0.8103.52). 떠 있는 것이 없으면 None.
 pub fn running_version() -> Option<String> {
-    let reply = running()?.send_within("Browser.getVersion", json!({}), None, PROBE_TIMEOUT).ok()?;
+    let any = CHROMES.lock().unwrap().values().next().cloned()?;
+    let reply = any.send_within("Browser.getVersion", json!({}), None, PROBE_TIMEOUT).ok()?;
     reply["product"].as_str()?.split('/').nth(1).map(str::to_string)
 }
 
-/// 지금 탭의 주소.
-pub fn current_url() -> Option<String> {
-    let chrome = running()?;
+/// 그 프로필의 브라우저에서 지금 탭의 주소.
+pub fn current_url(key: &str) -> Option<String> {
+    let chrome = running(key)?;
     let target = chrome.current_target().ok()?;
     chrome.pages().ok()?.iter().find(|p| p["targetId"] == target.as_str())?["url"].as_str().map(str::to_string)
 }
@@ -460,7 +476,7 @@ mod tests {
         std::fs::create_dir_all(&profile).unwrap();
         assert!(!profile_in_use(&profile));
         let (child, writer, reader) = spawn(&program, &profile, "about:blank").unwrap();
-        let chrome = Chrome::connect(child, writer, reader);
+        let chrome = Chrome::connect("test", child, writer, reader);
 
         let version = chrome.send("Browser.getVersion", json!({}), None).unwrap();
         assert!(version["product"].as_str().unwrap().contains('/'), "{version}");

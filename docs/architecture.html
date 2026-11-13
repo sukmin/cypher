@@ -1,0 +1,374 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cypher 구현 방식</title>
+<style>
+  :root {
+    --bg: #ffffff; --fg: #1f2328; --dim: #656d76; --line: #d0d7de; --box: #f6f8fa;
+    --accent: #c2410c; --accent-soft: #fff1e8; --ok: #1a7f37; --ok-soft: #e6f6ea; --no: #cf222e; --no-soft: #ffebe9;
+    --blue: #0969da; --blue-soft: #ddf4ff;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #0f1115; --fg: #e6e8eb; --dim: #9aa3ad; --line: #30363d; --box: #171b22;
+      --accent: #f08a4b; --accent-soft: #2b1c12; --ok: #56d364; --ok-soft: #12261a; --no: #ff7b72; --no-soft: #2d1416;
+      --blue: #58a6ff; --blue-soft: #10233a;
+    }
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.7 "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif; }
+  main { max-width: 860px; margin: 0 auto; padding: 32px 20px 80px; }
+  h1 { font-size: 30px; margin: 0 0 6px; }
+  h2 { font-size: 22px; margin: 52px 0 10px; padding-top: 14px; border-top: 1px solid var(--line); }
+  h3 { font-size: 17px; margin: 26px 0 6px; }
+  p { margin: 8px 0; }
+  .lead { color: var(--dim); margin-bottom: 24px; }
+  code { font: 14px Consolas, "D2Coding", monospace; background: var(--box); border: 1px solid var(--line); border-radius: 4px; padding: 0 4px; }
+  nav { background: var(--box); border: 1px solid var(--line); border-radius: 8px; padding: 12px 18px; margin: 20px 0; }
+  nav ol { margin: 0; padding-left: 22px; columns: 2; column-gap: 32px; }
+  nav a { color: var(--blue); text-decoration: none; }
+  figure { margin: 18px 0; }
+  figure svg { width: 100%; height: auto; display: block; border: 1px solid var(--line); border-radius: 8px; background: var(--box); }
+  figcaption { color: var(--dim); font-size: 14px; margin-top: 6px; }
+  table { border-collapse: collapse; width: 100%; margin: 12px 0; font-size: 15px; }
+  th, td { border: 1px solid var(--line); padding: 6px 10px; text-align: left; vertical-align: top; }
+  th { background: var(--box); }
+  .note { border-left: 4px solid var(--accent); background: var(--accent-soft); padding: 8px 14px; border-radius: 0 6px 6px 0; margin: 14px 0; }
+  ul { margin: 8px 0; padding-left: 22px; }
+  li { margin: 3px 0; }
+  /* 그림 */
+  svg text { font: 13px "Malgun Gothic", "Apple SD Gothic Neo", system-ui, sans-serif; fill: var(--fg); }
+  svg .s { font-size: 11.5px; fill: var(--dim); }
+  svg .h { font-weight: bold; }
+  svg .b { fill: var(--bg); stroke: var(--line); stroke-width: 1.2; }
+  svg .hi { fill: var(--accent-soft); stroke: var(--accent); stroke-width: 1.4; }
+  svg .bl { fill: var(--blue-soft); stroke: var(--blue); stroke-width: 1.2; }
+  svg .okb { fill: var(--ok-soft); stroke: var(--ok); stroke-width: 1.2; }
+  svg .nob { fill: var(--no-soft); stroke: var(--no); stroke-width: 1.2; }
+  svg .zone { fill: none; stroke: var(--dim); stroke-width: 1.2; stroke-dasharray: 6 4; }
+  svg .a { stroke: var(--fg); stroke-width: 1.4; fill: none; marker-end: url(#arrow); }
+  svg .aok { stroke: var(--ok); stroke-width: 1.8; fill: none; marker-end: url(#arrow-ok); }
+  svg .ano { stroke: var(--no); stroke-width: 1.8; fill: none; stroke-dasharray: 5 4; marker-end: url(#arrow-no); }
+  svg .tok { fill: var(--ok); font-weight: bold; }
+  svg .tno { fill: var(--no); font-weight: bold; }
+  svg .tac { fill: var(--accent); font-weight: bold; }
+</style>
+</head>
+<body>
+<!-- 그림들이 함께 쓰는 화살촉 -->
+<svg width="0" height="0" style="position:absolute" aria-hidden="true">
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--fg)"/></marker>
+    <marker id="arrow-ok" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--ok)"/></marker>
+    <marker id="arrow-no" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="var(--no)"/></marker>
+  </defs>
+</svg>
+<main>
+<h1>Cypher 구현 방식</h1>
+<p class="lead">Cypher가 어떤 조각으로 이루어져 있고, Claude Code 세션과 어떻게 이야기하며, 그룹이라는 울타리를 어떻게 지키는지를 그림으로 설명합니다. 기준: 0.10.0 (2026-11-13).</p>
+
+<nav>
+<ol>
+  <li><a href="#parts">전체 구성</a></li>
+  <li><a href="#items">사이드바: 항목과 묶음</a></li>
+  <li><a href="#channel">Claude 세션과 이야기하는 길</a></li>
+  <li><a href="#identity">누가 보냈는지 확인하기</a></li>
+  <li><a href="#scope">다룰 수 있는 범위</a></li>
+  <li><a href="#profiles">그룹마다 다른 브라우저</a></li>
+  <li><a href="#created">만든 파일을 사이드바에 놓기</a></li>
+  <li><a href="#storage">어디에 무엇을 저장하나</a></li>
+  <li><a href="#limits">막지 못하는 것</a></li>
+  <li><a href="#files">코드 위치</a></li>
+</ol>
+</nav>
+
+<h2 id="parts">1. 전체 구성</h2>
+<p>Cypher는 실행 파일 두 개입니다. 창을 띄우는 <code>cypher.exe</code>와, Claude Code가 불러 주는 작은 심부름꾼 <code>cypher-bridge.exe</code>입니다.</p>
+<figure>
+<svg viewBox="0 0 800 330" role="img" aria-label="전체 구성 그림">
+  <rect class="zone" x="150" y="20" width="330" height="290" rx="10"/>
+  <text x="165" y="42" class="h">cypher.exe</text>
+  <rect class="hi" x="170" y="58" width="290" height="92" rx="8"/>
+  <text x="185" y="82" class="h">화면</text>
+  <text x="185" y="102" class="s">ui/*.js · WebView2 안에서 돎</text>
+  <text x="185" y="120" class="s">사이드바, 분할, 그룹, 항목 화면</text>
+  <text x="185" y="138" class="s">"어떤 항목이 어느 그룹인지"를 아는 곳</text>
+  <rect class="bl" x="170" y="196" width="290" height="96" rx="8"/>
+  <text x="185" y="220" class="h">본체</text>
+  <text x="185" y="240" class="s">Rust · Tauri</text>
+  <text x="185" y="258" class="s">터미널(ConPTY), 파일, git, 브라우저 엔진</text>
+  <text x="185" y="276" class="s">로컬 통로(127.0.0.1)를 열고 기다림</text>
+  <path class="a" d="M290 150 L290 196"/>
+  <path class="a" d="M340 196 L340 150"/>
+  <text x="350" y="168" class="s">명령 호출 ↓ · 이벤트 ↑</text>
+
+  <rect class="b" x="20" y="130" width="96" height="48" rx="8"/>
+  <text x="68" y="159" text-anchor="middle">사용자</text>
+  <path class="a" d="M116 140 L170 110"/>
+
+  <rect class="b" x="560" y="40" width="220" height="62" rx="8"/>
+  <text x="575" y="64" class="h">Claude Code 세션</text>
+  <text x="575" y="84" class="s">터미널 안에서 도는 claude</text>
+  <rect class="b" x="560" y="116" width="220" height="44" rx="8"/>
+  <text x="575" y="143">PowerShell 등 다른 세션</text>
+  <path class="a" d="M460 226 L560 80"/>
+  <path class="a" d="M460 244 L560 140"/>
+  <text x="468" y="64" class="s">띄우고 입출력</text>
+
+  <rect class="okb" x="560" y="222" width="220" height="62" rx="8"/>
+  <text x="575" y="246" class="h">cypher-bridge.exe</text>
+  <text x="575" y="266" class="s">상태줄·훅·도구(MCP) 심부름</text>
+  <path class="a" d="M670 102 L670 222"/>
+  <text x="680" y="196" class="s">Claude Code가 실행</text>
+  <path class="a" d="M560 262 L460 262"/>
+  <text x="476" y="282" class="s">통로로 전달</text>
+</svg>
+<figcaption>화면과 본체는 한 프로세스 안에서 "명령 호출"과 "이벤트"로 이야기합니다. 세션 쪽 소식은 전달 프로그램이 로컬 통로로 가져옵니다.</figcaption>
+</figure>
+<ul>
+  <li><b>화면</b>은 빌드 단계 없는 자바스크립트입니다. 사이드바의 항목과 그룹을 알고 있는 것은 화면뿐입니다.</li>
+  <li><b>본체</b>는 화면이 못 하는 일(프로세스 띄우기, 파일, 네트워크)을 합니다. 그룹에 관한 판단이 필요하면 화면에 물어봅니다.</li>
+  <li>웹 페이지를 보여 주는 사이트 항목의 웹뷰에는 앱 명령 권한을 주지 않습니다.</li>
+</ul>
+
+<h2 id="items">2. 사이드바: 항목과 묶음</h2>
+<p>사이드바에 놓이는 것을 <b>항목</b>이라 부릅니다. 터미널 세션(Claude, PowerShell)과 메모, HTTP, 사이트, 이미지, 브레인스토밍, 문서가 있습니다. 항목은 둘 중 한 가지 묶음에 들어갑니다.</p>
+<figure>
+<svg viewBox="0 0 800 210" role="img" aria-label="그룹과 폴더 묶음">
+  <rect class="hi" x="20" y="20" width="360" height="170" rx="10"/>
+  <text x="36" y="44" class="tac">◆ 그룹 "결제 개편"</text>
+  <text x="36" y="62" class="s">사용자가 이름을 붙여 만든 묶음 = 업무 하나</text>
+  <rect class="b" x="36" y="76" width="150" height="30" rx="6"/><text x="48" y="96">Claude 세션</text>
+  <rect class="b" x="198" y="76" width="166" height="30" rx="6"/><text x="210" y="96">메모 · 할 일</text>
+  <rect class="b" x="36" y="114" width="150" height="30" rx="6"/><text x="48" y="134">사이트 · 관리 화면</text>
+  <rect class="b" x="198" y="114" width="166" height="30" rx="6"/><text x="210" y="134">HTTP · 요청</text>
+  <text x="36" y="172" class="s">폴더가 서로 달라도 한 그룹에 넣을 수 있음</text>
+
+  <rect class="zone" x="420" y="20" width="360" height="170" rx="10"/>
+  <text x="436" y="44" class="h">폴더 묶음 "ultron"</text>
+  <text x="436" y="62" class="s">그룹이 없는 항목이 시작 폴더별로 모인 것</text>
+  <rect class="b" x="436" y="76" width="150" height="30" rx="6"/><text x="448" y="96">Claude 세션</text>
+  <rect class="b" x="598" y="76" width="166" height="30" rx="6"/><text x="610" y="96">PowerShell 세션</text>
+  <rect class="b" x="436" y="114" width="150" height="30" rx="6"/><text x="448" y="134">메모</text>
+  <text x="436" y="172" class="s">같은 폴더에서 열었을 뿐, 한 업무라는 보장은 없음</text>
+</svg>
+<figcaption>이 구분이 뒤에 나오는 모든 규칙의 바탕입니다. "같은 그룹"은 이름 붙인 그룹만을 뜻합니다.</figcaption>
+</figure>
+<p>새 종류의 항목은 이름·아이콘과 화면을 만드는 함수(<code>create(item, host, saved, onChange)</code>, 제목·저장할 상태·정리 함수를 가진 화면 객체를 돌려줌)를 <code>ui/main.js</code>의 <code>KINDS</code>에 올리면 사이드바·분할·그룹·복원에 그대로 들어갑니다.</p>
+
+<h2 id="channel">3. Claude 세션과 이야기하는 길</h2>
+<p>Cypher는 Claude 세션을 띄울 때 <code>claude --settings &lt;파일&gt; --mcp-config &lt;파일&gt;</code>로 설정을 끼워 넣습니다(도구 연결인 <code>--mcp-config</code>는 설정에서 <code>[browser] enabled = false</code>로 끄면 붙이지 않습니다). 사용자의 <code>settings.json</code>은 건드리지 않습니다. 그 설정이 전달 프로그램을 세 가지 자리에 걸어 둡니다.</p>
+<figure>
+<svg viewBox="0 0 800 300" role="img" aria-label="신호가 흐르는 길">
+  <rect class="b" x="20" y="24" width="150" height="252" rx="8"/>
+  <text x="95" y="48" text-anchor="middle" class="h">Claude Code</text>
+  <rect class="okb" x="230" y="24" width="140" height="252" rx="8"/>
+  <text x="300" y="48" text-anchor="middle" class="h">전달 프로그램</text>
+  <rect class="bl" x="430" y="24" width="140" height="252" rx="8"/>
+  <text x="500" y="48" text-anchor="middle" class="h">본체</text>
+  <rect class="hi" x="630" y="24" width="150" height="252" rx="8"/>
+  <text x="705" y="48" text-anchor="middle" class="h">화면</text>
+
+  <text x="34" y="84" class="tac">① 상태줄</text>
+  <text x="34" y="100" class="s">몇 초마다</text>
+  <path class="a" d="M170 90 L230 90"/><path class="a" d="M370 90 L430 90"/><path class="a" d="M570 90 L630 90"/>
+  <text x="644" y="86" class="s">모델 · effort</text><text x="644" y="100" class="s">컨텍스트 · 비용 · 한도</text>
+
+  <text x="34" y="150" class="tac">② 훅</text>
+  <text x="34" y="166" class="s">일이 생길 때</text>
+  <path class="a" d="M170 156 L230 156"/><path class="a" d="M370 156 L430 156"/><path class="a" d="M570 156 L630 156"/>
+  <text x="644" y="146" class="s">요청 시작 · 완료</text><text x="644" y="160" class="s">승인 대기 · 서브에이전트</text><text x="644" y="174" class="s">새로 만든 파일</text>
+  <text x="436" y="178" class="s">쓰기 직전·직후를 받아</text><text x="436" y="192" class="s">새 파일인지 가림</text>
+
+  <text x="34" y="222" class="tac">③ 도구(MCP)</text>
+  <text x="34" y="238" class="s">Claude가 부를 때</text>
+  <path class="a" d="M170 222 L230 222"/><path class="a" d="M370 222 L430 222"/><path class="a" d="M570 222 L630 222"/>
+  <path class="a" d="M630 246 L570 246"/><path class="a" d="M430 246 L370 246"/><path class="a" d="M230 246 L170 246"/>
+  <text x="644" y="218" class="s">"이 세션이 이 항목을</text><text x="644" y="232" class="s">다뤄도 되나?"를 판단</text>
+  <text x="436" y="268" class="s">브라우저 조작은 본체가</text>
+</svg>
+<figcaption>①②는 한 번 보내고 끝나는 신호, ③은 세션이 사는 동안 이어지는 연결입니다. 셋 다 같은 로컬 통로(127.0.0.1의 임의 포트)를 씁니다.</figcaption>
+</figure>
+<ul>
+  <li>통로에 접속하면 첫 줄에 <b>확인값</b>(실행할 때마다 새로 만드는 값), 둘째 줄에 <b>세션 번호</b>를 적습니다.</li>
+  <li>전달 프로그램은 신호를 보낸 뒤 본체가 처리를 마치고 연결을 닫을 때까지(길어야 1.5초) 기다립니다. 그래서 "쓰기 직전" 신호는 Claude가 실제로 파일을 쓰기 전에 처리됩니다(본체가 1.5초 안에 처리하는 보통의 경우).</li>
+  <li>도구는 20개입니다: 브라우저 12개, HTTP 2개, 항목 목록·브레인스토밍·메모·이미지·문서·알림 6개.</li>
+  <li>그룹을 알아야 하는 도구는 본체가 화면에 물어서(<code>mcp-request</code> 이벤트) 답을 받습니다(20초 안에).</li>
+</ul>
+
+<h2 id="identity">4. 누가 보냈는지 확인하기</h2>
+<p>통로로 오는 신호에 적힌 세션 번호는 보낸 쪽이 스스로 적은 값입니다. 확인값은 모든 세션이 알고 있으니, 번호만 믿으면 한 세션이 다른 세션인 척할 수 있습니다. 그래서 Cypher는 번호를 믿지 않고 <b>접속한 프로세스가 누구의 자손인지</b>를 직접 봅니다.</p>
+<figure>
+<svg viewBox="0 0 800 300" role="img" aria-label="프로세스 조상으로 세션을 확인">
+  <rect class="bl" x="330" y="16" width="140" height="36" rx="8"/><text x="400" y="39" text-anchor="middle" class="h">cypher.exe</text>
+  <path class="a" d="M370 52 L190 92"/><path class="a" d="M430 52 L560 92"/>
+  <rect class="b" x="90" y="92" width="200" height="36" rx="8"/><text x="190" y="115" text-anchor="middle">세션 1의 claude</text>
+  <rect class="b" x="470" y="92" width="200" height="36" rx="8"/><text x="570" y="115" text-anchor="middle">세션 2의 claude</text>
+  <path class="a" d="M150 128 L110 168"/><path class="a" d="M230 128 L270 168"/>
+  <rect class="okb" x="30" y="168" width="160" height="36" rx="8"/><text x="110" y="191" text-anchor="middle">전달 프로그램</text>
+  <rect class="nob" x="210" y="168" width="160" height="36" rx="8"/><text x="290" y="191" text-anchor="middle">Bash에서 직접 접속</text>
+  <rect class="nob" x="600" y="168" width="170" height="36" rx="8"/><text x="685" y="191" text-anchor="middle">세션 밖의 프로그램</text>
+
+  <text x="110" y="228" text-anchor="middle" class="s">"1번입니다"</text>
+  <text x="110" y="248" text-anchor="middle" class="tok">✓ 조상이 세션 1 → 받음</text>
+  <text x="290" y="228" text-anchor="middle" class="s">"2번입니다"</text>
+  <text x="290" y="248" text-anchor="middle" class="tno">✗ 조상은 세션 1 → 끊음</text>
+  <text x="685" y="228" text-anchor="middle" class="s">"1번입니다"</text>
+  <text x="685" y="248" text-anchor="middle" class="tno">✗ 어느 세션의 자손도 아님</text>
+  <text x="400" y="284" text-anchor="middle" class="s">접속한 쪽의 프로세스 번호 → 부모 → 그 부모 … 를 따라 올라가 세션 프로그램을 만나는지 본다</text>
+</svg>
+<figcaption>도구 요청, 상태줄, 훅 모두 이 확인을 거칩니다. 확인값은 맞는데 받지 않은 접속은 사유별로 한 번씩 <code>cypher.log</code>에 남깁니다(확인값이 틀리면 기록 없이 끊습니다).</figcaption>
+</figure>
+<ul>
+  <li>순서: 확인값이 맞는지 본다 → 접속한 프로세스를 찾는다 → 조상을 따라 올라간다 → 적힌 번호와 같은 세션인지 본다.</li>
+  <li>부모가 이미 끝났거나 번호가 다른 프로세스에 다시 쓰인 경우는 "만든 시각"을 비교해 걸러 냅니다(부모는 자식보다 먼저 만들어졌어야 합니다).</li>
+</ul>
+
+<h2 id="scope">5. 다룰 수 있는 범위</h2>
+<p>Claude 세션이 Cypher 도구로 다룰 수 있는 것은 <b>자기와 같은 그룹에 있는 항목</b>뿐입니다. 규칙은 한 줄짜리 판정(<code>canControl</code>)에 모여 있습니다: 둘이 같은 이름 붙인 그룹에 있고, 대상이 터미널 세션이 아닐 것.</p>
+<figure>
+<svg viewBox="0 0 800 340" role="img" aria-label="그룹 경계">
+  <rect class="hi" x="20" y="20" width="340" height="190" rx="10"/>
+  <text x="36" y="44" class="tac">◆ 그룹 A</text>
+  <rect class="b" x="36" y="96" width="120" height="40" rx="8"/><text x="96" y="121" text-anchor="middle" class="h">Claude 세션</text>
+  <rect class="b" x="230" y="58" width="114" height="30" rx="6"/><text x="287" y="78" text-anchor="middle">메모</text>
+  <rect class="b" x="230" y="100" width="114" height="30" rx="6"/><text x="287" y="120" text-anchor="middle">사이트</text>
+  <rect class="b" x="230" y="142" width="114" height="30" rx="6"/><text x="287" y="162" text-anchor="middle">다른 Claude 세션</text>
+  <path class="aok" d="M156 108 L230 76"/><path class="aok" d="M156 116 L230 115"/>
+  <path class="ano" d="M156 126 L230 156"/>
+  <text x="176" y="82" class="tok">✓</text><text x="40" y="162" class="tno">✗ 세션은 안 됨</text>
+
+  <rect class="hi" x="440" y="20" width="340" height="190" rx="10"/>
+  <text x="456" y="44" class="tac">◆ 그룹 B</text>
+  <rect class="b" x="560" y="72" width="114" height="30" rx="6"/><text x="617" y="92" text-anchor="middle">메모</text>
+  <rect class="b" x="560" y="124" width="114" height="30" rx="6"/><text x="617" y="144" text-anchor="middle">사이트</text>
+  <path class="ano" d="M156 100 C 300 30, 460 40, 560 84"/>
+  <text x="364" y="84" class="tno">✗ 다른 그룹</text>
+
+  <rect class="zone" x="20" y="230" width="760" height="94" rx="10"/>
+  <text x="36" y="254" class="h">그룹 없음 (폴더 묶음)</text>
+  <rect class="b" x="36" y="268" width="120" height="40" rx="8"/><text x="96" y="293" text-anchor="middle" class="h">Claude 세션</text>
+  <rect class="b" x="250" y="273" width="114" height="30" rx="6"/><text x="307" y="293" text-anchor="middle">옆의 메모</text>
+  <path class="ano" d="M156 288 L250 288"/><text x="186" y="280" class="tno">✗</text>
+  <rect class="okb" x="470" y="273" width="150" height="30" rx="6"/><text x="545" y="293" text-anchor="middle">새 항목 놓기 · 알림</text>
+  <path class="aok" d="M156 300 C 260 322, 380 316, 470 296"/><text x="634" y="293" class="tok">✓ 이것만 됨</text>
+</svg>
+<figcaption>그룹 없는 것끼리는 같은 폴더에 있어도 서로 다룰 수 없습니다. 맡기려면 세션과 항목을 한 그룹에 넣습니다.</figcaption>
+</figure>
+<table>
+  <tr><th>상황</th><th>결과</th></tr>
+  <tr><td>같은 그룹의 메모·브레인스토밍·사이트·HTTP·문서</td><td>다룰 수 있음</td></tr>
+  <tr><td>다른 그룹의 항목, 그룹 없는 항목</td><td>거절. 목록에도 나오지 않음</td></tr>
+  <tr><td>다른 세션(Claude든 PowerShell이든)</td><td>거절. 다루는 도구 자체가 없음</td></tr>
+  <tr><td>그룹 없는 세션</td><td>새 메모·이미지·문서·브레인스토밍 놓기와 알림만</td></tr>
+  <tr><td>항목이나 세션을 다른 그룹으로 옮김</td><td>그 순간부터 옛 그룹은 거절, 새 그룹은 허용(판정을 매번 새로 함)</td></tr>
+  <tr><td>부른 세션을 알 수 없는 요청</td><td>거절</td></tr>
+</table>
+<p>HTTP 도구는 폴더 기준입니다: 같은 그룹 HTTP 항목의 요청 폴더와 그 세션을 시작한 폴더의 요청 파일(폴더 바로 아래, <code>http</code>, <code>.cypher\http</code>)에만 씁니다.</p>
+<p class="note">사용자가 직접 하는 일(변경 내용에서 고른 줄을 세션에 넣기, 이미지 경로를 세션에 넣기)은 이 제한과 무관합니다. 제한은 "Claude가 도구로 하는 일"에만 겁니다.</p>
+
+<h2 id="profiles">6. 그룹마다 다른 브라우저</h2>
+<p>조작할 수 있는 탭만 나누면 로그인 상태가 샙니다(A 그룹에서 로그인한 사이트에 B 그룹의 Claude가 자기 브라우저로 가면 로그인돼 있음). 그래서 <b>브라우저 프로필(쿠키·저장소가 담기는 폴더)을 그룹마다 따로</b> 씁니다.</p>
+<figure>
+<svg viewBox="0 0 800 290" role="img" aria-label="그룹별 브라우저 프로필">
+  <rect class="hi" x="20" y="20" width="230" height="150" rx="10"/>
+  <text x="36" y="44" class="tac">◆ 그룹 A</text>
+  <rect class="b" x="36" y="58" width="198" height="28" rx="6"/><text x="48" y="77">사이트 항목 1</text>
+  <rect class="b" x="36" y="92" width="198" height="28" rx="6"/><text x="48" y="111">사이트 항목 2</text>
+  <rect class="okb" x="36" y="130" width="198" height="30" rx="6"/><text x="135" y="150" text-anchor="middle">프로필 A · 로그인 A</text>
+
+  <rect class="hi" x="285" y="20" width="230" height="150" rx="10"/>
+  <text x="301" y="44" class="tac">◆ 그룹 B</text>
+  <rect class="b" x="301" y="58" width="198" height="28" rx="6"/><text x="313" y="77">사이트 항목 3</text>
+  <rect class="okb" x="301" y="130" width="198" height="30" rx="6"/><text x="400" y="150" text-anchor="middle">프로필 B · 로그인 B</text>
+
+  <rect class="zone" x="550" y="20" width="230" height="150" rx="10"/>
+  <text x="566" y="44" class="h">그룹 없음</text>
+  <rect class="b" x="566" y="58" width="198" height="28" rx="6"/><text x="578" y="77">사이트 항목 4</text>
+  <rect class="b" x="566" y="130" width="198" height="30" rx="6"/><text x="665" y="150" text-anchor="middle">공용 프로필</text>
+  <text x="566" y="114" class="s">Claude는 조작할 수 없음</text>
+
+  <rect class="zone" x="301" y="92" width="198" height="28" rx="6"/><text x="313" y="111" class="s">사이트 항목 2 (옮겨 옴)</text>
+  <path class="a" d="M234 106 L301 106"/>
+  <text x="400" y="214" text-anchor="middle" class="h">사이트 항목 2를 A → B로 옮기면</text>
+  <text x="400" y="236" text-anchor="middle" class="s">웹뷰를 닫고 프로필 B로 다시 엽니다. 보던 주소는 그대로, 로그인 상태는 B의 것.</text>
+  <text x="400" y="258" text-anchor="middle" class="s">A의 로그인 상태는 따라가지 않고, A의 Claude는 그 항목을 더 조작하지 못합니다.</text>
+</svg>
+<figcaption>"chrome" 엔진(설치된 Chrome·Edge를 띄워 쓰는 방식)도 같습니다. 그룹마다 Chrome을 따로 띄우고 프로필도 따로 씁니다.</figcaption>
+</figure>
+<ul>
+  <li>어느 그룹이 어느 프로필 번호를 쓰는지는 화면이 기억합니다(<code>cypher.profiles</code>). 그룹 <b>이름을 바꿔도</b> 번호는 그대로라 로그인 상태가 유지됩니다.</li>
+  <li>이미 있는 그룹에 합치면 합쳐진 쪽 항목은 그 그룹의 프로필을 씁니다.</li>
+  <li>그룹을 없앴다가 같은 이름으로 다시 만들면 예전 프로필을 다시 씁니다.</li>
+  <li>프로필마다 브라우저 엔진 프로세스가 따로 뜹니다(사이트 항목을 실제로 띄운 그룹만).</li>
+  <li>어느 항목이 어느 프로필을 써야 하는지는 화면이 정해 본체에 알립니다. Claude의 도구 호출이 그와 다른 프로필을 들고 오거나(도구가 도는 사이에 항목이 옮겨짐) 그사이 항목이 닫혔으면 본체는 웹뷰를 만들지 않고 거절합니다.</li>
+  <li>그룹을 없애도 프로필 폴더는 지우지 않습니다. 지우려면 Cypher를 끄고 <code>site-profiles</code>(chrome 엔진은 <code>chrome-profiles</code>) 아래의 폴더를 지웁니다. 폴더 이름은 번호라 어느 그룹의 것인지 드러나지 않으니, 가리기 어렵다면 모두 지우고 그룹마다 다시 로그인합니다.</li>
+</ul>
+
+<h2 id="created">7. 만든 파일을 사이드바에 놓기</h2>
+<p>Claude가 Write 도구로 <b>새 파일</b>을 만들면 종류에 맞는 항목으로 그 세션의 묶음에 놓고 알림으로 알려 줍니다. 보던 화면은 바꾸지 않습니다. "새 파일인지"는 쓰기 직전에 그 파일이 없었는지로 가립니다.</p>
+<figure>
+<svg viewBox="0 0 800 250" role="img" aria-label="만든 파일이 항목이 되는 순서">
+  <rect class="b" x="20" y="30" width="170" height="64" rx="8"/>
+  <text x="34" y="54" class="tac">① 쓰기 직전</text><text x="34" y="74" class="s">그 파일이 지금 없나?</text><text x="34" y="88" class="s">없으면 적어 둠</text>
+  <rect class="b" x="220" y="30" width="170" height="64" rx="8"/>
+  <text x="234" y="54" class="tac">② Claude가 씀</text><text x="234" y="74" class="s">①의 처리가 끝난 뒤에</text><text x="234" y="88" class="s">파일이 생김</text>
+  <rect class="b" x="420" y="30" width="170" height="64" rx="8"/>
+  <text x="434" y="54" class="tac">③ 쓴 직후</text><text x="434" y="74" class="s">적어 둔 파일이면</text><text x="434" y="88" class="s">종류를 가려 화면에 알림</text>
+  <rect class="hi" x="620" y="30" width="160" height="64" rx="8"/>
+  <text x="634" y="54" class="tac">④ 화면</text><text x="634" y="74" class="s">그 세션의 묶음에</text><text x="634" y="88" class="s">항목을 놓고 알림</text>
+  <path class="a" d="M190 62 L220 62"/><path class="a" d="M390 62 L420 62"/><path class="a" d="M590 62 L620 62"/>
+
+  <rect class="okb" x="60" y="140" width="200" height="40" rx="8"/><text x="160" y="165" text-anchor="middle">.md · .txt → 문서 항목</text>
+  <rect class="okb" x="300" y="140" width="200" height="40" rx="8"/><text x="400" y="165" text-anchor="middle">SVG 등 그림 → 이미지 항목</text>
+  <rect class="okb" x="540" y="140" width="200" height="40" rx="8"/><text x="640" y="165" text-anchor="middle">.http → HTTP 항목</text>
+  <text x="400" y="214" text-anchor="middle" class="s">놓지 않는 것: 고쳐 쓴 파일 · 이미 보이는 파일 · 숨김·빌드 폴더 안 · 임시·설정 폴더 · 한 요청의 9번째부터</text>
+  <text x="400" y="234" text-anchor="middle" class="s">명령(Bash 등)으로 만든 파일은 알 수 없습니다. Claude가 doc_show · image_add로 놓을 수 있습니다.</text>
+</svg>
+<figcaption>설정 <code>[session] show_created</code>: <code>"known"</code>(기본), <code>"all"</code>(그 밖의 글자 파일도 문서로), <code>"off"</code>(끔).</figcaption>
+</figure>
+<ul>
+  <li>숨김 폴더·빌드 폴더(<code>.git</code>, <code>node_modules</code>, <code>target</code> 등)인지를 볼 때, 세션이 일하는 폴더 안의 파일은 그 폴더 아래 부분만 보고(프로젝트 자체가 <code>D:\build</code> 같은 곳에 있어도 놓임) 밖의 파일은 경로 전체를 봅니다. 요청 파일 자리인 <code>.cypher\http</code>는 예외로 놓습니다.</li>
+  <li>임시 폴더와 Claude·Cypher의 설정·데이터 폴더에 만든 파일은 놓지 않습니다.</li>
+  <li>그룹 없는 세션이 만든 <code>.http</code>는 그 세션의 시작 폴더가 보는 자리(폴더 바로 아래, <code>http</code>, <code>.cypher\http</code>)의 것만 HTTP 항목이 되고, 다른 폴더의 것은 문서 항목이 됩니다.</li>
+</ul>
+
+<h2 id="storage">8. 어디에 무엇을 저장하나</h2>
+<table>
+  <tr><th>곳</th><th>담는 것</th></tr>
+  <tr><td><code>%APPDATA%\cypher</code></td><td>사용자의 것: 설정(<code>config.toml</code>), 메모, 브레인스토밍, 이미지, 그룹 틀</td></tr>
+  <tr><td><code>%LOCALAPPDATA%\cypher</code></td><td>내부 상태: 세션에 넘기는 설정 파일, 기록(<code>cypher.log</code>), 되돌리기 전 차이, 그룹별 브라우저 프로필(<code>site-profiles</code>, <code>chrome-profiles</code>)</td></tr>
+  <tr><td><code>%LOCALAPPDATA%\dev.cypher.terminal</code></td><td>본창과 그룹 없는 사이트 항목의 브라우저 저장소(공용 프로필). 화면의 저장소도 이 안에 있음</td></tr>
+  <tr><td>화면의 저장소(localStorage)</td><td>열린 항목과 분할 배치, 그룹 목록, 그룹 → 프로필 번호, 알림 기록, 닫은 항목, 모양</td></tr>
+</table>
+<p>Cypher는 사용자의 설정 파일을 고치거나 덮어쓰지 않고, 업데이트 확인·통계·오류 보고 같은 통신을 스스로 하지 않습니다.</p>
+
+<h2 id="limits">9. 막지 못하는 것</h2>
+<p>울타리는 <b>Cypher 도구</b>에 세운 것입니다. 그 바깥은 Cypher가 막을 수 없습니다.</p>
+<ul>
+  <li><b>파일 직접 접근</b>: Claude Code는 자기 권한 설정 안에서 이 컴퓨터의 파일을 읽고 씁니다. 다른 그룹의 메모가 저장된 파일도 파일로는 읽을 수 있습니다. 이것은 Claude Code의 권한 설정으로 다룹니다.</li>
+  <li><b>프로세스 조작</b>: 세션 안에서 통로에 직접 접속해 다른 세션의 번호를 적는 평범한 방법은 막지만, 같은 Windows 사용자 권한으로 다른 프로세스 자체를 조작하는 것(부모 프로세스 위조, 코드 주입)까지 막지는 못합니다.</li>
+  <li><b>같은 폴더를 보는 HTTP 항목</b>: HTTP 규칙은 폴더 기준이라, 두 그룹이 같은 폴더의 요청 파일을 보면 함께 다루게 됩니다.</li>
+</ul>
+
+<h2 id="files">10. 코드 위치</h2>
+<table>
+  <tr><th>하는 일</th><th>파일</th></tr>
+  <tr><td>항목·그룹·분할, 범위 판정(<code>canControl</code>), 도구 요청에 답하기(<code>mcpAction</code>), 프로필 번호(<code>profileOf</code>), 만든 파일 놓기(<code>onCreatedFile</code>)</td><td><code>ui/main.js</code></td></tr>
+  <tr><td>로컬 통로: 확인값, 세션 확인, 상태줄·훅 받기</td><td><code>crates/cypher-app/src/status.rs</code></td></tr>
+  <tr><td>접속한 프로세스의 조상 추적</td><td><code>crates/cypher-app/src/peer.rs</code></td></tr>
+  <tr><td>도구 목록과 실행, 화면에 묻기(<code>ask_ui</code>), HTTP 범위</td><td><code>crates/cypher-app/src/mcp.rs</code>, <code>browser.rs</code>, <code>http.rs</code></td></tr>
+  <tr><td>사이트 웹뷰와 그룹별 프로필</td><td><code>crates/cypher-app/src/site.rs</code>, <code>ui/site.js</code></td></tr>
+  <tr><td>"chrome" 엔진(그룹별 Chrome)</td><td><code>crates/cypher-app/src/chrome.rs</code></td></tr>
+  <tr><td>새 파일 판정과 종류 가리기</td><td><code>crates/cypher-app/src/created.rs</code></td></tr>
+  <tr><td>세션에 끼워 넣는 설정(상태줄·훅·도구)</td><td><code>crates/cypher-app/src/claude.rs</code>, <code>commands.rs</code>, <code>main.rs</code></td></tr>
+  <tr><td>경로 비교(대소문자, <code>..</code>)</td><td><code>crates/cypher-app/src/paths.rs</code></td></tr>
+  <tr><td>전달 프로그램</td><td><code>crates/cypher-bridge/src/main.rs</code></td></tr>
+  <tr><td>설정 파일</td><td><code>crates/cypher-core/src/config.rs</code></td></tr>
+</table>
+<p>사용법과 단축키, 도구별 설명은 저장소의 <code>README.md</code>에 있습니다.</p>
+</main>
+</body>
+</html>

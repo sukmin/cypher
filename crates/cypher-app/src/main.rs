@@ -19,6 +19,7 @@ mod memory;
 mod mindmap;
 mod site;
 mod monitor;
+mod paths;
 mod peer;
 mod reader;
 mod status;
@@ -250,6 +251,8 @@ fn main() {
                 config_error,
                 config_path,
             });
+            // 그룹별 브라우저 프로필이 한 폴더로 합쳐지지 않게 한다(본창의 웹뷰가 만들어진 뒤여야 한다).
+            site::adopt_data_folder_override(app.handle());
             monitor::start(app.handle().clone());
             drops::watch(app.handle());
             Ok(())
@@ -297,6 +300,7 @@ fn main() {
             site::site_navigate,
             site::site_action,
             site::site_close,
+            site::site_profile,
             site::site_capture,
             image::image_import,
             image::image_pick,

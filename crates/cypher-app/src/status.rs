@@ -11,9 +11,11 @@
 
 use serde::Serialize;
 use serde_json::Value;
+use std::collections::HashSet;
 use std::io::{BufRead, BufReader, Read};
 use std::net::{TcpListener, TcpStream};
 use std::path::PathBuf;
+use std::sync::{LazyLock, Mutex};
 use std::thread;
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
@@ -108,10 +110,36 @@ fn owner_of(app: &AppHandle, stream: &TcpStream) -> Option<u32> {
 fn log_refused(claimed: Option<u32>, owner: Option<u32>) {
     /// (적힌 번호, 실제 세션)
     type Reason = (Option<u32>, Option<u32>);
-    static SEEN: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<Reason>>> = std::sync::LazyLock::new(Default::default);
+    static SEEN: LazyLock<Mutex<HashSet<Reason>>> = LazyLock::new(Default::default);
     let mut seen = SEEN.lock().unwrap();
     if seen.len() < 200 && seen.insert((claimed, owner)) {
         crate::log(&format!("통로: 받지 않은 접속(적힌 세션 {claimed:?}, 실제 {owner:?}). 같은 사유는 다시 적지 않습니다."));
+    }
+}
+
+/// 접속의 둘째 줄: 무엇을 하러 왔고, 몇 번 세션이라고 하는지.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Kind {
+    /// `mcp <세션 번호>`: Cypher 도구용 연결(계속 이어진다).
+    Mcp(u32),
+    /// `<세션 번호>`: 상태줄이나 훅 신호 하나(한 번 보내고 끊는다).
+    Signal(u32),
+}
+
+impl Kind {
+    fn read(line: &str) -> Option<Kind> {
+        let line = line.trim();
+        match line.strip_prefix("mcp ") {
+            Some(session) => session.trim().parse().ok().map(Kind::Mcp),
+            None => line.parse().ok().map(Kind::Signal),
+        }
+    }
+
+    /// 보낸 쪽이 적은 세션 번호.
+    fn session(self) -> u32 {
+        match self {
+            Kind::Mcp(session) | Kind::Signal(session) => session,
+        }
     }
 }
 
@@ -129,27 +157,28 @@ fn accept(app: AppHandle, token: &str, stream: TcpStream) {
     if reader.read_line(&mut line).is_err() {
         return;
     }
-    let kind = line.trim_end();
     // 적힌 세션 번호가 접속한 프로세스의 세션과 다르면(다른 세션인 척하거나, 세션 밖의 프로세스) 받지 않는다.
-    let claimed = kind.strip_prefix("mcp").unwrap_or(kind).trim().parse::<u32>().ok();
+    let kind = Kind::read(&line);
+    let claimed = kind.map(Kind::session);
     if owner.is_none() || claimed != owner {
         log_refused(claimed, owner);
         return;
     }
-    // `mcp <세션 번호>`: Cypher 도구용 연결.
-    if let Some(rest) = kind.strip_prefix("mcp").filter(|rest| rest.starts_with(' ')) {
-        let session = rest.trim().parse::<u32>().ok();
-        // MCP 연결은 요청 사이에 오래 조용할 수 있다. 읽는 쪽 손잡이의 시간 제한을 직접 푼다
-        // (복제한 손잡이에서 풀어도 읽는 쪽에는 적용되지 않는다).
-        let _ = reader.get_ref().set_read_timeout(None);
-        crate::mcp::serve(app, session, reader, writer);
-        return;
-    }
+    let id = match kind {
+        Some(Kind::Mcp(session)) => {
+            // MCP 연결은 요청 사이에 오래 조용할 수 있다. 읽는 쪽 손잡이의 시간 제한을 직접 푼다
+            // (복제한 손잡이에서 풀어도 읽는 쪽에는 적용되지 않는다).
+            let _ = reader.get_ref().set_read_timeout(None);
+            return crate::mcp::serve(app, Some(session), reader, writer);
+        }
+        Some(Kind::Signal(id)) => id,
+        None => return,
+    };
     let mut body = String::new();
     if reader.take(MAX_BODY).read_to_string(&mut body).is_err() {
         return;
     }
-    let _ = match parse(kind, &body) {
+    let _ = match parse(id, &body) {
         Some(Message::Status(payload)) => app.emit("session-status", payload),
         Some(Message::Hook(payload)) => app.emit("session-hook", payload),
         Some(Message::WillWrite { id, path }) => {
@@ -166,8 +195,7 @@ fn accept(app: AppHandle, token: &str, stream: TcpStream) {
 }
 
 /// 상태줄 JSON과 훅 JSON이 같은 통로로 온다. 훅에는 `hook_event_name`이 있다.
-fn parse(session: &str, body: &str) -> Option<Message> {
-    let id = session.trim().parse().ok()?;
+fn parse(id: u32, body: &str) -> Option<Message> {
     let v: Value = serde_json::from_str(body).ok()?;
     let text = |v: &Value| v.as_str().map(str::to_string);
     if let Some(event) = text(&v["hook_event_name"]) {
@@ -233,18 +261,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn 둘째_줄에서_종류와_세션_번호를_읽는다() {
+        assert_eq!(Kind::read("3\n"), Some(Kind::Signal(3)));
+        assert_eq!(Kind::read("mcp 12\r\n"), Some(Kind::Mcp(12)));
+        assert_eq!(Kind::read("mcp 12").map(Kind::session), Some(12));
+        // 번호가 없거나 모양이 다르면 받지 않는다.
+        for bad in ["", "mcp", "mcp ", "mcpx 3", "mcp3", "mcp 3 4", "-1", "세션"] {
+            assert_eq!(Kind::read(bad), None, "{bad:?}");
+        }
+    }
+
+    #[test]
     fn 쓰기_도구의_신호에서_파일_경로를_꺼낸다() {
         let pre = r#"{"hook_event_name":"PreToolUse","tool_name":"Write","cwd":"C:\\ws\\proj","tool_input":{"file_path":"C:/ws/proj/docs/계획.md","content":"계획 글"}}"#;
-        let Some(Message::WillWrite { id, path }) = parse("4", pre) else { panic!("쓰기 직전 신호로 읽혀야 한다") };
+        let Some(Message::WillWrite { id, path }) = parse(4, pre) else { panic!("쓰기 직전 신호로 읽혀야 한다") };
         assert_eq!((id, path), (4, PathBuf::from(r"C:\ws\proj\docs\계획.md")));
 
         let post = r#"{"hook_event_name":"PostToolUse","tool_name":"Write","cwd":"C:\\ws\\proj","tool_input":{"file_path":"notes/a.txt"},"tool_response":{"type":"create","filePath":"x"}}"#;
-        let Some(Message::Wrote { id, path, base }) = parse("4", post) else { panic!("쓴 직후 신호로 읽혀야 한다") };
+        let Some(Message::Wrote { id, path, base }) = parse(4, post) else { panic!("쓴 직후 신호로 읽혀야 한다") };
         assert_eq!((id, path, base), (4, PathBuf::from(r"C:\ws\proj\notes\a.txt"), Some(PathBuf::from(r"C:\ws\proj"))));
 
         // 긴 경로 표시는 떼어 내고, 세션 폴더를 모르면 base가 없다.
         let long = r#"{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"\\\\?\\C:\\a.md"}}"#;
-        let Some(Message::Wrote { path, base, .. }) = parse("4", long) else { panic!("쓴 직후 신호로 읽혀야 한다") };
+        let Some(Message::Wrote { path, base, .. }) = parse(4, long) else { panic!("쓴 직후 신호로 읽혀야 한다") };
         assert_eq!((path, base), (PathBuf::from(r"C:\a.md"), None));
         // 다른 도구의 신호, 경로를 알 수 없는 신호, 네트워크 경로·드라이브 상대 경로는 버린다.
         for other in [
@@ -257,14 +296,14 @@ mod tests {
             r#"{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{}}"#,
             r#"{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"상대.md"}}"#,
         ] {
-            assert!(parse("4", other).is_none(), "{other}");
+            assert!(parse(4, other).is_none(), "{other}");
         }
     }
 
     #[test]
     fn 상태줄_내용에서_모델과_effort를_꺼낸다() {
         let body = r#"{"cwd":"C:\\ws","model":{"id":"claude-fable-5-2","display_name":"Fable 5.2"},"effort":{"level":"high"},"context_window":{"used_percentage":8},"rate_limits":{"seven_day":{"used_percentage":86}}}"#;
-        let Some(Message::Status(p)) = parse("7", body) else {
+        let Some(Message::Status(p)) = parse(7, body) else {
             panic!("상태줄로 읽혀야 한다");
         };
         assert_eq!(p.id, 7);
@@ -278,7 +317,7 @@ mod tests {
     #[test]
     fn 훅_알림을_구분한다() {
         let body = r#"{"hook_event_name":"Notification","notification_type":"permission_prompt","message":"승인이 필요합니다"}"#;
-        let Some(Message::Hook(h)) = parse("3", body) else {
+        let Some(Message::Hook(h)) = parse(3, body) else {
             panic!("훅으로 읽혀야 한다");
         };
         assert_eq!((h.id, h.event.as_str()), (3, "Notification"));
@@ -287,7 +326,7 @@ mod tests {
         assert_eq!(h.agent, None); // 본 세션이 낸 신호
 
         let body = r#"{"hook_event_name":"SubagentStart","agent_id":"agent-abc123","agent_type":"Explore"}"#;
-        let Some(Message::Hook(h)) = parse("3", body) else {
+        let Some(Message::Hook(h)) = parse(3, body) else {
             panic!("훅으로 읽혀야 한다");
         };
         assert_eq!((h.event.as_str(), h.agent.as_deref()), ("SubagentStart", Some("agent-abc123")));
@@ -295,7 +334,6 @@ mod tests {
 
     #[test]
     fn 세션_번호나_내용이_잘못되면_버린다() {
-        assert!(parse("세션", "{}").is_none());
-        assert!(parse("1", "JSON 아님").is_none());
+        assert!(parse(1, "JSON 아님").is_none());
     }
 }

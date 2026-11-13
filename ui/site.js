@@ -4,7 +4,11 @@
 // 여기서는 그 웹뷰가 놓일 자리(빈 칸)만 만들고, 자리의 위치·크기를 앱에 알려 웹뷰를 그 위에 겹쳐 놓게 한다.
 // 웹뷰는 화면 요소보다 항상 위에 그려지므로, 메뉴·대화상자가 열리거나 무언가를 끄는 동안에는 잠시 숨긴다.
 
-// { invoke, listen, make, setStatus, showMenu, captured(찍은 그림, 이 항목), zoom(), claudes(항목), controller(항목), handoff(항목, 세션) }
+// { invoke, listen, make, setStatus, showMenu, captured(찍은 그림, 이 항목), zoom(), claudes(항목), controller(항목), handoff(항목, 세션),
+//   profile(항목) → 그 항목의 그룹이 쓰는 브라우저 프로필의 번호(그룹이 없으면 빈 글) }
+//
+// 로그인 상태는 같은 그룹의 사이트 항목끼리만 함께 쓴다(그룹마다 브라우저 프로필이 따로다).
+// 항목이 다른 그룹으로 옮겨지면 웹뷰를 닫고 새 그룹의 프로필로 다시 연다(보던 주소는 그대로, 로그인 상태는 새 그룹의 것).
 let api = null;
 const BOOKMARKS_KEY = 'cypher.bookmarks';
 const views = new Map(); // 항목 번호 → { sync, changed }
@@ -62,7 +66,26 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
   let home = saved.home || url;                   // 처음 간 주소(⌂ 단추)
   let title = saved.title || '';
   let opened = false;                             // 웹뷰를 만들었는지(처음 화면에 보일 때 만든다)
+  let openedProfile = '';                         // 그 웹뷰를 어느 프로필로 만들었는지
+  let toldProfile = null;                         // 앱에 알려 둔 "이 항목이 써야 하는 프로필"
+  let told = Promise.resolve();                   // 앱에 프로필을 알리는 일의 줄(보낸 순서대로 처리되게 한다)
+
+  /**
+   * 이 항목이 써야 하는 프로필을 앱에 알린다. 앱은 다른 프로필로 뜬 웹뷰를 닫고, 그 뒤로는 이 프로필로만 만든다
+   * (Claude의 도구 호출이 옛 그룹의 프로필을 들고 뒤늦게 와도 받지 않는다).
+   * 알리는 일은 앞의 것이 끝난 뒤에 보낸다: 그룹을 연달아 옮겼을 때 늦게 보낸 것이 먼저 처리되면 앱이 옛 프로필로 알게 된다.
+   * 돌려주는 약속은 앱이 여기까지 알게 된 때 끝난다.
+   */
+  function tell(profile) {
+    if (profile !== toldProfile) {
+      toldProfile = profile;
+      retold = true;
+      told = told.then(() => invoke('site_profile', { id, profile })).catch((err) => setStatus(String(err)));
+    }
+    return told;
+  }
   let opening = false;
+  let retold = false;                             // 여는 동안 앱에 다른 프로필을 알렸는지(그랬다면 앱이 그 웹뷰를 닫았을 수 있다)
   let last = '';                                  // 마지막으로 알린 자리
   let disposed = false;
 
@@ -197,20 +220,38 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
     const zoom = api.zoom();
     const bounds = { x: rect.left * zoom, y: rect.top * zoom, width: rect.width * zoom, height: rect.height * zoom };
     const now = visible ? `${bounds.x},${bounds.y},${bounds.width},${bounds.height}` : 'hidden';
+    const profile = api.profile(item);
+    tell(profile);
+    // 그룹이 바뀌어 프로필이 달라졌으면 다시 연다(보이는 중이면 아래에서 바로, 아니면 다시 보일 때).
+    if (opened && profile !== openedProfile) {
+      opened = false;
+      last = '';
+    }
     if (!opened) {
       if (!visible || opening) return;
       opening = true;
+      retold = false;
       try {
-        setUrl(await invoke('site_open', { id, url: url || 'about:blank', ...bounds }));
-        opened = true;
-        last = now;
+        await told; // 앞서 알린 프로필이 앱에 닿은 뒤에 연다.
+        // 기다리는 사이에 그룹이 또 바뀌었으면 이번에는 열지 않는다(아래의 syncSites가 새 프로필로 다시 온다).
+        if (!disposed && !retold) {
+          const at = await invoke('site_open', { id, url: url || 'about:blank', ...bounds, profile });
+          // 여는 사이에 다른 프로필을 알렸다면(그룹을 연달아 옮김) 앱이 이 웹뷰를 닫았을 수 있다.
+          // 열린 것으로 치지 않고 지금의 프로필로 다시 연다(같은 프로필의 웹뷰가 남아 있으면 앱은 그것을 그대로 쓴다).
+          if (!retold) {
+            setUrl(at);
+            opened = true;
+            openedProfile = profile;
+            last = now;
+          }
+        }
       } catch (err) {
         $note.textContent = `페이지를 열지 못했습니다: ${err}`;
       } finally {
         opening = false;
       }
       if (disposed) invoke('site_close', { id });
-      else syncSites(); // 여는 사이에 자리가 바뀌었을 수 있다.
+      else syncSites(); // 여는 사이에 자리나 그룹이 바뀌었을 수 있다.
       return;
     }
     if (now === last) return;
@@ -240,6 +281,8 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
     title: () => title || hostOf(url) || '새 사이트',
     /** 지금 주소(빈 페이지면 빈 글). */
     url: () => url,
+    /** 이 항목이 써야 하는 프로필을 앱에 알리고, 앱이 알게 될 때까지 기다린다(Claude의 도구가 이 항목을 쓰기 직전에 부른다). */
+    assign: (profile) => tell(profile),
     /** 다시 시작할 때 되살릴 내용: 보던 주소와 처음 간 주소. */
     state: () => ({ url, home, title }),
     close: async () => true,
@@ -247,7 +290,8 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
       disposed = true;
       observer.disconnect();
       views.delete(id);
-      invoke('site_close', { id });
+      // 알리던 것이 남아 있으면 그 뒤에 닫는다(닫은 뒤에 닿으면 없는 항목의 프로필이 앱에 남는다).
+      told.then(() => invoke('site_close', { id }));
     },
   };
 }

@@ -6,6 +6,7 @@
 //! 웹 페이지 쪽 웹뷰에는 어떤 앱 명령 권한도 주지 않는다(capabilities 참고).
 //!
 //! 설정에서 엔진을 "chrome"으로 바꾸면 사이트 항목 대신 설치된 Chrome·Edge를 띄워 조작한다(`chrome.rs`).
+//! 어느 엔진이든 브라우저(프로필)는 그룹마다 따로다: 세션은 자기 그룹의 브라우저만 조작하고, 로그인 상태도 그룹끼리 섞이지 않는다.
 
 use serde_json::{json, Value};
 use std::sync::mpsc;
@@ -53,47 +54,58 @@ fn chrome_engine(app: &AppHandle) -> bool {
     app.state::<crate::AppState>().config.browser.engine.eq_ignore_ascii_case("chrome")
 }
 
-/// "chrome" 엔진의 브라우저를 띄운다. 이미 떠 있으면 앞으로 가져오고, 주소가 있으면 그리로 간다.
-fn open_chrome(app: &AppHandle, url: Option<&str>) -> Result<(), String> {
+/// "chrome" 엔진에서 그 프로필(그룹)의 브라우저를 띄운다. 이미 떠 있으면 앞으로 가져오고, 주소가 있으면 그리로 간다.
+fn open_chrome(app: &AppHandle, profile: &str, url: Option<&str>) -> Result<(), String> {
     let settings = &app.state::<crate::AppState>().config.browser;
-    crate::chrome::open(&settings.chrome_path, &settings.home, url)
+    crate::chrome::open(profile, &settings.chrome_path, &settings.home, url)
+}
+
+/// 화면이 건넨 프로필 번호를 확인한다. 없거나 빈 글이면 그룹 없는 곳의 브라우저(공용 프로필)다.
+fn chrome_profile(profile: Option<String>) -> Result<String, String> {
+    let profile = profile.unwrap_or_default();
+    if !profile.is_empty() {
+        crate::site::profile_key(&profile)?;
+    }
+    Ok(profile)
 }
 
 // ───────────────────────── 화면에서 부르는 명령("chrome" 엔진 전용) ─────────────────────────
 
-/// 설치된 Chrome(또는 Edge)을 Cypher 전용 프로필로 띄운다.
+/// 설치된 Chrome(또는 Edge)을 Cypher 전용 프로필로 띄운다. `profile`은 지금 보고 있는 항목의 그룹이 쓰는 프로필의 번호.
 #[tauri::command]
-pub async fn browser_open(app: AppHandle, url: Option<String>) -> Result<(), String> {
+pub async fn browser_open(app: AppHandle, url: Option<String>, profile: Option<String>) -> Result<(), String> {
     if !chrome_engine(&app) {
         return Err("브라우저는 사이드바의 사이트 항목으로 엽니다".into());
     }
-    open_chrome(&app, url.as_deref()).inspect_err(|problem| crate::log(&format!("브라우저 열기 실패: {problem}")))
+    open_chrome(&app, &chrome_profile(profile)?, url.as_deref()).inspect_err(|problem| crate::log(&format!("브라우저 열기 실패: {problem}")))
 }
 
-/// 지금 Chrome에 열려 있는 페이지 주소. 닫혀 있으면 None.
+/// 그 프로필의 Chrome에 지금 열려 있는 페이지 주소. 닫혀 있으면 None.
 #[tauri::command]
-pub async fn browser_where(app: AppHandle) -> Option<String> {
-    if chrome_engine(&app) { crate::chrome::current_url() } else { None }
+pub async fn browser_where(app: AppHandle, profile: Option<String>) -> Option<String> {
+    if chrome_engine(&app) { crate::chrome::current_url(&chrome_profile(profile).ok()?) } else { None }
 }
 
 /// Chrome에 보이는 화면(또는 `full`이면 페이지 전체)을 찍어 이미지 항목으로 만든다.
 /// 찍은 그림은 저장소에 넣고 본창에 알린다. 본창이 지금 보고 있는 항목의 그룹에 이미지 항목을 만든다.
 #[tauri::command]
-pub async fn browser_capture(app: AppHandle, full: Option<bool>) -> Result<(), String> {
-    if !chrome_engine(&app) || !crate::chrome::is_open() {
+pub async fn browser_capture(app: AppHandle, full: Option<bool>, profile: Option<String>) -> Result<(), String> {
+    let profile = chrome_profile(profile)?;
+    if !chrome_engine(&app) || !crate::chrome::is_open(&profile) {
         return Err("브라우저가 열려 있지 않습니다".into());
     }
-    let captured = crate::image::capture(&crate::chrome::cdp, full.unwrap_or(false))
+    let captured = crate::image::capture(&|method, params| crate::chrome::cdp(&profile, method, params), full.unwrap_or(false))
         .inspect_err(|problem| crate::log(&format!("브라우저 캡처 실패: {problem}")))?;
     app.emit_to("main", "image-captured", captured).map_err(err)
 }
 
 // ───────────────────────── 개발자 도구 프로토콜 ─────────────────────────
 
-/// 도구가 조작하는 대상: 사이트 항목의 웹뷰, 또는 "chrome" 엔진이 띄운 브라우저.
+/// 도구가 조작하는 대상: 사이트 항목의 웹뷰, 또는 "chrome" 엔진이 그 그룹의 프로필로 띄운 브라우저.
 enum Target {
     Site(Box<tauri::Webview>),
-    Chrome,
+    /// 프로필 번호.
+    Chrome(String),
 }
 
 impl Target {
@@ -101,7 +113,7 @@ impl Target {
     fn cdp(&self, method: &str, params: Value) -> Result<Value, String> {
         match self {
             Target::Site(webview) => webview_cdp(webview, method, params),
-            Target::Chrome => crate::chrome::cdp(method, params),
+            Target::Chrome(profile) => crate::chrome::cdp(profile, method, params),
         }
     }
 }
@@ -430,16 +442,18 @@ fn run(target: &Target, name: &str, args: &Value) -> ToolResult {
 pub fn call(app: &AppHandle, session: Option<u32>, name: &str, args: &Value) -> ToolResult {
     let choosing = matches!(name, "browser_tabs" | "browser_select");
     if chrome_engine(app) {
-        // 이 엔진의 브라우저는 사이드바 항목이 아니지만, 부른 세션을 알 수 없거나 그룹에 들지 않은 세션에는 맡기지 않는다.
-        crate::mcp::ask_ui(app, "chrome_scope", json!({ "session": session }))?;
+        // 이 엔진의 브라우저는 사이드바 항목이 아니라 그룹마다 하나씩 따로 띄우는 Chrome이다. 부른 세션의 그룹이 쓰는
+        // 프로필을 화면에 물어 그 브라우저만 조작한다(부른 세션을 알 수 없거나 그룹에 들지 않은 세션이면 화면이 거절한다).
+        let scope = crate::mcp::ask_ui(app, "chrome_scope", json!({ "session": session }))?;
+        let profile = crate::site::profile_key(scope["profile"].as_str().unwrap_or(""))?.to_string();
         if choosing {
-            return Ok(text("브라우저 엔진이 chrome으로 설정되어 있어 브라우저는 하나뿐입니다(Cypher 전용 프로필의 Chrome)."));
+            return Ok(text("브라우저 엔진이 chrome으로 설정되어 있어 이 그룹의 브라우저는 하나뿐입니다(이 그룹 전용 프로필의 Chrome)."));
         }
-        if !crate::chrome::is_open() {
-            open_chrome(app, None)?;
+        if !crate::chrome::is_open(&profile) {
+            open_chrome(app, &profile, None)?;
             thread::sleep(Duration::from_millis(800));
         }
-        return run(&Target::Chrome, name, args);
+        return run(&Target::Chrome(profile), name, args);
     }
     if choosing {
         // 고를 브라우저의 번호는 `site`로 넘긴다(`id`는 화면에 묻는 요청의 번호로 쓰인다).
@@ -449,8 +463,10 @@ pub fn call(app: &AppHandle, session: Option<u32>, name: &str, args: &Value) -> 
     // 어느 사이트 항목을 조작할지는 화면이 정한다. 이동하라는 요청이면, 그룹에 브라우저가 없을 때 새로 만든다.
     let found = crate::mcp::ask_ui(app, "browser_target", json!({ "session": session, "create": name == "browser_navigate" }))?;
     let id = found["key"].as_u64().and_then(|n| u32::try_from(n).ok()).ok_or("조작할 브라우저를 찾지 못했습니다")?;
-    crate::site::ensure(app, id, found["url"].as_str().unwrap_or("about:blank"))?;
-    let mut content = crate::site::with_shown(app, id, |webview| run(&Target::Site(Box::new(webview.clone())), name, args))??;
+    // 그 사이트 항목의 그룹이 쓰는 프로필로 웹뷰를 만든다(화면이 알려 준다).
+    let webview = crate::site::ensure(app, id, found["url"].as_str().unwrap_or("about:blank"), found["profile"].as_str().unwrap_or(""))?;
+    // 방금 받은 그 웹뷰만 조작한다(이름으로 다시 찾으면, 그사이 항목이 옮겨져 다시 만들어진 다른 프로필의 웹뷰일 수 있다).
+    let mut content = crate::site::with_shown_on(&webview, |webview| run(&Target::Site(Box::new(webview.clone())), name, args))?;
     if let Some(note) = found["note"].as_str().filter(|note| !note.is_empty()) {
         content.push(json!({ "type": "text", "text": note }));
     }

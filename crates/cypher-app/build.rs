@@ -16,7 +16,7 @@ const MAIN: &[&str] = &[
     "template_list", "template_save", "template_read", "template_remove", "template_folder", "dirs_exist",
     "memory_info", "memory_export", "memory_import", "memory_open",
     "memo_read", "memo_write", "memo_remove", "text_open", "text_save",
-    "site_open", "site_bounds", "site_navigate", "site_action", "site_close", "site_capture",
+    "site_open", "site_bounds", "site_navigate", "site_action", "site_close", "site_capture", "site_profile",
     "image_import", "image_pick", "image_paste", "image_store", "image_fetch", "image_read", "image_info",
     "image_remove", "image_export", "image_copy", "drop_classify",
     "clipboard_read", "paste_preview", "clipboard_write",

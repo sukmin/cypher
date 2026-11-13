@@ -84,6 +84,10 @@ let visible = [];               // 나란히 보이는 세션(왼쪽 위부터 �
 let active = null;
 let seq = 0;
 let config = null;
+/** 워크트리 세션을 여는 길(사이드바 단추, 사이드바 메뉴, 빠른 이동의 명령)을 화면에 내놓을지. 잘 쓰이지 않아 숨겨 둔다. 기능(newWorktree)은 그대로 있다. */
+const SHOW_WORKTREE = false;
+/** 워크트리 세션을 열 수 있는지: 내놓기로 했고 Claude 프로필이 있을 때. */
+const offersWorktree = () => SHOW_WORKTREE && config.profiles.some((p) => p.id === 'claude');
 let folder = '';
 let lastProfile = 'claude';
 let broadcast = false;
@@ -99,6 +103,10 @@ try { collapsed = new Set(JSON.parse(localStorage.getItem('cypher.collapsed') ||
 let storeDirs = {};            // 메모·브레인스토밍·이미지를 두는 폴더(같은 그룹의 Claude 세션에 경로를 알려 줄 때 쓴다)
 let groupList = [];            // 만들어 둔 그룹 이름(세션이 없어도 남는다)
 try { groupList = JSON.parse(localStorage.getItem('cypher.groups') || '[]'); } catch { /* 무시 */ }
+// 그룹 이름 → 그 그룹이 쓰는 브라우저 프로필의 번호. 그룹 이름을 바꿔도 번호는 그대로라 로그인 상태가 유지된다.
+// (그룹 이름이 무엇이든 열쇠로 쓸 수 있게 원형이 없는 객체에 담는다.)
+let groupProfiles = Object.create(null);
+try { Object.assign(groupProfiles, JSON.parse(localStorage.getItem('cypher.profiles') || '{}')); } catch { /* 무시 */ }
 let recentFolders = [];        // 세션을 시작했던 폴더(최근 것이 앞)
 try { recentFolders = JSON.parse(localStorage.getItem('cypher.folders') || '[]'); } catch { /* 무시 */ }
 let promptLog = [];            // 프롬프트 편집기에서 보낸 글(최근 것이 뒤)
@@ -130,7 +138,7 @@ async function init() {
   for (const p of config.profiles) {
     addButton(`+ ${p.label}`, `${p.program} ${p.args.join(' ')}`.trim(), (show) => newSession(p.id, { show }));
   }
-  if (config.profiles.some((p) => p.id === 'claude')) {
+  if (offersWorktree()) {
     addButton('+ 워크트리', '새 git 워크트리에서 Claude 시작', newWorktree);
   }
   // 터미널이 아닌 항목(메모, HTTP …)
@@ -163,6 +171,8 @@ async function init() {
     zoom: () => currentLook().zoom,
     // 이 브라우저를 넘겨받을 수 있는 Claude 세션: 같은 이름 붙인 그룹에서 돌고 있는 것.
     claudes: (item) => controllersOf(item).map((s) => ({ s, label: label(s) })),
+    // 이 사이트 항목의 그룹이 쓰는 브라우저 프로필. 항목이 다른 그룹으로 옮겨지면 그 그룹의 프로필로 다시 연다.
+    profile: (item) => ensureProfile(item),
     // 지금 이 브라우저를 조작하는 Claude 세션의 이름(없으면 빈 글).
     controller: (item) => { const by = [...sessions.values()].find((s) => s.browser === item.key && !s.exited && canControl(s, item)); return by ? label(by) : ''; },
     handoff: handoffSite,
@@ -1222,6 +1232,30 @@ function saveGroups() {
   localStorage.setItem('cypher.groups', JSON.stringify(groupList));
 }
 
+const saveProfiles = () => localStorage.setItem('cypher.profiles', JSON.stringify(groupProfiles));
+
+/**
+ * 그 항목의 그룹이 쓰는 브라우저 프로필의 번호. 브라우저의 로그인 상태는 프로필마다 따로라서, 한 그룹에서 로그인해 둔
+ * 계정을 다른 그룹의 브라우저나 Claude 세션이 쓸 수 없다. 그룹이 없는 항목과, 아직 브라우저를 쓴 적이 없는 그룹은 빈 글이다.
+ */
+function profileOf(item) {
+  const id = item?.group ? groupProfiles[item.group] : '';
+  return typeof id === 'string' && /^[a-z0-9]{1,40}$/.test(id) ? id : '';
+}
+
+/** 브라우저를 띄울 때 쓴다: 그 항목의 그룹이 쓰는 프로필의 번호를 돌려주고, 아직 없으면 만든다. 그룹이 없으면 빈 글(공용 프로필). */
+function ensureProfile(item) {
+  if (!item?.group) return '';
+  if (!profileOf(item)) {
+    groupProfiles[item.group] = `p${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
+    saveProfiles();
+  }
+  return groupProfiles[item.group];
+}
+
+/** 지금 보고 있는 항목(닫힌 것이면 null). */
+const viewing = () => (active && sessions.has(active.key) ? active : null);
+
 /** 그룹을 목록에 올린다. 올려 둔 그룹은 세션이 없어도 사이드바에 남는다. */
 function ensureGroup(name) {
   if (!name || groupList.includes(name)) return;
@@ -1255,8 +1289,17 @@ async function renameGroup(group, live) {
   const name = await ask('그룹 이름', '', group.name);
   if (!name || name === group.name) return;
   // 같은 이름의 그룹이 이미 있으면 그쪽으로 합쳐진다.
+  const merging = groupList.includes(name) || [...sessions.values()].some((s) => s.group === name);
   groupList = [...new Set(groupList.map((g) => (g === group.name ? name : g)))];
   saveGroups();
+  // 이름만 바꾼 것이면 브라우저 프로필(로그인 상태)이 새 이름을 따라간다. 그 이름으로 예전에 없앤 그룹의 프로필이
+  // 남아 있어도 지금 이 그룹의 것으로 바꾼다. 이미 있는 그룹에 합치는 것이면 옮겨 가는 항목들이 그 그룹의 프로필을 쓴다.
+  if (!merging) {
+    if (groupProfiles[group.name]) groupProfiles[name] = groupProfiles[group.name];
+    else delete groupProfiles[name];
+    delete groupProfiles[group.name];
+    saveProfiles();
+  }
   moveToGroup(live, name);
 }
 
@@ -1570,6 +1613,7 @@ function render() {
       active.agents.size ? `서브에이전트 ${active.agents.size}` : ''].filter(Boolean).join(' · ')
     : '';
 
+  syncSites(); // 그룹이 바뀐 사이트 항목은 새 그룹의 브라우저 프로필로 다시 연다.
   const waitingCount = [...sessions.values()].filter((s) => s.waiting).length;
   const $waiting = $('waiting');
   $waiting.textContent = `대기 ${waitingCount}`;
@@ -1665,7 +1709,7 @@ function showOnly(s) {
 /** 사이드바의 빈 곳을 오른쪽 클릭했을 때의 메뉴: 새로 열기, 그룹, 보기 방식. */
 function sidebarMenu(ev) {
   const items = config.profiles.map((p) => ({ label: `새 ${p.label} 세션`, action: () => newSession(p.id) }));
-  if (config.profiles.some((p) => p.id === 'claude')) {
+  if (offersWorktree()) {
     items.push({ label: '새 워크트리 세션…', action: () => newWorktree('replace') });
   }
   for (const [kind, def] of Object.entries(KINDS)) items.push({ label: `새 ${def.label}`, action: () => createKind(kind) });
@@ -1721,7 +1765,7 @@ function paletteEntries() {
   const command = (title, action, note = '명령') => ({ icon: '⌘', title, note, action });
   const commands = [
     ...config.profiles.map((p) => command(`새 ${p.label} 세션`, () => newSession(p.id), `명령 · 폴더: ${folder}`)),
-    ...(config.profiles.some((p) => p.id === 'claude') ? [command('새 워크트리 세션…', () => newWorktree('replace'))] : []),
+    ...(offersWorktree() ? [command('새 워크트리 세션…', () => newWorktree('replace'))] : []),
     ...Object.entries(KINDS).map(([kind, def]) => command(`새 ${def.label}`, () => createKind(kind))),
     command('새 그룹 만들기…', newGroup),
     command('닫은 항목 다시 열기…', showClosed, '명령 · Ctrl+Shift+R: 가장 나중에 닫은 것'),
@@ -1861,6 +1905,10 @@ const canControl = (s, target) => !!s?.group && !!target && target !== s && targ
 const controllersOf = (item) => [...sessions.values()].filter((s) => aliveClaude(s) && canControl(s, item));
 /** 그 세션이 다룰 수 있는 사이트 항목들. */
 const sitesOf = (s) => [...sessions.values()].filter((other) => other.kind === 'site' && canControl(s, other));
+/** 그룹에 든 세션만 할 수 있는 일 앞에서 부른다. 그룹이 없으면 까닭을 돌려주며 그만둔다. */
+function requireGroup(s) {
+  if (!s.group) throw new Error(NO_GROUP);
+}
 /** 그룹이 없는 세션이 항목을 다루려 할 때 Claude에게 돌려주는 말. */
 const NO_GROUP = '이 세션은 이름 붙인 그룹에 속해 있지 않습니다. Cypher 도구는 같은 그룹에 있는 항목만 다룰 수 있고, 그룹 없이 있는 것끼리는 서로 다룰 수 없습니다. 사용자에게 이 세션과 다룰 항목을 한 그룹에 넣어 달라고 하세요(사이드바에서 오른쪽 클릭 → 그룹 지정).';
 /** 그 항목과 같은 묶음에 새 항목을 만들 때 쓸 그룹 이름과 폴더. */
@@ -1915,7 +1963,7 @@ const siteLine = (site) => `#${site.key} "${label(site)}" — ${site.view.url() 
 
 /** 브라우저 도구가 조작할 사이트를 정한다. `create`이면(주소로 이동하라는 요청) 묶음에 브라우저가 없을 때 새로 만든다. */
 async function browserTarget(s, create) {
-  if (!s.group) throw new Error(NO_GROUP);
+  requireGroup(s);
   let site = browserOf(s);
   const created = !site;
   if (!site) {
@@ -1934,9 +1982,13 @@ async function browserTarget(s, create) {
     syncSites();
   }
   const others = sitesOf(s).filter((other) => other !== site);
+  // 이 브라우저가 써야 하는 프로필을 앱에 지금 알려 둔다(방금 그룹을 옮겼다면 앱은 아직 옛 프로필로 알고 있을 수 있다).
+  const profile = ensureProfile(site);
+  await site.view.assign(profile);
   return {
     key: site.key,
     url: site.view.url() || 'about:blank',
+    profile,
     // 도구의 답 끝에 덧붙일 말: 새로 만들었거나, 브라우저가 여러 개라 어느 것을 조작했는지 알려야 할 때만.
     note: created ? `이 그룹에 새 브라우저(사이트 항목 #${site.key})를 만들어 열었습니다.`
       : others.length ? `조작한 브라우저: 사이트 항목 #${site.key}. 같은 그룹에 다른 브라우저가 ${others.length}개 더 있습니다(browser_tabs로 보고 browser_select로 바꿉니다).` : '',
@@ -2027,7 +2079,7 @@ function announce(item, by, what) {
 
 /** 그 번호의 항목이 도구를 부른 세션과 같은 묶음에 있는 그 종류의 항목인지 확인하고 돌려준다. */
 function itemInGroup(s, id, kind) {
-  if (!s.group) throw new Error(NO_GROUP);
+  requireGroup(s);
   const target = sessions.get(Number(id));
   if (target?.kind !== kind || !canControl(s, target)) {
     throw new Error(`#${id}은(는) 이 세션의 그룹("${s.group}")에 있는 ${KINDS[kind].label} 항목이 아닙니다. 같은 그룹의 항목만 다룰 수 있습니다. cypher_items로 번호를 확인하세요.`);
@@ -2065,7 +2117,7 @@ async function imageAdd(s, { stored, title }) {
   return `이미지 항목 #${made.key} "${label(made)}"을 넣었습니다(${placedIn(s)}).`;
 }
 
-const samePath = (a, b) => a.replace(/\//g, '\\').toLowerCase() === b.replace(/\//g, '\\').toLowerCase();
+const samePath = (a, b) => pathKey(a) === pathKey(b);
 
 /** 파일을 그 세션의 묶음에 문서 항목으로 놓는다. 이미 그 파일을 보여 주는 문서가 있으면 그것을 새로 읽는다. */
 async function docShow(s, { path, title }) {
@@ -2104,7 +2156,7 @@ function claudeNotice(s, { title, message }) {
  * 실행하고 기록을 남기게 되기 때문이다). 폴더는 Cypher가 정한 시작 폴더만 쓴다(세션이 알려 온 폴더는 믿지 않는다).
  */
 function httpFolders(s) {
-  if (!s.group) throw new Error(NO_GROUP);
+  requireGroup(s);
   const shared = [...sessions.values()].filter((other) => other.kind === 'http' && canControl(s, other)).map((other) => other.startCwd);
   return [...new Set([s.startCwd, ...shared])];
 }
@@ -2115,28 +2167,40 @@ function httpFolders(s) {
 // 보던 화면은 바꾸지 않고 사이드바에만 놓으며, 알림으로 알려 준다. 설정의 [session] show_created로 끄거나 넓힌다.
 
 const MAX_PLACED = 8;           // 요청 하나에서 사이드바에 놓는 파일 수
-/** 파일이 든 폴더. 드라이브 바로 아래의 파일이면 `C:\`처럼 구분자를 남긴다. */
-const dirName = (path) => { const dir = path.replace(/[\\/][^\\/]*$/, ''); return /^[A-Za-z]:$/.test(dir) ? `${dir}\\` : dir; };
+/** 드라이브 글자만 남은 폴더(`C:`)에는 구분자를 붙인다(붙이지 않으면 "그 드라이브의 지금 폴더"를 뜻하게 된다). */
+const withRootSlash = (dir) => (/^[A-Za-z]:$/.test(dir) ? `${dir}\\` : dir);
+/** 파일이 든 폴더. */
+const dirName = (path) => withRootSlash(path.replace(/[\\/][^\\/]*$/, ''));
 /** 요청 파일을 보여 줄 HTTP 항목의 폴더: 파일이 `<폴더>\http`나 `<폴더>\.cypher\http`에 있으면 그 `<폴더>`. */
-const httpHome = (path) => { const dir = dirName(path); const m = /^(.+?)[\\/](?:\.cypher[\\/]http|http)$/i.exec(dir); return m ? dirName(`${m[1]}\\x`) : dir; };
+const httpHome = (path) => { const dir = dirName(path); const m = /^(.+?)[\\/](?:\.cypher[\\/]http|http)$/i.exec(dir); return m ? withRootSlash(m[1]) : dir; };
+/** 경로를 견줄 때 쓰는 모양(구분자와 대/소문자를 맞춘 것). */
+const pathKey = (path) => path.replace(/\//g, '\\').toLowerCase();
 
+/** 앱이 알려 온 "Claude 세션이 새로 만든 파일"을 그 세션의 묶음에 놓는다. */
 async function onCreatedFile({ id, path, kind }) {
   const s = byId(id);
+  if (!s || !path || !shouldPlace(s, path, kind)) return;
+  try {
+    const item = await placeCreated(s, path, kind);
+    if (item && sessions.has(s.key)) announce(item, s, '파일을 만들었습니다');
+  } catch (err) {
+    setStatus(`만든 파일을 사이드바에 놓지 못했습니다(${baseName(path)}): ${err}`);
+  }
+}
+
+/** 그 파일을 사이드바에 놓을지: 설정, 이미 놓았거나 보이는 파일, 한 요청의 한도를 본다. 놓기로 했으면 센다. */
+function shouldPlace(s, path, kind) {
   const mode = config.session.show_created || 'known';
-  if (!s || !path || mode === 'off' || (kind === 'other' && mode !== 'all')) return;
+  if (mode === 'off' || (kind === 'other' && mode !== 'all')) return false;
   // 같은 파일은 그 세션에서 한 번만 놓는다(지웠다가 다시 만들어도).
   s.placedFiles ??= new Set();
-  if (s.placedFiles.has(path.toLowerCase())) return;
-  s.placedFiles.add(path.toLowerCase());
+  if (s.placedFiles.has(pathKey(path))) return false;
+  s.placedFiles.add(pathKey(path));
   // 그 묶음에 이미 이 파일을 보여 주는 항목이 있으면 더 놓지 않는다.
   const shows = (other) => (other.kind === 'reader' && samePath(other.view.path(), path))
     || (other.kind === 'http' && samePath(other.view.state().file || '', path))
     || (other.kind === 'memo' && samePath(other.view.state().path || '', path));
-  if ([...sessions.values()].some((other) => groupKey(other) === groupKey(s) && shows(other))) return;
-  // 요청 파일은 그 폴더를 보는 HTTP 항목으로 놓는다. 그룹이 없는 세션은 자기 폴더 묶음에만 놓을 수 있으므로,
-  // 요청 파일이 다른 폴더의 것이면(남의 폴더 묶음에 끼어들게 된다) 문서 항목으로 보여 준다.
-  const home = kind === 'http' ? httpHome(path) : '';
-  const asHttp = kind === 'http' && (!!s.group || samePath(home, s.startCwd));
+  if ([...sessions.values()].some((other) => groupKey(other) === groupKey(s) && shows(other))) return false;
   // 한 요청에서 파일을 많이 만들면 사이드바가 넘치므로 몇 개까지만 놓고, 넘친 것은 한 번만 알린다.
   if ((s.placed || 0) >= MAX_PLACED) {
     s.unplaced = (s.unplaced || 0) + 1;
@@ -2145,29 +2209,35 @@ async function onCreatedFile({ id, path, kind }) {
       logNotice(s, 'item', label(s), body);
       if (config.notify.in_app) toast(s, label(s), body);
     }
-    return;
+    return false;
   }
   s.placed = (s.placed || 0) + 1;
-  try {
-    let item = null;
-    if (kind === 'image') {
-      [item] = await addImages([await invoke('image_import', { path })], { ...besideOf(s), source: path });
-    } else if (asHttp) {
-      // HTTP 항목은 폴더 단위로 요청 파일을 찾는다. 그 폴더를 보는 HTTP 항목이 이 묶음에 이미 있으면 새로 만들지 않는다
-      // (그 항목이 파일 목록을 다시 읽으면 보인다).
-      const there = [...sessions.values()].find((other) => other.kind === 'http' && groupKey(other) === groupKey(s)
-        && (samePath(other.startCwd, home) || samePath(other.startCwd, dirName(path))));
-      // 그룹 없는 세션은 시작 폴더의 요청만 여기로 온다. 폴더는 세션의 것을 그대로 써야 같은 폴더 묶음에 들어간다
-      // (파일 경로에 적힌 대/소문자가 달라도 다른 묶음이 생기지 않게).
-      if (there) await there.view.reload?.();
-      item = there || await newItem('http', { group: s.group, cwd: s.group ? home : s.startCwd, saved: { file: path }, show: 'hidden' });
-    } else {
-      item = await newItem('reader', { ...besideOf(s), saved: { path }, show: 'hidden' });
-    }
-    if (item && sessions.has(s.key)) announce(item, s, '파일을 만들었습니다');
-  } catch (err) {
-    setStatus(`만든 파일을 사이드바에 놓지 못했습니다(${baseName(path)}): ${err}`);
+  return true;
+}
+
+/** 종류에 맞는 항목으로 놓는다: 그림 → 이미지 항목, 요청 파일 → HTTP 항목, 그 밖의 글 → 문서 항목. 놓은(또는 다시 읽게 한) 항목을 돌려준다. */
+async function placeCreated(s, path, kind) {
+  if (kind === 'image') {
+    const [image] = await addImages([await invoke('image_import', { path })], { ...besideOf(s), source: path });
+    return image;
   }
+  // 요청 파일은 그 폴더를 보는 HTTP 항목으로 놓는다. 그룹이 없는 세션은 자기 폴더 묶음에만 놓을 수 있으므로,
+  // 요청 파일이 다른 폴더의 것이면(남의 폴더 묶음에 끼어들게 된다) 문서 항목으로 보여 준다.
+  const home = kind === 'http' ? httpHome(path) : '';
+  if (kind !== 'http' || !(s.group || samePath(home, s.startCwd))) {
+    return newItem('reader', { ...besideOf(s), saved: { path }, show: 'hidden' });
+  }
+  // HTTP 항목은 폴더 단위로 요청 파일을 찾는다. 그 폴더를 보는 HTTP 항목이 이 묶음에 이미 있으면 새로 만들지 않고
+  // 파일 목록만 다시 읽게 한다.
+  const there = [...sessions.values()].find((other) => other.kind === 'http' && groupKey(other) === groupKey(s)
+    && (samePath(other.startCwd, home) || samePath(other.startCwd, dirName(path))));
+  if (there) {
+    await there.view.reload?.();
+    return there;
+  }
+  // 그룹 없는 세션은 시작 폴더의 요청만 여기로 온다. 폴더는 세션의 것을 그대로 써야 같은 폴더 묶음에 들어간다
+  // (파일 경로에 적힌 대/소문자가 달라도 다른 묶음이 생기지 않게).
+  return newItem('http', { group: s.group, cwd: s.group ? home : s.startCwd, saved: { file: path }, show: 'hidden' });
 }
 
 /** Claude 세션의 Cypher 도구가 물어 온 것에 답한다. `req.session`은 도구를 부른 세션의 번호. */
@@ -2186,8 +2256,8 @@ async function mcpAction(req) {
     case 'doc_show': return { text: await docShow(s, req) };
     case 'notify': return { text: claudeNotice(s, req) };
     case 'http_scope': return { folders: httpFolders(s) };
-    // "chrome" 엔진의 브라우저: 그룹에 든 세션에만 맡긴다.
-    case 'chrome_scope': if (!s.group) throw new Error(NO_GROUP); return { ok: true };
+    // "chrome" 엔진의 브라우저는 그룹마다 따로 뜬다. 그룹에 든 세션에만, 그 그룹의 브라우저만 맡긴다.
+    case 'chrome_scope': requireGroup(s); return { profile: ensureProfile(s) };
     default: throw new Error(`모르는 요청입니다: ${req.action}`);
   }
 }
@@ -2205,9 +2275,13 @@ async function onMcpRequest(req) {
 
 // ── "chrome" 엔진(설정에서 바꿨을 때만): 설치된 Chrome을 Cypher 전용 프로필로 띄워 조작한다 ──
 
+/** 지금 보고 있는 항목의 그룹이 쓰는 Chrome을 연다. 그룹이 없으면 공용 프로필의 Chrome(Claude 세션은 조작할 수 없다). */
 async function openChrome() {
+  const group = viewing()?.group || '';
   try {
-    await invoke('browser_open', { url: null });
+    await invoke('browser_open', { url: null, profile: ensureProfile(viewing()) });
+    setStatus(group ? `그룹 "${group}"의 Chrome을 열었습니다. 이 그룹의 Claude 세션만 조작할 수 있습니다.`
+      : '그룹 없는 Chrome을 열었습니다. Claude 세션에 맡기려면 그룹에 든 항목을 보고 있을 때 여세요.');
   } catch (err) {
     notice('브라우저를 열지 못했습니다', String(err));
   }
@@ -2215,13 +2289,16 @@ async function openChrome() {
 
 /** Chrome에 지금 열려 있는 페이지를 Claude 세션에 넘긴다. `fresh`이면 새 Claude 세션을 연다. */
 async function handoffChrome(fresh) {
-  const url = await invoke('browser_where').catch(() => null);
-  if (!url) return notice('브라우저', 'Chrome이 열려 있지 않습니다. 먼저 [Chrome]을 눌러 여세요.');
-  const current = active && aliveClaude(active) ? active : [...sessions.values()].find(aliveClaude);
-  let target = fresh ? null : current;
+  // 넘기는 것은 지금 보고 있는 항목의 그룹이 쓰는 Chrome이고, 넘겨받는 것은 그 그룹의 Claude 세션이다.
+  const from = viewing();
+  if (!from?.group) return notice('브라우저', 'Chrome은 그룹마다 따로 뜨고 그 그룹의 Claude 세션만 조작합니다. 그룹에 든 항목을 보고 있을 때 넘기세요.');
+  // 프로필이 아직 없는 그룹은 Chrome을 띄운 적이 없다.
+  const profile = profileOf(from);
+  const url = profile ? await invoke('browser_where', { profile }).catch(() => null) : null;
+  if (!url) return notice('브라우저', `그룹 "${from.group}"의 Chrome이 열려 있지 않습니다. 먼저 [Chrome]을 눌러 여세요.`);
+  let target = fresh ? null : (aliveClaude(from) ? from : [...sessions.values()].find((s) => aliveClaude(s) && s.group === from.group));
   if (!target) {
-    const base = current || active;
-    target = await newSession('claude', { ...(base ? besideOf(base) : { cwd: folder }), show: 'split' });
+    target = await newSession('claude', { ...besideOf(from), show: 'split' });
     if (!target || target.exited) return notice('브라우저', '새 Claude 세션을 열지 못했습니다.');
     await untilReady(target);
   }
@@ -2286,9 +2363,12 @@ const whereOf = (s) => (s.group ? `그룹 "${s.group}"` : `"${baseName(s.startCw
 
 /** 본창에서 브라우저 화면을 찍는다. 찍힌 그림은 `image-captured` 사건으로 돌아온다. */
 async function captureBrowser(full) {
+  // 찍는 것은 지금 보고 있는 항목의 그룹이 쓰는 Chrome이다(그룹이 없으면 공용 프로필의 Chrome).
+  const from = viewing();
+  if (from?.group && !profileOf(from)) return notice('캡처하지 못했습니다', `그룹 "${from.group}"의 Chrome이 열려 있지 않습니다.`);
   setStatus('브라우저 화면을 찍는 중…');
   try {
-    await invoke('browser_capture', { full });
+    await invoke('browser_capture', { full, profile: profileOf(from) });
     setStatus('');
   } catch (err) {
     setStatus('');
@@ -2948,9 +3028,8 @@ window.cypher = {
   onHook, onStatus, nextWaiting, writeState, rename, sendPrompt, text: sessionText, addImages, onCaptured, captureBrowser,
   setLook, currentLook, mcpAction, handoffSite, onMcpRequest,
   showPalette, paletteEntries, showClosed, reopenLast, restartSession, placeInOrder, inSidebarOrder, cycle, find, recallPrompt, useFolder, folderChoices,
-  onCreatedFile, canControl, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
+  onCreatedFile, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
   get visible() { return visible; },
-  get tree() { return tree; },
   get active() { return active; },
 };
 

@@ -9,7 +9,8 @@
 
 use std::collections::HashSet;
 use std::io::Read;
-use std::path::{Component, Path, PathBuf};
+use crate::paths::{is_within, parts, strip_root};
+use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
 /// 쓰기 직전에 없던 파일: (세션 번호, 소문자로 바꾼 경로). 쓴 직후의 신호가 오면 꺼낸다.
@@ -59,29 +60,6 @@ fn skip_roots() -> Vec<PathBuf> {
     roots
 }
 
-/// 경로를 견줄 수 있게 소문자 부분들로 나눈다(`C:\A\b` → ["c:", "a", "b"]).
-fn parts(path: &Path) -> Vec<String> {
-    path.components()
-        .filter_map(|part| match part {
-            Component::Prefix(prefix) => Some(prefix.as_os_str().to_string_lossy().to_lowercase()),
-            Component::Normal(name) => Some(name.to_string_lossy().to_lowercase()),
-            _ => None,
-        })
-        .collect()
-}
-
-/// `path`가 `root` 안에 있는지(대/소문자 무시).
-pub fn is_within(path: &Path, root: &Path) -> bool {
-    let (path, root) = (parts(path), parts(root));
-    !root.is_empty() && path.len() >= root.len() && path[..root.len()] == root[..]
-}
-
-/// 두 경로가 같은 곳인지(대/소문자·끝의 구분자 무시).
-pub fn same_place(a: &Path, b: &Path) -> bool {
-    let (a, b) = (parts(a), parts(b));
-    !a.is_empty() && a == b
-}
-
 /// 사람이 볼 결과물을 두지 않는 폴더 이름: 숨김 폴더(.git, .claude …), 의존성·빌드 폴더.
 fn is_plumbing(name: &str) -> bool {
     name.starts_with('.') || matches!(name, "node_modules" | "target" | "dist" | "build" | "__pycache__")
@@ -94,16 +72,16 @@ fn is_plumbing(name: &str) -> bool {
 /// `<저장소>\.claude\worktrees\<이름>`(워크트리 세션) 아래에 있어도 그 안에서 만든 파일은 놓여야 한다.
 /// 세션 폴더 밖에 만든 파일은 경로 전체를 본다.
 fn kind_of(path: &Path, base: Option<&Path>, skip: &[PathBuf]) -> Option<&'static str> {
-    // `..`가 든 경로는 견주는 폴더와 실제 폴더가 달라질 수 있으므로 받지 않는다.
-    if !path.is_absolute() || path.components().any(|part| matches!(part, Component::ParentDir)) || skip.iter().any(|root| is_within(path, root)) {
+    if !path.is_absolute() || skip.iter().any(|root| is_within(path, root)) {
         return None;
     }
-    let all = parts(path.parent()?);
-    let inside = base.map(parts).filter(|base| !base.is_empty() && all.len() >= base.len() && all[..base.len()] == base[..]);
-    let mut folders: &[String] = match &inside {
-        Some(base) => &all[base.len()..],
-        None => all.get(1..).unwrap_or(&[]), // 드라이브 글자는 뺀다.
+    // 파일이 든 폴더의 이름들. `..`가 든 경로는 여기서 걸러진다(견주는 폴더와 실제 폴더가 달라질 수 있다).
+    let dir = path.parent()?;
+    let folders = match base.and_then(|base| strip_root(dir, base)) {
+        Some(below) => below,
+        None => parts(dir)?.split_off(1), // 세션 폴더 밖: 드라이브 글자만 빼고 경로 전체를 본다.
     };
+    let mut folders = folders.as_slice();
     // 요청 파일을 두는 자리(`<폴더>\.cypher\http`)는 숨김 폴더지만 HTTP 항목이 보는 곳이다.
     if let [rest @ .., a, b] = folders {
         if a == ".cypher" && b == "http" {
@@ -195,19 +173,6 @@ mod tests {
         // 세션 폴더를 모르거나 그 밖에 만든 파일은 경로 전체를 본다.
         assert_eq!(kind_of(&doc, None, &none), None);
         assert_eq!(kind_of(&doc, Some(&root.join("다른 곳")), &none), None);
-    }
-
-    #[test]
-    fn 폴더_안인지는_대소문자를_가리지_않는다() {
-        assert!(is_within(Path::new(r"C:\Work\Proj\a\b.md"), Path::new(r"c:\work\proj")));
-        assert!(is_within(Path::new(r"C:\work\proj"), Path::new(r"C:\work\proj\")));
-        assert!(!is_within(Path::new(r"C:\work\project2\a.md"), Path::new(r"C:\work\proj")));
-        assert!(!is_within(Path::new(r"D:\work\proj\a.md"), Path::new(r"C:\work\proj")));
-        assert!(!is_within(Path::new(r"C:\work"), Path::new(r"C:\work\proj")));
-        assert!(!is_within(Path::new(r"C:\work\a.md"), Path::new("")));
-        assert!(same_place(Path::new(r"C:\Work\Proj\"), Path::new(r"c:\work\proj")));
-        assert!(!same_place(Path::new(r"C:\work\proj\a"), Path::new(r"c:\work\proj")));
-        assert!(!same_place(Path::new(""), Path::new("")));
     }
 
     #[test]

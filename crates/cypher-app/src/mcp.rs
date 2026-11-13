@@ -160,16 +160,17 @@ fn http_in_scope(app: &AppHandle, session: Option<u32>, name: &str, args: &Value
     ))
 }
 
-/// 도구에 넘어온 경로를 견줄 수 있게 다듬는다. 상대 경로와 `..`로 밖을 가리키는 경로는 받지 않는다.
+/// 도구에 넘어온 경로를 견줄 수 있게 다듬는다. 상대 경로는 받지 않는다
+/// (`..`로 밖을 가리키는 경로는 견줄 때 어디에도 속하지 않는 것으로 걸러진다).
 fn http_path(given: &str) -> Option<std::path::PathBuf> {
     let path = std::path::PathBuf::from(given.trim().replace('/', "\\"));
-    (path.is_absolute() && !path.components().any(|part| matches!(part, std::path::Component::ParentDir))).then_some(path)
+    path.is_absolute().then_some(path)
 }
 
 /// `http_list`가 볼 수 있는 폴더: 다룰 수 있는 폴더 그 자체여야 한다(그 아래의 다른 폴더는 다른 항목의 것일 수 있다).
 fn http_folder_allowed(folder: &str, roots: &[String]) -> bool {
     let Some(folder) = http_path(folder) else { return false };
-    roots.iter().filter_map(|root| http_path(root)).any(|root| crate::created::same_place(&folder, &root))
+    roots.iter().filter_map(|root| http_path(root)).any(|root| crate::paths::same_place(&folder, &root))
 }
 
 /// `http_run`이 실행할 수 있는 파일: 다룰 수 있는 폴더가 요청 파일을 찾는 세 자리
@@ -181,7 +182,7 @@ fn http_file_allowed(file: &str, roots: &[String]) -> bool {
         return false;
     }
     roots.iter().filter_map(|root| http_path(root)).any(|root| {
-        [root.clone(), root.join("http"), root.join(".cypher").join("http")].iter().any(|place| crate::created::same_place(dir, place))
+        [root.clone(), root.join("http"), root.join(".cypher").join("http")].iter().any(|place| crate::paths::same_place(dir, place))
     })
 }
 
