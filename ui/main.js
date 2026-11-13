@@ -12,6 +12,9 @@ import { initMindmap, createMindmap } from './mindmap.js';
 import { initLook, showLook, setLook, currentLook } from './look.js';
 import { initPalette, showPalette } from './palette.js';
 import { initClosed, rememberClosed, reopenLast, showClosed, closedCount } from './closed.js';
+import { initReader, createReader } from './reader.js';
+import { initNotices, recordNotice, markRead, showNotices, unreadCount } from './notices.js';
+import { initTemplate, saveTemplate, showTemplates } from './template.js';
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -51,6 +54,16 @@ const KINDS = {
   site: { label: '사이트', icon: '◎', hint: '브라우저: 빈 페이지로 열고 위의 주소 칸에 주소를 쳐서 갑니다. 같은 그룹의 Claude 세션이 조작할 수 있습니다', create: createSite },
   image: { label: '이미지', icon: '▣', hint: '그림(파일, 붙여넣기, 사이트 화면 캡처)을 항목으로 두고 보기', create: createImage },
   mindmap: { label: '브레인스토밍', icon: '✺', hint: '마인드맵: 그림으로 가지를 뻗거나 코드(개요 글)로 쓰고, 표식을 붙이고, 저장하거나 PNG·PDF로 내보내기', create: createMindmap },
+  reader: {
+    label: '문서', icon: '❏', hint: '문서 보기: Markdown·글자 파일을 서식 있는 모습으로 읽기(파일이 바뀌면 다시 그립니다). 누르면 파일을 고릅니다',
+    create: createReader,
+    // 파일을 먼저 고른다. 고르지 않으면 항목을 만들지 않는다.
+    prepare: async () => {
+      const start = active && sessions.has(active.key) ? active.cwd : folder;
+      const path = await invoke('reader_pick', { start });
+      return path ? { path } : null;
+    },
+  },
 };
 
 /** 그 종류의 항목을 새로 만든다. 종류에 따라 먼저 물어볼 것(사이트 주소 등)을 묻는다. */
@@ -136,6 +149,9 @@ async function init() {
     getFolder: () => folder,
     focusActive: () => focusItem(active),
     pasteText: (text) => pasteInto(active, text),
+    // 변경 내용에서 고른 줄을 넘겨받을 수 있는 Claude 세션: 그 항목과 같은 묶음에서 돌고 있는 것.
+    claudes: (item) => claudesOf(item).map((s) => ({ s, label: label(s) })),
+    pasteTo: (s, text) => { if (!sessions.has(s.key)) return; activate(s); pasteInto(s, text); },
   });
   initHttp({ invoke, make, ask, setStatus, baseName });
   initMemo({
@@ -172,6 +188,19 @@ async function init() {
     icon: (record) => (KINDS[record.kind]?.icon || '›'),
     kindLabel: (record) => (KINDS[record.kind]?.label || config.profiles.find((p) => p.id === record.profile)?.label || '세션'),
   });
+  initReader({
+    invoke, make, setStatus, showMenu, baseName, toClaude: imageToClaude,
+    openMemo: (path) => newItem('memo', { saved: { open: path }, show: 'split' }),
+  });
+  initNotices({ make, openPopup, setStatus, jump: jumpToNotice, onChange: renderNoticeButton });
+  initTemplate({
+    invoke, make, openPopup, ask, setStatus, notice, baseName,
+    folder: () => folder,
+    current: currentGroup,
+    pack: packGroup,
+    open: openTemplate,
+  });
+  $('notices').onclick = showNotices;
   initSidebarGrip();
   initComposer();
   // 사이드바 아래에는 자주 쓰는 것만 둔다. 나머지는 창 상단 메뉴에 있다. 브라우저는 사이드바의 사이트 항목이다.
@@ -253,6 +282,8 @@ function runMenu(id) {
   const actions = {
     palette: showPalette,
     reopen: showClosed,
+    notices: showNotices,
+    templates: showTemplates,
     snippets: showSnippets,
     broadcast: () => setBroadcast(!broadcast),
     memory: () => showMemory(),
@@ -644,7 +675,7 @@ function layout() {
   $('empty').hidden = visible.length > 0;
   $('empty').textContent = sessions.size
     ? '화면에 띄운 항목이 없습니다. 사이드바에서 항목을 누르거나 화면으로 끌어다 놓으세요.'
-    : '왼쪽에서 세션이나 메모·HTTP·사이트·이미지·브레인스토밍 항목을 시작하세요.';
+    : '왼쪽에서 세션이나 메모·HTTP·사이트·이미지·브레인스토밍·문서 항목을 시작하세요.';
   syncComposer();
   syncSites(); // 사이트 항목의 웹뷰를 새 창 자리에 맞춘다.
   requestAnimationFrame(() => {
@@ -735,6 +766,7 @@ function activate(s, { keepFocus = false } = {}) {
   active = s;
   s.attention = false;
   s.usedAt = Date.now();
+  markRead(s.key); // 이 항목을 열었으니 이 항목이 남긴 알림은 본 것이다.
   for (const other of sessions.values()) other.pane.classList.toggle('active', other === s);
   renderShots();
   if (!$search.hidden) closeSearch();
@@ -769,6 +801,7 @@ function closedRecord(s) {
   if (s.kind === 'memo' && !s.view.text().trim() && !s.view.state().path) return null;
   if (s.kind === 'image' && s.view.empty()) return null;
   if (s.kind === 'site' && !s.view.url()) return null;
+  if (s.kind === 'reader' && !s.view.path()) return null;
   try {
     return { ...describe(s), label: label(s) };
   } catch {
@@ -870,7 +903,9 @@ function onStatus({ id, model, effort, context, cwd, project, session, worktree,
   // 컨텍스트가 거의 찼을 때 한 번 알린다(/compact 등으로 줄었다가 다시 차면 또 알린다).
   if (context != null && context >= CONTEXT_DANGER && !s.contextAlerted) {
     s.contextAlerted = true;
-    if (config.notify.in_app) toast(s, label(s), `컨텍스트가 ${Math.round(context)}% 찼습니다. /compact 또는 새 세션을 고려하세요.`);
+    const warning = `컨텍스트가 ${Math.round(context)}% 찼습니다. /compact 또는 새 세션을 고려하세요.`;
+    logNotice(s, 'context', label(s), warning);
+    if (config.notify.in_app) toast(s, label(s), warning);
   } else if (context != null && context < CONTEXT_WARN) {
     s.contextAlerted = false;
   }
@@ -933,15 +968,50 @@ function onHook({ id, event, kind, message, agent, agent_type: agentType, force 
     : (message || '입력을 기다리고 있습니다.');
   const focused = document.hasFocus();
   if (!focused && config.notify.system) invoke('notify', { title, body }); // Windows 알림 + 작업 표시줄 깜빡임
-  if (!focused || s !== active) {
+  // 알림 기록에는 늘 남긴다. 사용자가 그 세션을 보고 있었으면 이미 본 것으로 적는다.
+  const seen = focused && s === active;
+  logNotice(s, event === 'Stop' ? 'done' : 'approval', title, body, !seen);
+  if (!seen) {
     s.attention = true;
     if (config.notify.in_app) toast(s, title, body);
     render();
   }
 }
 
+// ───────────────────────── 알림 기록 ─────────────────────────
+// 떴다가 사라지는 알림을 모아 둔다(notices.js). 사이드바 아래 [알림 N] 단추의 숫자는 아직 보지 않은 알림 수.
+
+/** 그 항목이 속한 묶음의 이름(그룹 이름, 없으면 폴더 이름). */
+const groupName = (s) => s.group || baseName(s.startCwd);
+
+/** 알림 기록에 남긴다. `s`는 그 알림이 가리키는 항목(없으면 null). */
+function logNotice(s, kind, title, body, unread = true) {
+  recordNotice({ kind, title, body, key: s ? s.key : null, group: s ? groupName(s) : '', unread });
+}
+
+/** 알림 기록에서 고른 알림의 항목으로 간다. 갔으면 참. */
+function jumpToNotice({ key, sameRun, title, group }) {
+  let s = sameRun ? sessions.get(key) : null;
+  if (!s) {
+    // 다시 시작한 뒤에는 항목 번호가 달라진다. 이름과 묶음이 같은 항목이 하나뿐이면 그것으로 간다.
+    const same = [...sessions.values()].filter((other) => label(other) === title && groupName(other) === group);
+    if (same.length === 1) [s] = same;
+  }
+  if (!s) return false;
+  activate(s);
+  return true;
+}
+
+function renderNoticeButton() {
+  const count = unreadCount();
+  const $button = $('notices');
+  $button.textContent = `알림 ${count}`;
+  $button.classList.toggle('has', count > 0);
+}
+
 /** 세션과 무관한 알림(오류 등). 상태줄과 달리 다른 표시에 덮이지 않고 누를 때까지 12초간 남는다. */
 function notice(title, body) {
+  logNotice(null, 'info', title, body);
   const box = make('div', 'toast');
   box.append(make('b', '', title), make('span', '', body));
   box.onclick = () => box.remove();
@@ -1214,10 +1284,113 @@ function addItems(group) {
   ];
 }
 
+// ── 그룹 틀: 묶음의 항목 구성을 파일로 저장해 두고, 같은 종류의 업무를 시작할 때 한 번에 펼친다(template.js) ──
+
+const MAX_TEMPLATE_ITEMS = 40;  // 틀 하나로 한 번에 펼치는 항목 수
+
+/** 지금 보고 있는 항목이 속한 묶음. */
+function currentGroup() {
+  if (!active || !sessions.has(active.key)) return null;
+  return groupsInOrder().find((group) => group.list.includes(active)) || null;
+}
+
+/** 틀에 담을 항목 하나. 담지 않는 것(이미지, 파일을 고르지 않은 문서)은 null. */
+function templateItem(s) {
+  const base = { kind: s.kind, cwd: s.project || s.startCwd, name: s.name || undefined, color: s.color || undefined };
+  // 세션은 프로필과 폴더만 담는다(대화는 담지 않고, 펼칠 때 새로 시작한다).
+  if (isTerm(s)) return { ...base, profile: s.profile.id };
+  const state = s.view.state();
+  switch (s.kind) {
+    case 'memo':
+      // 파일에 연결돼 있고 고친 것이 없으면 그 파일을, 아니면 지금의 글을 담는다.
+      return { ...base, saved: state.path && !state.dirty ? { open: state.path } : { text: s.view.text(), encoding: state.encoding, eol: state.eol } };
+    case 'mindmap': return { ...base, saved: { text: s.view.text() } };
+    case 'site': return { ...base, saved: { url: state.url, home: state.home, title: state.title } };
+    case 'http': return { ...base, saved: { file: state.file } };
+    case 'reader': return state.path ? { ...base, saved: { path: state.path } } : null;
+    default: return null;
+  }
+}
+
+/** 묶음의 항목을 틀에 담는다: { items, skipped(담지 않은 것의 이름), summary("Claude 2 · 메모 1") } */
+function packGroup(group) {
+  const items = [], skipped = [], counts = new Map();
+  for (const s of group.list.filter((other) => sessions.has(other.key)).slice(0, MAX_TEMPLATE_ITEMS)) {
+    const kind = isTerm(s) ? s.profile.label : KINDS[s.kind].label;
+    let item = null;
+    try { item = templateItem(s); } catch { /* 상태를 내놓지 못하는 항목은 담지 않는다 */ }
+    if (!item) { skipped.push(`${label(s)}(${kind})`); continue; }
+    items.push(item);
+    counts.set(kind, (counts.get(kind) || 0) + 1);
+  }
+  return { items, skipped, summary: [...counts].map(([kind, count]) => `${kind} ${count}`).join(' · ') };
+}
+
+/**
+ * 틀 파일에서 읽은 항목의 내용 중 그 종류가 알아듣는 것만 고른다. 틀 파일은 다른 사람에게서 받은 것일 수 있으므로,
+ * 저장소 번호(메모 번호 등)처럼 이 PC의 다른 항목을 가리킬 수 있는 값은 받지 않는다.
+ */
+function templateSaved(kind, saved) {
+  const from = saved && typeof saved === 'object' ? saved : {};
+  const text = (key) => (typeof from[key] === 'string' ? { [key]: from[key] } : {});
+  switch (kind) {
+    case 'memo': return typeof from.open === 'string' && from.open ? text('open') : { text: '', ...text('text'), ...text('encoding'), ...text('eol') };
+    case 'mindmap': return { ...text('text') };
+    case 'site': return { ...text('url'), ...text('home'), ...text('title') };
+    case 'http': return { ...text('file') };
+    case 'reader': return { ...text('path') };
+    default: return null;
+  }
+}
+
+/**
+ * 틀을 그룹으로 펼친다. `cwd`를 주면 모든 항목을 그 폴더에서 열고, 아니면 저장해 둔 폴더에서 연다
+ * (없어진 폴더의 항목은 지금의 새 세션 폴더에서). 만든 항목 수와 건너뛴 것의 까닭을 돌려준다.
+ */
+async function openTemplate(template, { group, cwd = null }) {
+  const all = (Array.isArray(template?.items) ? template.items : []).filter((item) => item && typeof item === 'object');
+  const items = all.slice(0, MAX_TEMPLATE_ITEMS);
+  const skipped = [];
+  if (all.length > items.length) skipped.push(`한 번에 ${MAX_TEMPLATE_ITEMS}개까지만 펼칩니다`);
+  const folders = [...new Set(items.map((item) => item.cwd).filter((path) => typeof path === 'string' && path))];
+  const exist = cwd ? [] : await invoke('dirs_exist', { paths: folders }).catch(() => folders.map(() => true));
+  const missing = new Set(folders.filter((_, index) => exist[index] === false));
+  ensureGroup(group);
+  const made = [];
+  let moved = 0;
+  for (const item of items) {
+    const term = !item.kind || item.kind === 'term';
+    const saved = term ? null : templateSaved(item.kind, item.saved);
+    const known = term ? config.profiles.some((p) => p.id === item.profile) : !!KINDS[item.kind] && !!saved;
+    const title = typeof item.name === 'string' ? item.name : '';
+    if (!known) {
+      skipped.push(`${title || item.profile || item.kind}: 이 Cypher에서 펼칠 수 없는 종류입니다`);
+      continue;
+    }
+    const kept = typeof item.cwd === 'string' && item.cwd && !missing.has(item.cwd);
+    if (!cwd && !kept) moved += 1;
+    try {
+      const s = await revive({
+        kind: term ? 'term' : item.kind, profile: item.profile, saved,
+        name: title, color: COLORS.includes(item.color) ? item.color : '',
+        cwd: cwd || (kept ? item.cwd : folder), group,
+      }, { show: 'hidden' });
+      if (s) made.push(s);
+    } catch (err) {
+      skipped.push(`${title || item.kind}: ${err}`);
+    }
+  }
+  if (moved) skipped.push(`폴더가 없어진 항목 ${moved}개는 ${folder}에서 열었습니다`);
+  reveal(made);
+  if (made.length) activate(made[0]);
+  return { made: made.length, skipped };
+}
+
 function groupMenu(group, ev) {
   const live = group.list.filter((s) => sessions.has(s.key));
   const items = [];
   items.push(...addItems(group));
+  if (live.length) items.push({ label: '이 묶음을 틀로 저장… (같은 구성을 다시 펼칠 수 있게)', action: () => saveTemplate(group) });
   if (group.logical) {
     items.push({ label: '그룹 이름 바꾸기', action: () => renameGroup(group, live) });
     items.push({ label: '그룹 삭제 (세션은 폴더별 묶음으로)', action: () => deleteGroup(group, live) });
@@ -1549,6 +1722,9 @@ function paletteEntries() {
     ...Object.entries(KINDS).map(([kind, def]) => command(`새 ${def.label}`, () => createKind(kind))),
     command('새 그룹 만들기…', newGroup),
     command('닫은 항목 다시 열기…', showClosed, '명령 · Ctrl+Shift+R: 가장 나중에 닫은 것'),
+    command('알림 기록', showNotices, `명령 · Ctrl+Shift+A${unreadCount() ? ` · 새 알림 ${unreadCount()}개` : ''}`),
+    command('그룹 틀: 저장해 둔 구성 펼치기…', showTemplates),
+    ...(currentGroup() ? [command('지금 묶음을 틀로 저장…', () => saveTemplate(currentGroup()), `명령 · ${currentGroup().name}`)] : []),
     command('다음 대기 세션으로', nextWaiting, '명령 · Ctrl+Shift+N'),
     command(filterWaiting ? '모든 세션 보기' : '대기 중인 세션만 보기', () => { filterWaiting = !filterWaiting; render(); }),
     command('변경 내용 옆 창 열기/닫기', () => toggleDiff(), '명령 · Ctrl+Shift+G'),
@@ -1772,8 +1948,9 @@ function groupItemsText(s) {
     const state = other.view.state();
     if (other.kind === 'memo') {
       const file = state.path && !state.dirty ? state.path : `${dir('memos')}\\${state.memo}.txt`;
-      return `- ${head} 메모 ${name} — 파일: ${file}${state.path && state.dirty ? ` (저장하지 않은 고침이 있음. 원래 파일: ${state.path})` : ''}`;
+      return `- ${head} 메모 ${name} — 파일: ${file}${state.path && state.dirty ? ` (저장하지 않은 고침이 있음. 원래 파일: ${state.path})` : ''} (덧붙이거나 바꿀 때는 memo_write에 id ${other.key})`;
     }
+    if (other.kind === 'reader') return `- ${head} 문서 ${name} — 파일: ${other.view.path() || '(아직 파일 없음)'} (서식 있게 보여 주는 화면. 파일을 고치면 스스로 다시 그린다)`;
     if (other.kind === 'http') return `- ${head} HTTP 요청 ${name} — 요청 폴더: ${other.startCwd}${state.file ? ` · 열린 파일: ${state.file}` : ''} (http_list / http_run으로 다룬다)`;
     if (other.kind === 'site') return `- ${head} 브라우저(사이트) ${name} — 주소: ${other.view.url() || '빈 페이지'} (browser_* 도구로 조작)`;
     if (other.kind === 'image') return `- ${head} 이미지 ${name} — 파일: ${other.view.path() || '(아직 그림 없음)'}${state.source ? ` · 출처: ${state.source}` : ''}`;
@@ -1803,6 +1980,86 @@ async function mindmapWrite(s, { item, title, text }) {
   return `브레인스토밍 항목 #${made.key} "${label(made)}"을 만들었습니다(사이드바의 같은 그룹). 고칠 때는 mindmap_write에 id ${made.key}를 주세요.`;
 }
 
+const ANNOUNCE_QUIET_MS = 30000; // 같은 항목의 같은 알림을 다시 띄우지 않는 시간
+let announced = { key: null, title: '', at: 0 };
+
+/** Claude 세션이 사이드바에 놓은(또는 고친) 항목을 사용자에게 알린다. 누르면 그 항목을 연다. */
+function announce(item, by, what) {
+  reveal([item]);
+  const title = `${label(by)}: ${what}`;
+  const body = `${label(item)} — ${whereOf(item)} (누르면 엽니다)`;
+  // 같은 항목에 같은 일을 잇달아 하면(메모에 여러 번 덧붙이기 등) 알림은 처음 한 번만 띄운다.
+  const now = Date.now();
+  const again = announced.key === item.key && announced.title === title && now - announced.at < ANNOUNCE_QUIET_MS;
+  announced = { key: item.key, title, at: now };
+  if (again) return;
+  const seen = visible.includes(item) && document.hasFocus();
+  logNotice(item, 'item', title, body, !seen);
+  if (!seen && config.notify.in_app) toast(item, title, body);
+}
+
+/** 그 번호의 항목이 도구를 부른 세션과 같은 묶음에 있는 그 종류의 항목인지 확인하고 돌려준다. */
+function itemInGroup(s, id, kind) {
+  const target = sessions.get(Number(id));
+  if (target?.kind !== kind || groupKey(target) !== groupKey(s)) {
+    throw new Error(`#${id}은(는) 이 세션의 그룹에 있는 ${KINDS[kind].label} 항목이 아닙니다. cypher_items로 번호를 확인하세요.`);
+  }
+  return target;
+}
+
+/** 메모 항목을 만들거나, 있는 메모에 덧붙이거나 통째로 바꾼다. */
+async function memoWrite(s, { item, title, text, replace }) {
+  if (item != null) {
+    const target = itemInGroup(s, item, 'memo');
+    const kept = await target.view.write(text, !!replace);
+    if (title) target.name = String(title).slice(0, 120);
+    saveState();
+    announce(target, s, replace ? '메모를 바꿨습니다' : '메모에 덧붙였습니다');
+    if (kept) setStatus(`"${label(target)}" 메모를 바꾸기 전의 글은 30일 동안 보관합니다: ${kept}`);
+    return `메모 #${target.key} "${label(target)}"${replace ? '의 내용을 바꿨습니다' : '의 끝에 덧붙였습니다'}.`;
+  }
+  const made = await newItem('memo', { ...besideOf(s), saved: { text }, name: title ? String(title).slice(0, 120) : '', show: 'hidden' });
+  announce(made, s, '메모를 만들었습니다');
+  return `메모 항목 #${made.key} "${label(made)}"을 만들었습니다(사이드바의 같은 그룹). 덧붙이거나 바꿀 때는 memo_write에 id ${made.key}를 주세요.`;
+}
+
+/** 저장소에 넣어 둔 그림을 그 세션의 묶음에 이미지 항목으로 놓는다. */
+async function imageAdd(s, { stored, title }) {
+  if (!stored?.id) throw new Error('그림을 저장소에 넣지 못했습니다.');
+  if (title) stored.name = String(title).slice(0, 120);
+  const [made] = await addImages([stored], { ...besideOf(s) });
+  if (!made) throw new Error('이미지 항목을 만들지 못했습니다.');
+  announce(made, s, '이미지를 넣었습니다');
+  return `이미지 항목 #${made.key} "${label(made)}"을 사이드바의 같은 그룹에 넣었습니다.`;
+}
+
+const samePath = (a, b) => a.replace(/\//g, '\\').toLowerCase() === b.replace(/\//g, '\\').toLowerCase();
+
+/** 파일을 그 세션의 묶음에 문서 항목으로 놓는다. 이미 그 파일을 보여 주는 문서가 있으면 그것을 새로 읽는다. */
+async function docShow(s, { path, title }) {
+  let doc = [...sessions.values()].find((other) => other.kind === 'reader' && groupKey(other) === groupKey(s) && samePath(other.view.path(), path));
+  const fresh = !doc;
+  if (doc) await doc.view.reload();
+  else doc = await newItem('reader', { ...besideOf(s), saved: { path }, name: title ? String(title).slice(0, 120) : '', show: 'hidden' });
+  if (!fresh && title) { doc.name = String(title).slice(0, 120); saveState(); }
+  announce(doc, s, fresh ? '문서를 놓았습니다' : '문서를 새로 읽었습니다');
+  return fresh
+    ? `문서 항목 #${doc.key} "${label(doc)}"을 사이드바의 같은 그룹에 놓았습니다. 파일이 바뀌면 화면이 스스로 다시 그립니다.`
+    : `이 파일을 보여 주는 문서 항목 #${doc.key} "${label(doc)}"이 이미 있어 새로 읽었습니다.`;
+}
+
+/** Claude 세션이 보낸 알림: 앱 안 알림과(창이 뒤에 있으면) Windows 알림으로 보이고 알림 기록에 남긴다. */
+function claudeNotice(s, { title, message }) {
+  const head = typeof title === 'string' && title.trim() ? title.trim().slice(0, 80) : label(s);
+  const body = String(message ?? '').slice(0, 500);
+  const focused = document.hasFocus();
+  if (!focused && config.notify.system) invoke('notify', { title: head, body });
+  logNotice(s, 'claude', head, body, !(focused && s === active));
+  if (config.notify.in_app) toast(s, head, body);
+  if (s !== active) { s.attention = true; render(); }
+  return '사용자에게 알렸습니다.';
+}
+
 /** Claude 세션의 Cypher 도구가 물어 온 것에 답한다. `req.session`은 도구를 부른 세션의 번호. */
 async function mcpAction(req) {
   const s = (req.session != null && byId(req.session)) || (active && aliveClaude(active) ? active : null);
@@ -1813,6 +2070,10 @@ async function mcpAction(req) {
     case 'browser_select': return { text: browserSelect(s, req.id) };
     case 'items': return { text: groupItemsText(s) };
     case 'mindmap_write': return { text: await mindmapWrite(s, req) };
+    case 'memo_write': return { text: await memoWrite(s, req) };
+    case 'image_add': return { text: await imageAdd(s, req) };
+    case 'doc_show': return { text: await docShow(s, req) };
+    case 'notify': return { text: claudeNotice(s, req) };
     default: throw new Error(`모르는 요청입니다: ${req.action}`);
   }
 }
@@ -1902,10 +2163,12 @@ function reveal(items) {
 async function onCaptured(captured, near) {
   const [s] = await addImages([captured.image], { near, source: captured.source, shot: true, full: captured.full });
   if (!s) return;
-  const where = s.group ? `그룹 "${s.group}"` : `"${baseName(s.startCwd)}" 묶음`;
   toast(s, captured.full ? '페이지 전체 캡처' : '화면 캡처',
-    `${label(s)} — ${where}에 이미지 항목으로 넣었습니다.${captured.cut ? ' 페이지가 너무 길어 아래쪽은 잘렸습니다.' : ''} (누르면 엽니다)`);
+    `${label(s)} — ${whereOf(s)}에 이미지 항목으로 넣었습니다.${captured.cut ? ' 페이지가 너무 길어 아래쪽은 잘렸습니다.' : ''} (누르면 엽니다)`);
 }
+
+/** 그 항목이 놓인 곳을 말로: 그룹 "결제 개편" 또는 "ultron" 묶음. */
+const whereOf = (s) => (s.group ? `그룹 "${s.group}"` : `"${baseName(s.startCwd)}" 묶음`);
 
 /** 본창에서 브라우저 화면을 찍는다. 찍힌 그림은 `image-captured` 사건으로 돌아온다. */
 async function captureBrowser(full) {
@@ -2551,6 +2814,7 @@ window.addEventListener('keydown', (ev) => {
   else if (combo && key === 'e') focusComposer();
   else if (combo && key === 'k') showPalette();
   else if (combo && key === 'r') reopenLast();
+  else if (combo && key === 'a') showNotices();
   else if (key === 'f1') showHelp();
   else if (combo && key === 'arrowright') focusPane(1);
   else if (combo && key === 'arrowleft') focusPane(-1);
@@ -2570,6 +2834,7 @@ window.cypher = {
   onHook, onStatus, nextWaiting, writeState, rename, sendPrompt, text: sessionText, addImages, onCaptured, captureBrowser,
   setLook, currentLook, mcpAction, handoffSite, onMcpRequest,
   showPalette, paletteEntries, showClosed, reopenLast, restartSession, placeInOrder, inSidebarOrder, cycle, find, recallPrompt, useFolder, folderChoices,
+  createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
   get visible() { return visible; },
   get active() { return active; },
 };

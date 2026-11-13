@@ -463,3 +463,98 @@ li.attention .dot.kind { background: none; box-shadow: none; color: var(--text);
 #search-count { min-width: 44px; padding: 0 4px; font-size: 12px; color: var(--dim); text-align: center; font-variant-numeric: tabular-nums; }
 #search-count.none { color: var(--dead); }
 #search button.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+
+/* ───────── 문서 항목: Markdown·글자 파일을 읽기 좋은 모습으로 ───────── */
+
+.doc.reader { --reader-size: 14px; }
+.doc.reader .doc-bar { flex-wrap: wrap; row-gap: 4px; overflow: visible; }
+.reader-zoom { flex: none; min-width: 40px; text-align: center; font-size: 12px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.reader-note { flex: 0 1 auto; min-width: 0; max-width: 45%; overflow: hidden; text-overflow: ellipsis; font-size: 12px; color: var(--busy); }
+.reader-note.fail { color: var(--dead); }
+.reader-note:empty { display: none; }
+.reader-find { flex: none; padding: 6px 8px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.reader-find[hidden] { display: none; }
+.reader-scroll { flex: 1; min-height: 0; overflow: auto; outline: none; background: var(--bg); }
+.reader-empty { margin: 40px 34px; max-width: 520px; color: var(--dim); line-height: 1.7; }
+.reader-empty[hidden] { display: none; }
+
+/* 글: 읽기 좋은 폭으로 왼쪽에 붙이고 여백을 넉넉히 둔다. 크기는 --reader-size 하나로 함께 커지고 작아진다. */
+.reader-body {
+  max-width: 860px;
+  padding: 22px 36px 64px;
+  font: var(--reader-size)/1.7 var(--ui-font);
+  color: var(--text);
+  overflow-wrap: break-word;
+  user-select: text;
+}
+.reader-body:empty { display: none; }
+.reader-body > :first-child { margin-top: 0; }
+.reader-body h1, .reader-body h2, .reader-body h3, .reader-body h4, .reader-body h5, .reader-body h6 {
+  margin: 1.5em 0 0.6em;
+  font-weight: 600;
+  line-height: 1.3;
+}
+.reader-body h1 { font-size: 1.9em; padding-bottom: 0.25em; border-bottom: 1px solid var(--line); }
+.reader-body h2 { font-size: 1.5em; padding-bottom: 0.2em; border-bottom: 1px solid var(--line); }
+.reader-body h3 { font-size: 1.25em; }
+.reader-body h4 { font-size: 1.05em; }
+.reader-body h5, .reader-body h6 { font-size: 1em; color: var(--dim); }
+.reader-body p { margin: 0 0 0.9em; }
+.reader-body ul, .reader-body ol { margin: 0 0 0.9em; padding-left: 1.8em; }
+.reader-body li { margin: 0.2em 0; }
+.reader-body li > ul, .reader-body li > ol { margin: 0.2em 0 0; }
+.reader-body li > p { margin-bottom: 0.5em; }
+.reader-body li.reader-task { list-style: none; position: relative; }
+.reader-check {
+  position: absolute;
+  left: -1.5em;
+  top: 0.38em;
+  width: 1em;
+  height: 1em;
+  border: 1px solid var(--dim);
+  border-radius: 3px;
+  font-size: 0.85em;
+  font-weight: bold;
+  line-height: 0.95;
+  text-align: center;
+  user-select: none;
+}
+.reader-check.on { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+.reader-body strong { font-weight: 700; }
+.reader-body del { color: var(--dim); }
+.reader-body hr { margin: 1.5em 0; border: none; border-top: 1px solid var(--line); }
+.reader-body code { padding: 0.1em 0.35em; font: 0.9em var(--mono-font); background: var(--control); border-radius: 4px; }
+.reader-code { position: relative; margin: 0 0 1em; background: var(--field); border: 1px solid var(--line); border-radius: 6px; }
+.reader-code pre { margin: 0; padding: 0.8em 1em; overflow-x: auto; font: 0.9em/1.55 var(--mono-font); tab-size: 4; white-space: pre; }
+.reader-code pre code { padding: 0; font: inherit; background: none; border-radius: 0; }
+.reader-lang { position: absolute; top: 4px; right: 54px; font-size: 11px; line-height: 18px; color: var(--dim); user-select: none; pointer-events: none; }
+.reader-copy { position: absolute; top: 4px; right: 5px; height: 18px; padding: 0 6px; font-size: 11px; line-height: 16px; opacity: 0; user-select: none; }
+.reader-code:hover .reader-copy, .reader-copy:focus { opacity: 1; }
+.reader-code:not(:hover) .reader-lang { right: 8px; }
+.reader-body blockquote { margin: 0 0 1em; padding: 0.1em 1em; border-left: 3px solid var(--tree); color: var(--dim); }
+.reader-body blockquote > :first-child { margin-top: 0.4em; }
+.reader-body blockquote > :last-child { margin-bottom: 0.4em; }
+.reader-body blockquote.reader-alert { color: var(--text); border-left-color: var(--attention); }
+.reader-alert-name { margin: 0.4em 0 0.3em; font-weight: 700; color: var(--attention); }
+.reader-alert-tip { border-left-color: var(--ok); }
+.reader-alert-tip .reader-alert-name { color: var(--ok); }
+.reader-alert-warning, .reader-alert-important { border-left-color: var(--busy); }
+.reader-alert-warning .reader-alert-name, .reader-alert-important .reader-alert-name { color: var(--busy); }
+.reader-alert-caution { border-left-color: var(--dead); }
+.reader-alert-caution .reader-alert-name { color: var(--dead); }
+.reader-table { margin: 0 0 1em; overflow-x: auto; }
+.reader-table table { border-collapse: collapse; }
+.reader-table th, .reader-table td { padding: 0.35em 0.8em; border: 1px solid var(--line); text-align: left; vertical-align: top; }
+.reader-table th { background: var(--panel); font-weight: 600; }
+.reader-table .reader-al-c { text-align: center; }
+.reader-table .reader-al-r { text-align: right; }
+.reader-link { color: var(--attention); text-decoration: underline; text-underline-offset: 2px; cursor: pointer; }
+.reader-link:hover { color: var(--accent); }
+.reader-link code { color: inherit; }
+span.reader-image { color: var(--dim); }
+/* Markdown이 아닌 글자 파일: 고정폭 글 그대로 */
+.reader-body.plain { max-width: none; padding: 14px 18px 48px; }
+.reader-plain { margin: 0; font: var(--reader-size)/1.55 var(--mono-font); white-space: pre-wrap; overflow-wrap: anywhere; tab-size: 4; }
+/* 찾은 곳(CSS Custom Highlight) */
+::highlight(reader-hit) { background-color: var(--hit); color: var(--text); }
+::highlight(reader-hit-cur) { background-color: var(--hit-cur); color: var(--text); }

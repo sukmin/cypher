@@ -18,7 +18,9 @@ mod memory;
 mod mindmap;
 mod site;
 mod monitor;
+mod reader;
 mod status;
+mod template;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -179,6 +181,8 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
     let tools = SubmenuBuilder::new(app, "도구")
         .item(&item("palette", "빠른 이동·명령 찾기\tCtrl+Shift+K")?)
         .item(&item("reopen", "닫은 항목 다시 열기…\tCtrl+Shift+R")?)
+        .item(&item("notices", "알림 기록\tCtrl+Shift+A")?)
+        .item(&item("templates", "그룹 틀: 저장·불러오기…")?)
         .separator()
         .item(&item("snippets", "자주 쓰는 지시\tCtrl+Shift+P")?)
         .item(&item("broadcast", "동시 입력 켜기/끄기\tCtrl+Shift+B")?)
@@ -266,6 +270,17 @@ fn main() {
             extras::git_changes,
             extras::git_diff,
             extras::save_text,
+            extras::git_revert,
+            extras::git_commit,
+            reader::reader_pick,
+            reader::reader_read,
+            reader::reader_stamp,
+            template::template_list,
+            template::template_save,
+            template::template_read,
+            template::template_remove,
+            template::template_folder,
+            template::dirs_exist,
             memory::memory_info,
             memory::memory_export,
             memory::memory_import,
