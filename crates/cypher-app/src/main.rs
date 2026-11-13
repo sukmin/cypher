@@ -16,6 +16,7 @@ mod magnet;
 mod mcp;
 mod memo;
 mod memory;
+mod erd;
 mod mindmap;
 mod site;
 mod monitor;
@@ -44,6 +45,9 @@ pub struct AppState {
     pub token: String,
     /// Claude 세션의 상태줄·훅에 넣을 전달 프로그램 호출문. 전달 프로그램이 없으면 None.
     pub bridge: Option<String>,
+    /// 셸 세션의 PATH 맨 앞에 넣을 폴더: 전달 프로그램의 사본이 `claude.exe`라는 이름으로 들어 있다(끼움 프로그램).
+    /// 그 셸에서 사용자가 직접 띄우는 Claude Code에 Cypher의 설정·도구를 붙이는 데 쓴다. 만들지 못했으면 None.
+    pub shim: Option<PathBuf>,
     /// Claude 세션에 Cypher 도구(MCP)를 연결할지. 세션마다 `--mcp-config` 파일을 따로 만든다.
     pub mcp: bool,
     pub config: Config,
@@ -157,6 +161,25 @@ fn bridge_for_claude() -> Option<String> {
     bridge.exists().then(|| bridge_command(&bridge))
 }
 
+/// 끼움 프로그램을 둔 폴더(`%LOCALAPPDATA%\cypher\shim`). 그 안의 `claude.exe`는 전달 프로그램의 사본이다
+/// (`claude`라는 이름으로 불리면 진짜 Claude Code를 Cypher의 설정·도구와 함께 띄운다).
+/// 전달 프로그램이 바뀌었으면(새 버전) 사본도 바꾼다. 쓰는 중이라 바꾸지 못하면 있던 것을 그대로 쓴다.
+fn claude_shim() -> Option<PathBuf> {
+    let bridge = std::env::current_exe().ok()?.with_file_name("cypher-bridge.exe");
+    let stamp = |path: &Path| std::fs::metadata(path).ok().map(|meta| (meta.len(), meta.modified().ok()));
+    let source = stamp(&bridge)?;
+    let dir = data_dir()?.join("shim");
+    let copy = dir.join("claude.exe");
+    let fresh = stamp(&copy).is_some_and(|(len, modified)| len == source.0 && modified >= source.1);
+    if !fresh {
+        std::fs::create_dir_all(&dir).ok()?;
+        if let Err(error) = std::fs::copy(&bridge, &copy) {
+            log(&format!("끼움 프로그램을 만들지 못했습니다({}): {error}", copy.display()));
+        }
+    }
+    copy.exists().then_some(dir)
+}
+
 /// Claude 세션에 Cypher 도구를 연결하는 MCP 설정 파일을 만든다(`--mcp-config`로 넘긴다).
 /// 전달 프로그램이 MCP 서버 노릇을 하며 이 앱으로 요청을 나른다. 어느 세션이 부른 도구인지 알 수 있게
 /// (같은 그룹의 브라우저·항목을 찾는다) 세션 번호를 넣어 세션마다 파일을 따로 만든다.
@@ -199,6 +222,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
     let settings = SubmenuBuilder::new(app, "설정")
         .item(&item("look", "모양: 테마·글꼴·글자 크기…")?)
         .item(&item("home", "브라우저 시작 페이지…")?)
+        .item(&item("claude-command", "Claude 실행 명령…")?)
         .item(&item("settings", "Cypher 설정 파일 열기")?)
         .separator()
         .item(&item("claude-settings", "Claude 공통 설정 열기 (settings.json)")?)
@@ -234,7 +258,7 @@ fn main() {
                 return;
             }
             match event {
-                // 닫으려 할 때 바로 닫지 않고 화면에 알린다. 화면은 방금 친 글(자동 저장을 기다리던 메모·요청 파일·브레인스토밍)과
+                // 닫으려 할 때 바로 닫지 않고 화면에 알린다. 화면은 방금 친 글(자동 저장을 기다리던 메모·요청 파일·마인드맵)과
                 // 배치를 저장한 뒤 `app_close`로 닫는다. 그러지 않으면 닫기 직전에 친 글이 사라진다.
                 // 화면이 답하지 않으면 잠시 뒤에 그냥 닫고, 그 전에 다시 닫으려 하면 바로 닫는다.
                 tauri::WindowEvent::CloseRequested { api, .. } => {
@@ -262,6 +286,7 @@ fn main() {
             clean_old_settings();
             memo::clean_closed();
             mindmap::clean_closed();
+            erd::clean_closed();
             image::clean_closed();
             let config_path = config_path();
             let (config, config_error) = Config::load(&config_path);
@@ -285,6 +310,7 @@ fn main() {
                 status_port,
                 token,
                 bridge: bridge_for_claude(),
+                shim: claude_shim(),
                 mcp: config.browser.enabled,
                 config,
                 config_error,
@@ -369,6 +395,9 @@ fn main() {
             mindmap::mindmap_remove,
             mindmap::mindmap_export,
             mindmap::mindmap_pdf,
+            erd::erd_read,
+            erd::erd_write,
+            erd::erd_remove,
             commands::store_dirs,
             closed::closed_restore,
             commands::ui_zoom,

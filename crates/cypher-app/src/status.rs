@@ -5,7 +5,8 @@
 //! 한 번 보내고 끊는 신호는 다 처리한 뒤에 연결을 닫는다. 전달 프로그램은 그때까지 기다렸다가 끝나므로,
 //! Claude Code는 앱이 신호를 처리한 뒤에야 다음 일(파일 쓰기 등)을 한다.
 //! - 세션 번호: 뒤따르는 내용이 Claude Code 상태줄 JSON 또는 훅 JSON(한 번 보내고 끊는다).
-//!   훅 가운데 Write 도구의 직전·직후 신호는 화면에 그대로 넘기지 않고, 새로 만든 파일을 가려
+//!   훅 가운데 도구의 직전·직후·실패 신호는 화면에 그대로 넘기지 않는다. 도구 이름과 짧은 설명만 뽑아
+//!   `session-tool`로 알리고(사이드바의 "지금 하는 일"), Write 도구의 신호에서는 새로 만든 파일을 가려
 //!   `session-file`로 알린다(`created.rs`).
 //! - `mcp <세션 번호>`: Cypher 도구용 MCP 연결(계속 이어진다)
 
@@ -43,9 +44,9 @@ struct StatusPayload {
 #[derive(Clone, Serialize)]
 struct HookPayload {
     id: u32,
-    /// "UserPromptSubmit" | "Stop" | "Notification" | "SubagentStart" | "SubagentStop"
+    /// "UserPromptSubmit" | "Stop" | "Notification" | "SubagentStart" | "SubagentStop" | "SessionEnd"
     event: String,
-    /// Notification일 때의 종류(예: permission_prompt, idle_prompt).
+    /// Notification일 때의 종류(예: permission_prompt, idle_prompt), SessionEnd일 때의 끝난 까닭(예: clear).
     kind: Option<String>,
     message: Option<String>,
     /// 이 신호를 낸 서브에이전트의 번호(본 세션이 낸 신호면 없다).
@@ -61,6 +62,25 @@ struct FilePayload {
     path: String,
     /// "doc" | "image" | "http" | "other"
     kind: &'static str,
+}
+
+/// Claude 세션이 지금 쓰는 도구. 화면이 사이드바의 그 세션 줄에 보여 준다.
+/// 도구에 넘긴 내용(파일 내용, 긴 명령)은 넘기지 않고 짧게 줄인 설명만 넘긴다.
+#[derive(Clone, Serialize, Debug, PartialEq)]
+struct ToolPayload {
+    id: u32,
+    /// "start"(쓰기 직전) | "end"(끝남) | "fail"(실패했거나 중단됨)
+    phase: &'static str,
+    /// 보여 줄 도구 이름: Bash, Edit … (MCP 도구는 `mcp__서버__도구`의 도구 부분)
+    tool: String,
+    /// 한눈에 볼 설명: 명령의 첫 줄, 파일 이름, 찾는 글 …
+    detail: String,
+    /// 풍선말에 보일 조금 더 긴 설명: 전체 경로, 명령 앞부분 …
+    full: String,
+    /// 이 도구 호출의 번호. 시작과 끝을 짝짓는 데 쓴다.
+    use_id: Option<String>,
+    /// 이 도구를 쓴 서브에이전트의 번호(본 세션이 쓴 것이면 없다).
+    agent: Option<String>,
 }
 
 enum Message {
@@ -178,33 +198,119 @@ fn accept(app: AppHandle, token: &str, stream: TcpStream) {
     if reader.take(MAX_BODY).read_to_string(&mut body).is_err() {
         return;
     }
-    let _ = match parse(id, &body) {
+    let Ok(value) = serde_json::from_str::<Value>(&body) else { return };
+    // 도구 신호를 무엇에 쓸지는 설정을 따른다. 지금 쓰는 도구를 보여 주려고 모든 도구에 훅을 걸었을 때에도,
+    // 만든 파일 놓기를 꺼 두었으면 Write 도구의 신호로 파일을 놓지 않는다.
+    let (activity, files) = {
+        let state = app.state::<crate::AppState>();
+        (state.config.session.activity, state.config.session.show_created != "off")
+    };
+    if activity {
+        if let Some(tool) = tool_signal(id, &value) {
+            let _ = app.emit("session-tool", tool);
+        }
+    }
+    let _ = match read(id, &value) {
         Some(Message::Status(payload)) => app.emit("session-status", payload),
         Some(Message::Hook(payload)) => app.emit("session-hook", payload),
-        Some(Message::WillWrite { id, path }) => {
+        Some(Message::WillWrite { id, path }) if files => {
             crate::created::before_write(id, &path);
             Ok(())
         }
-        Some(Message::Wrote { id, path, base }) => match crate::created::after_write(id, &path, base.as_deref()) {
+        Some(Message::Wrote { id, path, base }) if files => match crate::created::after_write(id, &path, base.as_deref()) {
             Some(kind) => app.emit("session-file", FilePayload { id, path: path.to_string_lossy().into_owned(), kind }),
             None => Ok(()),
         },
-        None => Ok(()),
+        _ => Ok(()),
     };
     // 여기서 연결이 닫힌다. 전달 프로그램은 이것을 "처리했다"는 답으로 삼고 끝난다.
 }
 
+/// 도구 직전·직후·실패 신호인지.
+fn is_tool_event(event: &str) -> bool {
+    matches!(event, "PreToolUse" | "PostToolUse" | "PostToolUseFailure")
+}
+
+/// 글을 한 줄로 만들고(줄바꿈·잇단 공백은 한 칸) `max`자까지만 남긴다. 잘랐으면 끝에 …을 붙인다.
+fn brief(text: &str, max: usize) -> String {
+    let mut out = String::new();
+    let mut count = 0;
+    for word in text.split_whitespace() {
+        let gap = (count > 0).then_some(' ');
+        for ch in gap.into_iter().chain(word.chars()) {
+            if count == max {
+                out.push('…');
+                return out;
+            }
+            out.push(ch);
+            count += 1;
+        }
+    }
+    out
+}
+
+/// 경로의 마지막 이름(파일 이름).
+fn file_name(path: &str) -> &str {
+    path.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or(path)
+}
+
+const DETAIL_MAX: usize = 60;
+const FULL_MAX: usize = 300;
+
+/// 도구 이름과 넘긴 값에서 보여 줄 이름, 짧은 설명, 조금 더 긴 설명을 뽑는다.
+/// 넘긴 값의 모양을 모르는 도구(MCP 도구 등)는 흔한 이름의 글자 값 하나를 설명으로 쓴다.
+fn describe_tool(name: &str, input: &Value) -> (String, String, String) {
+    let field = |key: &str| input[key].as_str().map(str::trim).filter(|text| !text.is_empty());
+    // MCP 도구: `mcp__서버__도구`. 도구 이름만 보이고, 따로 보일 설명이 없으면 서버 이름을 설명으로 쓴다.
+    let (label, server) = match name.strip_prefix("mcp__").and_then(|rest| rest.rsplit_once("__")) {
+        Some((server, tool)) if !tool.is_empty() => (tool, Some(server)),
+        _ => (name, None),
+    };
+    let path = ["file_path", "notebook_path"].into_iter().find_map(field);
+    let (detail, full) = if let Some(path) = path {
+        (file_name(path).to_string(), path.to_string())
+    } else if let Some(text) = ["command", "pattern", "query", "url", "description", "skill", "path", "prompt", "title", "name", "text"]
+        .into_iter()
+        .find_map(field)
+    {
+        // 명령은 첫 줄만 짧게 보이고, 풍선말에는 앞부분을 조금 더 보인다.
+        (text.lines().find(|line| !line.trim().is_empty()).unwrap_or(text).to_string(), text.to_string())
+    } else {
+        let server = server.unwrap_or_default().to_string();
+        (server.clone(), server)
+    };
+    (label.to_string(), brief(&detail, DETAIL_MAX), brief(&full, FULL_MAX))
+}
+
+/// 도구 직전·직후·실패 신호에서 화면에 보일 것만 뽑는다. 도구 신호가 아니면 None.
+fn tool_signal(id: u32, v: &Value) -> Option<ToolPayload> {
+    let phase = match v["hook_event_name"].as_str()? {
+        "PreToolUse" => "start",
+        "PostToolUse" => "end",
+        "PostToolUseFailure" => "fail",
+        _ => return None,
+    };
+    let name = v["tool_name"].as_str().map(str::trim).filter(|name| !name.is_empty())?;
+    let (tool, detail, full) = describe_tool(name, &v["tool_input"]);
+    let text = |v: &Value| v.as_str().filter(|text| !text.is_empty()).map(str::to_string);
+    Some(ToolPayload { id, phase, tool, detail, full, use_id: text(&v["tool_use_id"]), agent: text(&v["agent_id"]) })
+}
+
 /// 상태줄 JSON과 훅 JSON이 같은 통로로 온다. 훅에는 `hook_event_name`이 있다.
+#[cfg(test)]
 fn parse(id: u32, body: &str) -> Option<Message> {
-    let v: Value = serde_json::from_str(body).ok()?;
+    read(id, &serde_json::from_str(body).ok()?)
+}
+
+fn read(id: u32, v: &Value) -> Option<Message> {
     let text = |v: &Value| v.as_str().map(str::to_string);
     if let Some(event) = text(&v["hook_event_name"]) {
-        // 도구 직전·직후 신호: Write 도구가 쓰는 파일만 본다. 그 밖의 도구 신호는 버린다.
-        if event == "PreToolUse" || event == "PostToolUse" {
-            if v["tool_name"].as_str() != Some("Write") {
+        // 도구 신호에서는 Write 도구가 쓴 파일만 본다(지금 쓰는 도구는 `tool_signal`이 따로 뽑는다).
+        if is_tool_event(&event) {
+            if event == "PostToolUseFailure" || v["tool_name"].as_str() != Some("Write") {
                 return None;
             }
-            let path = written_path(&v)?;
+            let path = written_path(v)?;
             return Some(if event == "PreToolUse" {
                 Message::WillWrite { id, path }
             } else {
@@ -214,7 +320,8 @@ fn parse(id: u32, body: &str) -> Option<Message> {
         return Some(Message::Hook(HookPayload {
             id,
             event,
-            kind: text(&v["notification_type"]),
+            // SessionEnd에서는 끝난 까닭(clear, logout, prompt_input_exit …)을 종류 자리에 싣는다.
+            kind: text(&v["notification_type"]).or_else(|| text(&v["reason"])),
             message: text(&v["message"]),
             agent: text(&v["agent_id"]),
             agent_type: text(&v["agent_type"]),
@@ -330,6 +437,51 @@ mod tests {
             panic!("훅으로 읽혀야 한다");
         };
         assert_eq!((h.event.as_str(), h.agent.as_deref()), ("SubagentStart", Some("agent-abc123")));
+    }
+
+    #[test]
+    fn 도구_신호에서_이름과_짧은_설명을_뽑는다() {
+        let signal = |body: &str| tool_signal(5, &serde_json::from_str(body).unwrap());
+        let shown = |body: &str| signal(body).map(|t| (t.phase, t.tool, t.detail));
+        let pre = r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_use_id":"toolu_1","tool_input":{"command":"\n  cargo build   --workspace\necho done","description":"빌드"}}"#;
+        let tool = signal(pre).unwrap();
+        assert_eq!((tool.id, tool.phase, tool.tool.as_str(), tool.detail.as_str()), (5, "start", "Bash", "cargo build --workspace"));
+        assert_eq!(tool.full, "cargo build --workspace echo done");
+        assert_eq!((tool.use_id.as_deref(), tool.agent), (Some("toolu_1"), None));
+
+        // 파일을 다루는 도구는 파일 이름을, 풍선말에는 전체 경로를 보인다. 파일 내용은 넘기지 않는다.
+        let edit = r#"{"hook_event_name":"PostToolUse","tool_name":"Edit","agent_id":"agent-1","tool_input":{"file_path":"C:\\ws\\ui\\main.js","old_string":"비밀","new_string":"x"}}"#;
+        let tool = signal(edit).unwrap();
+        assert_eq!((tool.phase, tool.tool.as_str(), tool.detail.as_str(), tool.full.as_str()), ("end", "Edit", "main.js", r"C:\ws\ui\main.js"));
+        assert_eq!(tool.agent.as_deref(), Some("agent-1"));
+        assert_eq!(
+            shown(r#"{"hook_event_name":"PostToolUseFailure","tool_name":"Read","tool_input":{"file_path":"src/없는 파일.rs"},"error":"없음"}"#),
+            Some(("fail", "Read".into(), "없는 파일.rs".into()))
+        );
+        assert_eq!(shown(r#"{"hook_event_name":"PreToolUse","tool_name":"Grep","tool_input":{"pattern":"fn main","path":"src"}}"#), Some(("start", "Grep".into(), "fn main".into())));
+        // MCP 도구는 도구 이름만 보이고, 설명할 값이 없으면 서버 이름을 보인다.
+        assert_eq!(
+            shown(r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__cypher__browser_navigate","tool_input":{"url":"https://example.com/a"}}"#),
+            Some(("start", "browser_navigate".into(), "https://example.com/a".into()))
+        );
+        assert_eq!(shown(r#"{"hook_event_name":"PreToolUse","tool_name":"mcp__cypher__browser_read","tool_input":{}}"#), Some(("start", "browser_read".into(), "cypher".into())));
+        assert_eq!(shown(r#"{"hook_event_name":"PreToolUse","tool_name":"TodoWrite","tool_input":{"todos":[{"content":"x"}]}}"#), Some(("start", "TodoWrite".into(), String::new())));
+        // 긴 설명은 잘라서 넘긴다.
+        let long = format!(r#"{{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{{"command":"{}"}}}}"#, "가".repeat(500));
+        let tool = signal(&long).unwrap();
+        assert_eq!((tool.detail.chars().count(), tool.full.chars().count()), (DETAIL_MAX + 1, FULL_MAX + 1));
+        assert!(tool.detail.ends_with('…'));
+        // 도구 신호가 아니거나 도구 이름이 없으면 뽑지 않는다.
+        for other in [
+            r#"{"hook_event_name":"Stop"}"#,
+            r#"{"hook_event_name":"PreToolUse","tool_input":{"command":"ls"}}"#,
+            r#"{"model":{"id":"x"}}"#,
+        ] {
+            assert_eq!(signal(other), None, "{other}");
+        }
+        // 도구 신호는 훅 알림으로 화면에 넘기지 않는다(Write 도구의 실패 신호도 파일로 치지 않는다).
+        assert!(parse(5, pre).is_none() && parse(5, edit).is_none());
+        assert!(parse(5, r#"{"hook_event_name":"PostToolUseFailure","tool_name":"Write","tool_input":{"file_path":"C:/a.md"}}"#).is_none());
     }
 
     #[test]

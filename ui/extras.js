@@ -60,7 +60,7 @@ export function showSnippets() {
   const rows = list.map((text, index) => {
     const row = make('div', 'row');
     const use = make('button', 'row-title', text);
-    use.title = '누르면 활성 세션 입력창에 넣습니다';
+    use.title = '세션 입력창에 넣기';
     use.onclick = () => { close(); api.pasteText(text); };
     const remove = make('button', 'close', '×');
     remove.title = '지우기';
@@ -152,8 +152,8 @@ const HELP = [
   ['그룹 틀', '도구 → 그룹 틀, 또는 묶음 머리 오른쪽 클릭 → 틀로 저장: 묶음의 구성(세션 폴더·메모·사이트·HTTP·문서)을 저장해 두고 한 번에 펼치기'],
   ['끌어다 놓기', '사이드바에 놓으면 항목으로(이미지·메모·HTTP·사이트) · 터미널에 놓으면 경로·글자 입력'],
   ['사이트(브라우저)', '[캡처]: 화면을 이미지 항목으로(Shift+클릭: 페이지 전체) · [Claude에게]: 같은 그룹의 Claude 세션에 넘기기 · [외부 브라우저]: 기본 브라우저로 열기'],
-  ['브레인스토밍', 'Tab: 하위 가지 · Enter: 형제 가지(글 없이 Enter: 빈 가지) · 글자 입력·F2: 고치기 · Delete: 지우기 · 끌기: 옮기기 · Alt+↑/↓: 순서 바꾸기'],
-  ['브레인스토밍', 'Ctrl+E: 그림 ↔ 코드 · 오른쪽 클릭: 표식(깃발·별·순위·진행·이모지)·색 · Ctrl+/: 접기 · Ctrl+Z/Y: 되돌리기 · Ctrl+C/V: 가지 복사·붙여넣기 · Ctrl+휠: 확대 · Ctrl+0: 맞춤 · Ctrl+S: 저장'],
+  ['마인드맵', 'Tab: 하위 가지 · Enter: 형제 가지(글 없이 Enter: 빈 가지) · 글자 입력·F2: 고치기 · Delete: 지우기 · 끌기: 옮기기 · Alt+↑/↓: 순서 바꾸기'],
+  ['마인드맵', 'Ctrl+E: 그림 ↔ 코드 · 오른쪽 클릭: 표식(깃발·별·순위·진행·이모지)·색 · Ctrl+/: 접기 · Ctrl+Z/Y: 되돌리기 · Ctrl+C/V: 가지 복사·붙여넣기 · Ctrl+휠: 확대 · Ctrl+0: 맞춤 · Ctrl+S: 저장'],
   ['사이드바 빈 곳 클릭 뒤 ↑/↓', '항목 사이를 오가기 (Home/End: 처음·끝, Enter: 그 항목으로 초점)'],
   ['설정 → 모양', '테마(어두운·밝은·Windows 고전), 글꼴, 글자 크기'],
   ['Ctrl+Shift+B', '동시 입력 (나란히 보이는 모든 세션)'],
@@ -412,7 +412,7 @@ function initDiff() {
 
   const commit = make('button', '', '커밋…');
   Object.assign(commit, { id: 'diff-commit', disabled: true, onclick: showCommit });
-  commit.title = '바뀐 파일 가운데 고른 것만 커밋하기 (푸시는 하지 않습니다)';
+  commit.title = '고른 파일만 커밋 (푸시 안 함)';
   $('diff-refresh').before(commit);
 
   const bar = make('div');
@@ -426,10 +426,10 @@ function initDiff() {
   });
   const send = make('button', 'send', '세션에 넣기');
   send.id = 'diff-quote-send';
-  send.title = '고른 줄과 적은 글을 세션 입력창에 넣습니다(보내지는 않습니다) · Enter';
+  send.title = '고른 줄과 글을 세션 입력창에 넣기 (Enter) · 보내지는 않음';
   send.onclick = sendQuote;
   const clear = make('button', '', '선택 풀기');
-  clear.title = '고른 줄을 풉니다(적은 글은 남습니다) · Esc';
+  clear.title = '고른 줄 풀기 (Esc)';
   clear.onclick = () => clearPicked();
   bar.append(where, text, send, clear);
   $view.after(bar);
@@ -525,7 +525,7 @@ async function loadDiff() {
     $files.replaceChildren(...changes.files.map((file) => {
       const row = make('li', file.path === diffSelected ? 'selected' : '');
       row.append(make('span', `status ${file.untracked ? 'new' : ''}`, file.status), make('span', 'path', file.path));
-      row.title = `${file.from ? `${file.from} → ` : ''}${file.path}\n클릭: 차이 보기 · 두 번 누르기: 파일 열기 · 오른쪽 클릭: 되돌리기·열기·경로 복사`;
+      row.title = `${file.from ? `${file.from} → ` : ''}${file.path}\n클릭: 차이 보기 · 두 번 누르기: 열기 · 오른쪽 클릭: 메뉴`;
       row.dataset.path = file.path;
       row.onclick = () => selectFile(file);
       row.ondblclick = () => openChanged(diffRoot, file.path, true);
@@ -677,7 +677,7 @@ function endPickDrag() {
 function quoteTargets() {
   const s = diffSession;
   if (!s) return [];
-  if (s.term && !s.exited && s.profile?.claude && s.pane?.isConnected !== false) return [{ s, label: api.label(s) }];
+  if (s.term && !s.exited && (api.runsClaude ? api.runsClaude(s) : s.profile?.claude) && s.pane?.isConnected !== false) return [{ s, label: api.label(s) }];
   return api.claudes?.(s) || [];
 }
 

@@ -67,11 +67,11 @@ pub fn open_claude_file(which: String) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// 사용자의 것을 두는 폴더들(메모·브레인스토밍·이미지). 같은 그룹의 Claude 세션에 파일 경로를 알려 줄 때 쓴다.
+/// 사용자의 것을 두는 폴더들(메모·마인드맵·ERD·이미지). 같은 그룹의 Claude 세션에 파일 경로를 알려 줄 때 쓴다.
 #[tauri::command]
 pub fn store_dirs() -> serde_json::Value {
     let dir = |name: &str| crate::user_dir().join(name).to_string_lossy().into_owned();
-    serde_json::json!({ "memos": dir("memos"), "mindmaps": dir("mindmaps"), "images": dir("images") })
+    serde_json::json!({ "memos": dir("memos"), "mindmaps": dir("mindmaps"), "erds": dir("erds"), "images": dir("images") })
 }
 
 /// 본창 화면 전체의 배율(화면 글자 크기 설정). 사이트 항목의 웹 페이지에는 영향이 없다.
@@ -165,6 +165,7 @@ pub fn session_create(
     rows: u16,
     resume: Option<String>,
     worktree: Option<String>,
+    command: Option<String>,
     on_output: Channel<InvokeResponseBody>,
 ) -> Result<u32, String> {
     let profile = state.config.profile(&profile).ok_or("알 수 없는 프로필입니다")?;
@@ -173,12 +174,39 @@ pub fn session_create(
         return Err(format!("폴더가 없습니다: {}", cwd.display()));
     }
 
+    // Claude 프로필은 사용자가 설정 → "Claude 실행 명령…"에 적어 둔 명령으로 띄운다(없으면 프로필의 것).
+    let custom = command.as_deref().map(str::trim).filter(|text| profile.claude && !text.is_empty());
+    let (program, mut args) = match custom {
+        Some(text) => cypher_core::profile::split_command(text)
+            .ok_or("Claude 실행 명령을 읽지 못했습니다(따옴표가 닫히지 않았거나 비어 있습니다). 설정 → Claude 실행 명령에서 고치세요.")?,
+        None => (profile.program.clone(), profile.args.clone()),
+    };
+
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-    let mut args = profile.args.clone();
+    let mut path_first: Option<PathBuf> = None;
     let mut env: Vec<(String, String)> = vec![
         ("TERM_PROGRAM".into(), "cypher".into()),
         ("COLORTERM".into(), "truecolor".into()),
     ];
+    // Claude Code에 붙일 것: Cypher 도구(MCP) 설정 파일과, 상태줄·훅을 전달 프로그램으로 돌리는 설정 파일.
+    // 전달 프로그램이 앱을 찾는 데 쓰는 값은 환경 변수로 넘긴다. 설정 파일을 만들지 못했으면 None.
+    let attach = |env: &mut Vec<(String, String)>| -> Option<(PathBuf, Option<PathBuf>)> {
+        let bridge = state.bridge.as_ref()?;
+        // 이 폴더에서 원래 쓰였을 상태줄(HUD)이 있으면 전달 프로그램이 이어서 실행하게 알려 준다.
+        let original = crate::claude::original_status_line(&cwd);
+        let watch_files = state.config.session.show_created != "off";
+        let activity = state.config.session.activity;
+        let settings = crate::claude::write_settings(bridge, id, original.as_ref(), watch_files, activity)?;
+        env.push(("CYPHER_PORT".into(), state.status_port.to_string()));
+        env.push(("CYPHER_TOKEN".into(), state.token.clone()));
+        env.push(("CYPHER_SESSION".into(), id.to_string()));
+        if let Some(original) = original {
+            env.push(("CYPHER_STATUSLINE".into(), original.command));
+        }
+        // Cypher 도구(같은 그룹의 브라우저 조작, 항목 보기 등)를 이 세션에 연결한다.
+        let mcp = state.mcp.then(|| crate::write_mcp_config(state.status_port, &state.token, id)).flatten();
+        Some((settings, mcp))
+    };
     if profile.claude {
         if let Some(session) = resume {
             if !is_session_id(&session) {
@@ -196,36 +224,49 @@ pub fn session_create(
             args.push(name);
         }
         env.push(("FORCE_HYPERLINK".into(), "1".into()));
-        if let Some(mcp) = state.mcp.then(|| crate::write_mcp_config(state.status_port, &state.token, id)).flatten() {
-            // Cypher 도구(같은 그룹의 브라우저 조작, 항목 보기 등)를 이 세션에 연결한다.
-            args.push("--mcp-config".into());
-            args.push(mcp.to_string_lossy().into_owned());
-        }
-        if let Some(bridge) = &state.bridge {
-            // 이 폴더에서 원래 쓰였을 상태줄(HUD)이 있으면 전달 프로그램이 이어서 실행하게 알려 준다.
-            let original = crate::claude::original_status_line(&cwd);
-            let watch_files = state.config.session.show_created != "off";
-            if let Some(settings) = crate::claude::write_settings(bridge, id, original.as_ref(), watch_files) {
+        match attach(&mut env) {
+            Some((settings, mcp)) => {
+                if let Some(mcp) = mcp {
+                    args.push("--mcp-config".into());
+                    args.push(mcp.to_string_lossy().into_owned());
+                }
                 args.push("--settings".into());
                 args.push(settings.to_string_lossy().into_owned());
-                env.push(("CYPHER_PORT".into(), state.status_port.to_string()));
-                env.push(("CYPHER_TOKEN".into(), state.token.clone()));
-                env.push(("CYPHER_SESSION".into(), id.to_string()));
-                if let Some(original) = original {
-                    env.push(("CYPHER_STATUSLINE".into(), original.command));
+            }
+            // 전달 프로그램이 없어도 Cypher 도구는 붙일 수 있으면 붙인다(전달 프로그램이 없으면 설정 파일도 만들어지지 않는다).
+            None => {
+                if let Some(mcp) = state.mcp.then(|| crate::write_mcp_config(state.status_port, &state.token, id)).flatten() {
+                    args.push("--mcp-config".into());
+                    args.push(mcp.to_string_lossy().into_owned());
                 }
             }
         }
-    } else if wants_powershell_hook(&profile.program, &args) {
-        // Claude 세션이 아닌 셸에서만 UTF-8을 기본으로 맞춘다(Claude Code는 스스로 UTF-8로 주고받는다).
-        let utf8 = if state.config.session.utf8 { POWERSHELL_UTF8 } else { "" };
-        args.extend(["-NoExit".into(), "-Command".into(), format!("{utf8}{POWERSHELL_CWD_HOOK}")]);
-    } else if state.config.session.utf8 && is_plain_cmd(&profile.program, &args) {
-        args.extend(["/K".into(), "chcp 65001 >nul".into()]);
+    } else {
+        if wants_powershell_hook(&program, &args) {
+            // Claude 세션이 아닌 셸에서만 UTF-8을 기본으로 맞춘다(Claude Code는 스스로 UTF-8로 주고받는다).
+            let utf8 = if state.config.session.utf8 { POWERSHELL_UTF8 } else { "" };
+            args.extend(["-NoExit".into(), "-Command".into(), format!("{utf8}{POWERSHELL_CWD_HOOK}")]);
+        } else if state.config.session.utf8 && is_plain_cmd(&program, &args) {
+            args.extend(["/K".into(), "chcp 65001 >nul".into()]);
+        }
+        // 이 셸에서 사용자가 직접 띄우는 Claude Code에도 상태줄·훅·Cypher 도구를 붙인다(`[session] claude_in_shell`).
+        // PATH 맨 앞에 끼움 프로그램(`claude.exe`)의 폴더를 넣고, 그 프로그램이 붙일 파일의 경로를 환경 변수로 넘긴다.
+        if state.config.session.claude_in_shell {
+            if let Some(shim) = &state.shim {
+                if let Some((settings, mcp)) = attach(&mut env) {
+                    env.push(("CYPHER_CLAUDE_SETTINGS".into(), settings.to_string_lossy().into_owned()));
+                    if let Some(mcp) = mcp {
+                        env.push(("CYPHER_CLAUDE_MCP".into(), mcp.to_string_lossy().into_owned()));
+                    }
+                    path_first = Some(shim.clone());
+                }
+            }
+        }
     }
 
     let options = SpawnOptions {
-        program: profile.program.clone(),
+        path_first,
+        program,
         args,
         cwd,
         env,

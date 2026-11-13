@@ -137,7 +137,7 @@ li:hover .close, .pane-head:hover .close { visibility: visible; }
 
 /* 묶음(그룹·폴더) 머리: 배경이 있는 굵은 줄. 그 아래 세션은 들여쓰고 이음선으로 잇는다. */
 #sessions li.group {
-  grid-template-columns: 12px 1fr auto auto auto;
+  grid-template-columns: 12px 1fr auto auto auto auto;
   margin-top: 10px;
   padding: 6px 8px;
   font-size: 12px;

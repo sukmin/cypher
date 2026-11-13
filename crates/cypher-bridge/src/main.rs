@@ -118,9 +118,134 @@ fn relay_mcp() {
     }
 }
 
+/// Cypher의 인자를 붙이지 않는 하위 명령: 대화를 여는 것이 아니라 Claude Code를 관리하는 명령들.
+const MANAGING: [&str; 10] = ["mcp", "update", "upgrade", "doctor", "install", "config", "plugin", "auth", "setup-token", "migrate-installer"];
+
+/// 대화를 여는 호출인지(Cypher의 설정·도구를 붙일지). 관리 명령과 버전·도움말만 묻는 호출에는 붙이지 않는다.
+fn opens_session(args: &[std::ffi::OsString]) -> bool {
+    let text: Vec<String> = args.iter().map(|arg| arg.to_string_lossy().into_owned()).collect();
+    let managing = text.first().is_some_and(|first| MANAGING.contains(&first.as_str()));
+    let asking = text.iter().any(|arg| matches!(arg.as_str(), "--version" | "-v" | "--help" | "-h"));
+    !managing && !asking
+}
+
+/// 같은 폴더인지(표기만 다른 것은 같은 것으로 본다).
+fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
+    let plain = |p: &std::path::Path| p.to_string_lossy().replace('/', "\\").trim_end_matches('\\').to_lowercase();
+    plain(a) == plain(b)
+}
+
+/// PATH에서 진짜 `claude`를 찾는다. 이 프로그램이 놓인 폴더(`own`)는 건너뛴다.
+fn find_claude(path: &std::ffi::OsStr, own: &std::path::Path) -> Option<PathBuf> {
+    std::env::split_paths(path)
+        .filter(|dir| !dir.as_os_str().is_empty() && !same_dir(dir, own))
+        .flat_map(|dir| ["claude.exe", "claude.cmd", "claude.bat"].map(|name| dir.join(name)))
+        .find(|file| file.is_file())
+}
+
+/// Ctrl+C를 이 프로그램이 받아 끝나지 않게 한다(받는 것은 Claude Code다). 자식 프로세스에는 이어지지 않는다.
+#[cfg(windows)]
+fn keep_running_on_ctrl_c() {
+    extern "system" fn handled(_kind: u32) -> i32 {
+        1
+    }
+    extern "system" {
+        fn SetConsoleCtrlHandler(handler: Option<extern "system" fn(u32) -> i32>, add: i32) -> i32;
+    }
+    // SAFETY: 넘기는 함수는 프로그램이 끝날 때까지 살아 있고, 아무 상태도 건드리지 않는다.
+    unsafe {
+        SetConsoleCtrlHandler(Some(handled), 1);
+    }
+}
+
+#[cfg(not(windows))]
+fn keep_running_on_ctrl_c() {}
+
+/// `claude`라는 이름으로 불렸을 때(끼움 프로그램): 진짜 Claude Code를 Cypher의 설정 파일(상태줄·훅)과 도구 설정을
+/// 붙여 띄우고, 끝날 때까지 기다렸다가 그 종료 코드를 돌려준다.
+///
+/// Cypher는 셸 세션의 PATH 맨 앞에 이 프로그램의 사본이 `claude.exe`로 든 폴더를 넣는다. 그래서 그 셸에서 사용자가
+/// `claude`를 치면(별칭·함수·스크립트가 이름으로 부르는 것 포함) 이 프로그램이 먼저 불린다. 인자는 받은 그대로 넘긴다.
+fn run_claude(own: &std::path::Path) -> i32 {
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    let own_dir = own.parent().unwrap_or(own);
+    let Some(real) = find_claude(&path, own_dir) else {
+        eprintln!("Cypher: claude 명령을 찾지 못했습니다. Claude Code가 PATH에 있어야 합니다.");
+        return 127;
+    };
+    let given: Vec<std::ffi::OsString> = std::env::args_os().skip(1).collect();
+    let mut command = Command::new(&real);
+    if opens_session(&given) {
+        // `--mcp-config`는 값을 여러 개 받으므로 사용자의 인자 바로 앞에 두지 않는다(첫 인자를 값으로 삼킨다).
+        if let Some(mcp) = std::env::var_os("CYPHER_CLAUDE_MCP").filter(|value| !value.is_empty()) {
+            command.arg("--mcp-config").arg(mcp);
+        }
+        if let Some(settings) = std::env::var_os("CYPHER_CLAUDE_SETTINGS").filter(|value| !value.is_empty()) {
+            command.arg("--settings").arg(settings);
+        }
+    }
+    command.args(&given);
+    // 이 Claude Code가 스스로 다시 띄우는 claude(도구로 실행하는 것 등)는 이 프로그램을 거치지 않게 한다:
+    // 같은 세션 번호로 신호가 겹쳐 오지 않도록 PATH에서 이 폴더를 빼고, 붙일 파일의 경로도 넘기지 않는다.
+    let rest = std::env::join_paths(std::env::split_paths(&path).filter(|dir| !same_dir(dir, own_dir))).unwrap_or(path);
+    command.env("PATH", rest).env_remove("CYPHER_CLAUDE_SETTINGS").env_remove("CYPHER_CLAUDE_MCP");
+    keep_running_on_ctrl_c();
+    match command.status() {
+        Ok(status) => status.code().unwrap_or(1),
+        Err(error) => {
+            eprintln!("Cypher: {}을(를) 실행하지 못했습니다: {error}", real.display());
+            126
+        }
+    }
+}
+
 fn main() {
+    // `claude`라는 이름의 사본으로 불렸으면 끼움 프로그램으로 동작한다.
+    if let Ok(own) = std::env::current_exe() {
+        if own.file_stem().is_some_and(|stem| stem.eq_ignore_ascii_case("claude")) {
+            std::process::exit(run_claude(&own));
+        }
+    }
     match std::env::args().nth(1).as_deref() {
         Some("mcp") => relay_mcp(),
         _ => forward_status(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::ffi::OsString;
+
+    #[test]
+    fn 대화를_여는_호출에만_인자를_붙인다() {
+        let opens = |args: &[&str]| opens_session(&args.iter().map(OsString::from).collect::<Vec<_>>());
+        assert!(opens(&[]) && opens(&["--dangerously-skip-permissions"]) && opens(&["고쳐 줘", "--model", "opus"]));
+        assert!(opens(&["-p", "질문"]) && opens(&["--resume", "abc"]) && opens(&["-c"]));
+        // 관리 명령과 버전·도움말에는 붙이지 않는다.
+        for args in [&["mcp", "list"][..], &["update"], &["doctor"], &["--version"], &["-h"], &["config", "list"]] {
+            assert!(!opens(args), "{args:?}");
+        }
+        // 프롬프트가 관리 명령과 같은 낱말로 시작해도, 첫 인자 전체가 그 낱말일 때만 관리 명령이다.
+        assert!(opens(&["update the readme"]));
+    }
+
+    #[test]
+    fn 진짜_claude는_이_프로그램의_폴더를_건너뛰고_찾는다() {
+        let root = std::env::temp_dir().join("cypher-shim-test");
+        let _ = std::fs::remove_dir_all(&root);
+        let (shim, first, second) = (root.join("shim"), root.join("a b"), root.join("c"));
+        for dir in [&shim, &first, &second] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(shim.join("claude.exe"), "").unwrap();
+        std::fs::write(second.join("claude.exe"), "").unwrap();
+        let path = std::env::join_paths([shim.clone(), first.clone(), second.clone()]).unwrap();
+        assert_eq!(find_claude(&path, &shim), Some(second.join("claude.exe")));
+        // 앞선 폴더의 .cmd가 뒤 폴더의 .exe보다 먼저다(PATH 순서). 표기가 달라도 자기 폴더는 건너뛴다.
+        std::fs::write(first.join("claude.cmd"), "").unwrap();
+        let upper = PathBuf::from(shim.to_string_lossy().to_uppercase().replace('\\', "/") + "/");
+        assert_eq!(find_claude(&path, &upper), Some(first.join("claude.cmd")));
+        assert_eq!(find_claude(&std::env::join_paths([shim.clone()]).unwrap(), &shim), None);
     }
 }

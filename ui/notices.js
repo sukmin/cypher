@@ -81,7 +81,7 @@ export function showNotices() {
       make('b', '', entry.title),
       make('span', 'notice-body', entry.body),
     );
-    use.title = `${KIND_TEXT[entry.kind] || KIND_TEXT.info}${entry.group ? ` · ${entry.group}` : ''}\n${entry.title}\n${entry.body}${entry.key != null ? '\n누르면 그 항목으로 갑니다' : ''}`;
+    use.title = `${KIND_TEXT[entry.kind] || KIND_TEXT.info}${entry.group ? ` · ${entry.group}` : ''}\n${entry.title}\n${entry.body}${entry.key != null ? '\n클릭: 그 항목으로 가기' : ''}`;
     use.onclick = () => {
       close();
       if (entry.key == null) return;

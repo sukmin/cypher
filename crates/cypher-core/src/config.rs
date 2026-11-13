@@ -56,6 +56,14 @@ pub struct Session {
     /// Claude 세션이 새로 만든 파일을 그 세션의 묶음에 항목으로 놓을지.
     /// "known": 문서(.md, .txt)·이미지·HTTP 요청만, "all": 그 밖의 글자 파일도 문서로, "off": 놓지 않음.
     pub show_created: String,
+    /// Claude 세션이 지금 쓰는 도구(`Edit · main.js`, `Bash · cargo build`)를 사이드바의 그 줄에 보여 줄지.
+    /// 켜면 도구를 쓸 때마다 전달 프로그램이 한 번씩 뜬다(도구마다 수십 ms).
+    pub activity: bool,
+    /// 셸 세션(PowerShell 등)에서 사용자가 직접 띄운 `claude`에도 상태줄·훅·Cypher 도구를 붙일지.
+    pub claude_in_shell: bool,
+    /// 다시 시작했을 때 세션을 사이드바에만 되살려 두고(쉬는 세션), 사용자가 누른 것만 재개할지.
+    /// 끄면 예전처럼 모든 세션을 바로 띄운다.
+    pub restore_on_click: bool,
 }
 
 impl Default for Config {
@@ -89,7 +97,7 @@ impl Default for Notify {
 
 impl Default for Session {
     fn default() -> Self {
-        Self { restore: true, scrollback: 10_000, utf8: true, show_created: "known".into() }
+        Self { restore: true, scrollback: 10_000, utf8: true, show_created: "known".into(), activity: true, claude_in_shell: true, restore_on_click: true }
     }
 }
 
@@ -149,11 +157,18 @@ pub const DEFAULT_TEXT: &str = r#"# Cypher 설정. 고친 뒤 Cypher를 다시 �
 
 [session]
 # restore = true       # 다시 시작할 때 이전 세션과 배치를 되살림
+# restore_on_click = true   # 되살린 세션을 바로 띄우지 않고, 사이드바에서 누른 세션(이나 묶음 머리의 ▶)만 재개. false면 모두 바로 띄움
 # scrollback = 10000   # 세션마다 기억할 지난 출력 줄 수
 # utf8 = true          # PowerShell·cmd 세션의 글자 인코딩을 UTF-8로 (Claude 세션은 해당 없음)
 # Claude 세션이 새로 만든 파일을 그 세션의 묶음에 항목으로 놓기.
 #   "known": 문서(.md, .txt)·이미지·HTTP 요청(.http)만 / "all": 그 밖의 글자 파일도 문서로 / "off": 놓지 않음
 # show_created = "known"
+# Claude 세션이 지금 쓰는 도구(Edit · main.js, Bash · cargo build)를 사이드바의 그 줄에 표시.
+#   도구를 쓸 때마다 전달 프로그램이 한 번씩 떠서 도구마다 수십 ms가 더 듭니다. 새로 여는 세션부터 적용됩니다.
+# activity = true
+# 셸 세션(PowerShell 등)에서 직접 친 claude에도 Cypher를 붙이기(모델·완료 알림·지금 하는 일·만든 파일 놓기·Cypher 도구).
+#   끄면 "+ Claude"로 연 세션에만 붙습니다. 새로 여는 셸 세션부터 적용됩니다.
+# claude_in_shell = true
 
 [window]
 # magnet = true            # 창을 끌 때 화면 가장자리와 다른 Cypher 창에 달라붙기 (Ctrl을 누른 채 끌면 붙지 않음)

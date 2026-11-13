@@ -50,9 +50,11 @@ pub fn original_status_line(cwd: &Path) -> Option<StatusLine> {
 /// 세션 하나의 설정 내용: 상태줄과 훅을 전달 프로그램으로 지정한다.
 /// 원래 상태줄이 있으면 그 여백을 따르고, 더 자주 갱신하던 쪽에 맞춘다.
 /// `watch_files`이면 Write 도구의 직전·직후 훅도 건다(세션이 새로 만든 파일을 사이드바에 놓는 데 쓴다).
-fn settings_json(bridge: &str, original: Option<&StatusLine>, watch_files: bool) -> Value {
+/// `activity`이면 모든 도구의 직전·직후·실패 훅을 건다(사이드바의 그 줄에 지금 쓰는 도구를 보여 주는 데 쓴다).
+fn settings_json(bridge: &str, original: Option<&StatusLine>, watch_files: bool, activity: bool) -> Value {
     // 훅: 요청 시작(UserPromptSubmit), 응답 완료(Stop), 입력·승인 대기(Notification),
-    // 서브에이전트 시작·종료(SubagentStart·SubagentStop).
+    // 서브에이전트 시작·종료(SubagentStart·SubagentStop), Claude Code 종료(SessionEnd: 셸 세션에서 직접 띄운
+    // Claude가 끝났을 때 그 줄의 모델·상태 표시를 지우는 데 쓴다).
     let hook = json!([{ "hooks": [{ "type": "command", "command": bridge }] }]);
     let refresh = original.and_then(|o| o.refresh).map_or(5, |r| r.clamp(1, 5));
     let mut status = json!({ "type": "command", "command": bridge, "refreshInterval": refresh });
@@ -63,25 +65,31 @@ fn settings_json(bridge: &str, original: Option<&StatusLine>, watch_files: bool)
         "statusLine": status,
         "hooks": {
             "UserPromptSubmit": hook, "Stop": hook, "Notification": hook,
-            "SubagentStart": hook, "SubagentStop": hook
+            "SubagentStart": hook, "SubagentStop": hook, "SessionEnd": hook
         }
     });
-    if watch_files {
-        // Write 도구만 본다: 쓰기 직전에는 그 파일이 이미 있었는지를, 직후에는 실제로 생겼는지를 본다.
-        let write = json!([{ "matcher": "Write", "hooks": [{ "type": "command", "command": bridge }] }]);
-        settings["hooks"]["PreToolUse"] = write.clone();
-        settings["hooks"]["PostToolUse"] = write;
+    // 도구 훅: 지금 쓰는 도구를 보여 주려면 모든 도구를, 새로 만든 파일만 보려면 Write 도구만 본다
+    // (쓰기 직전에는 그 파일이 이미 있었는지를, 직후에는 실제로 생겼는지를 본다).
+    let matcher = if activity { Some("*") } else if watch_files { Some("Write") } else { None };
+    if let Some(matcher) = matcher {
+        let tools = json!([{ "matcher": matcher, "hooks": [{ "type": "command", "command": bridge }] }]);
+        settings["hooks"]["PreToolUse"] = tools.clone();
+        settings["hooks"]["PostToolUse"] = tools.clone();
+        if activity {
+            // 실패하거나 중단된 도구에는 직후 신호 대신 이 신호가 온다. 받아야 "하는 중" 표시가 남지 않는다.
+            settings["hooks"]["PostToolUseFailure"] = tools;
+        }
     }
     settings
 }
 
 /// 세션용 설정 파일을 쓴다. 사용자의 settings.json은 건드리지 않고 `--settings`로만 넘긴다.
 /// 파일 이름에 실행 번호와 세션 번호를 넣어 다른 창·다른 세션과 겹치지 않게 한다.
-pub fn write_settings(bridge: &str, session: u32, original: Option<&StatusLine>, watch_files: bool) -> Option<PathBuf> {
+pub fn write_settings(bridge: &str, session: u32, original: Option<&StatusLine>, watch_files: bool, activity: bool) -> Option<PathBuf> {
     let dir = crate::data_dir()?;
     std::fs::create_dir_all(&dir).ok()?;
     let path = dir.join(format!("claude-settings-{}-{session}.json", std::process::id()));
-    std::fs::write(&path, settings_json(bridge, original, watch_files).to_string()).ok()?;
+    std::fs::write(&path, settings_json(bridge, original, watch_files, activity).to_string()).ok()?;
     Some(path)
 }
 
@@ -131,13 +139,22 @@ mod tests {
 
     #[test]
     fn 설정에는_전달_프로그램을_넣고_원래_여백과_갱신_주기를_따른다() {
-        let plain = settings_json("C:/app/cypher-bridge.exe", None, false);
+        let plain = settings_json("C:/app/cypher-bridge.exe", None, false, false);
         assert!(plain["hooks"].get("PreToolUse").is_none() && plain["hooks"].get("PostToolUse").is_none());
         // 새로 만든 파일을 보려면 Write 도구의 직전·직후 훅을 건다.
-        let watching = settings_json("C:/app/cypher-bridge.exe", None, true);
+        let watching = settings_json("C:/app/cypher-bridge.exe", None, true, false);
         for event in ["PreToolUse", "PostToolUse"] {
             assert_eq!(watching["hooks"][event][0]["matcher"], "Write");
             assert_eq!(watching["hooks"][event][0]["hooks"][0]["command"], "C:/app/cypher-bridge.exe");
+        }
+        assert!(watching["hooks"].get("PostToolUseFailure").is_none());
+        // 지금 쓰는 도구를 보여 주려면 모든 도구의 직전·직후·실패 훅을 건다(만든 파일 놓기를 꺼 두었어도).
+        for files in [false, true] {
+            let active = settings_json("C:/app/cypher-bridge.exe", None, files, true);
+            for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure"] {
+                assert_eq!(active["hooks"][event][0]["matcher"], "*");
+                assert_eq!(active["hooks"][event][0]["hooks"][0]["command"], "C:/app/cypher-bridge.exe");
+            }
         }
         assert_eq!(watching["hooks"]["Stop"], plain["hooks"]["Stop"]);
         assert_eq!(plain["statusLine"]["command"], "C:/app/cypher-bridge.exe");
@@ -146,11 +163,11 @@ mod tests {
         assert_eq!(plain["hooks"]["SubagentStop"][0]["hooks"][0]["command"], "C:/app/cypher-bridge.exe");
 
         let original = StatusLine { command: "hud".into(), padding: Some(json!(2)), refresh: Some(1) };
-        let chained = settings_json("C:/app/cypher-bridge.exe", Some(&original), false);
+        let chained = settings_json("C:/app/cypher-bridge.exe", Some(&original), false, false);
         assert_eq!(chained["statusLine"]["command"], "C:/app/cypher-bridge.exe"); // 자리는 전달 프로그램이 차지
         assert_eq!((chained["statusLine"]["padding"].clone(), chained["statusLine"]["refreshInterval"].clone()), (json!(2), json!(1)));
 
         let slow = StatusLine { command: "hud".into(), padding: None, refresh: Some(60) };
-        assert_eq!(settings_json("b", Some(&slow), false)["statusLine"]["refreshInterval"], 5); // Cypher 표시가 느려지지 않게
+        assert_eq!(settings_json("b", Some(&slow), false, false)["statusLine"]["refreshInterval"], 5); // Cypher 표시가 느려지지 않게
     }
 }

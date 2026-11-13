@@ -2,7 +2,7 @@
 // 같은 종류의 업무를 시작할 때 한 번에 펼친다.
 //
 // 틀에 담기는 것: 터미널 세션(프로필과 폴더 — 대화는 담지 않고 새로 시작한다), 메모(글 또는 연결된 파일),
-// 브레인스토밍(개요 글), 사이트(주소), HTTP(요청 폴더와 열어 둔 파일), 문서(파일 경로), 별칭·색.
+// 마인드맵(개요 글), 사이트(주소), HTTP(요청 폴더와 열어 둔 파일), 문서(파일 경로), 별칭·색.
 // 이미지는 담지 않는다. 항목을 어떻게 담고 펼칠지는 main.js가 알고, 여기서는 목록 창과 저장소를 맡는다.
 
 let api = null;
@@ -87,10 +87,10 @@ export async function showTemplates() {
     const row = make('div', 'row');
     const use = make('button', 'row-title', `◆ ${info.name}`);
     use.append(make('span', 'template-summary', `항목 ${info.items}개${info.summary ? ` · ${info.summary}` : ''}`));
-    use.title = `${info.name}\n${info.summary || `항목 ${info.items}개`}\n저장: ${when(info.saved)}\n누르면 저장해 둔 폴더 그대로 펼칩니다(없어진 폴더의 항목은 지금의 새 세션 폴더에서 엽니다)`;
+    use.title = `${info.name}\n${info.summary || `항목 ${info.items}개`}\n저장: ${when(info.saved)}\n클릭: 저장해 둔 폴더대로 펼치기`;
     use.onclick = () => { close(); openTemplate(info, false); };
     const here = make('button', 'template-here', '이 폴더에서');
-    here.title = `모든 항목을 지금의 새 세션 폴더에서 엽니다: ${api.folder()}\n(같은 구성을 다른 폴더의 업무에 쓸 때)`;
+    here.title = `모든 항목을 새 세션 폴더에서 열기: ${api.folder()}`;
     here.onclick = () => { close(); openTemplate(info, true); };
     const remove = make('button', 'close', '×');
     remove.title = '이 틀 지우기';
@@ -112,7 +112,7 @@ export async function showTemplates() {
   const close = openPopup('그룹 틀', [
     ...rows,
     make('p', 'note', list.length
-      ? '틀을 누르면 그 구성대로 그룹이 만들어집니다. 세션은 대화를 잇지 않고 새로 시작하고, 메모·브레인스토밍은 저장할 때의 글로, 사이트·HTTP·문서는 그 주소·파일로 엽니다.'
+      ? '틀을 누르면 그 구성대로 그룹이 만들어집니다. 세션은 대화를 잇지 않고 새로 시작하고, 메모·마인드맵은 저장할 때의 글로, 사이트·HTTP·문서는 그 주소·파일로 엽니다.'
       : '저장해 둔 틀이 없습니다. 업무 하나를 그룹으로 꾸민 뒤(세션, 메모, 사이트, HTTP …) 틀로 저장해 두면, 같은 종류의 업무를 시작할 때 한 번에 펼칩니다. 묶음 머리를 오른쪽 클릭해도 저장할 수 있습니다.'),
     save, folder,
   ]);

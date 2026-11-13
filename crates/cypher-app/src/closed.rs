@@ -1,6 +1,6 @@
 //! 닫은 항목 되살리기.
 //!
-//! 메모·브레인스토밍·이미지는 닫을 때 저장소의 `closed` 폴더로 옮겨 30일 동안 둔다
+//! 메모·마인드맵·이미지는 닫을 때 저장소의 `closed` 폴더로 옮겨 30일 동안 둔다
 //! (`<닫은 시각>-<번호>.<확장자>`). 화면에서 "닫은 항목 다시 열기"를 고르면 그 파일을 원래 자리
 //! (`<번호>.<확장자>`)로 되돌려 놓고, 화면이 그 번호로 항목을 다시 만든다.
 
@@ -42,7 +42,7 @@ pub fn restore_in(dir: &Path, id: &str, ext: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-/// 닫은 항목의 내용을 저장소로 되돌린다. `kind`: "memo" | "mindmap" | "image"(이미지는 `ext`가 필요하다).
+/// 닫은 항목의 내용을 저장소로 되돌린다. `kind`: "memo" | "mindmap" | "erd" | "image"(이미지는 `ext`가 필요하다).
 #[tauri::command]
 pub fn closed_restore(kind: String, id: String, ext: Option<String>) -> Result<bool, String> {
     if !is_id(&id) {
@@ -51,6 +51,7 @@ pub fn closed_restore(kind: String, id: String, ext: Option<String>) -> Result<b
     let (folder, ext) = match kind.as_str() {
         "memo" => ("memos", "txt".to_string()),
         "mindmap" => ("mindmaps", "md".to_string()),
+        "erd" => ("erds", "mmd".to_string()),
         "image" => {
             let ext = ext.unwrap_or_default();
             if !IMAGE_FORMATS.contains(&ext.as_str()) {

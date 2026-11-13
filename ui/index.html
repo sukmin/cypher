@@ -13,32 +13,33 @@
   <aside id="sidebar">
     <div id="new-buttons"></div>
     <div id="folder-row">
+      <span id="folder-tag" hidden>◆</span>
       <span id="folder"></span>
-      <button id="recent" title="최근에 세션을 시작한 폴더에서 고르기">▾</button>
-      <button id="pick" title="새 세션이 시작될 폴더 바꾸기">폴더…</button>
+      <button id="recent" title="최근 폴더에서 고르기">▾</button>
+      <button id="pick" title="새 세션 폴더 바꾸기">폴더…</button>
     </div>
     <ul id="sessions" tabindex="-1"></ul>
     <div id="tools">
-      <button id="waiting" title="대기 중인 세션만 보기 · Ctrl+Shift+N: 다음 대기 세션으로">대기 0</button>
-      <button id="notices" title="알림 기록: 지나간 완료·승인 대기 알림 모아 보기 (Ctrl+Shift+A). 숫자는 아직 보지 않은 알림">알림 0</button>
-      <button id="changes" title="세션이 고친 파일과 차이 보기 (Ctrl+Shift+G)">변경 내용</button>
+      <button id="waiting" title="대기 중인 세션만 보기 · 다음 대기 세션 (Ctrl+Shift+N)">대기 0</button>
+      <button id="notices" title="알림 기록 (Ctrl+Shift+A) · 숫자: 안 본 알림">알림 0</button>
+      <button id="changes" title="바뀐 파일과 차이 보기 (Ctrl+Shift+G)">변경 내용</button>
     </div>
   </aside>
-  <div id="sidebar-grip" title="끌어서 사이드바 너비 조절 · 두 번 눌러 기본 너비로"></div>
+  <div id="sidebar-grip" title="끌기: 너비 조절 · 두 번 누르기: 기본 너비"></div>
   <main>
     <div id="where" hidden></div>
     <div id="terms"><div id="empty">왼쪽에서 세션을 시작하세요.</div></div>
     <div id="composer" hidden>
-      <div id="composer-grip" title="끌어서 높이 조절 · 두 번 눌러 기본 높이로"></div>
+      <div id="composer-grip" title="끌기: 높이 조절 · 두 번 누르기: 기본 높이"></div>
       <div id="composer-body">
         <textarea id="composer-text" spellcheck="false" autocomplete="off"></textarea>
         <div id="composer-side">
-          <button id="composer-send" title="편집기에 쓴 내용을 지금 보고 있는 세션의 입력창에 넣습니다 (Ctrl+Enter)">프롬프트</button>
-          <label id="composer-enter-label" title="켜면 입력창에 넣은 뒤 Enter까지 눌러 바로 보냅니다"><input type="checkbox" id="composer-enter"> 바로 전송</label>
+          <button id="composer-send" title="세션 입력창에 넣기 (Ctrl+Enter)">프롬프트</button>
+          <label id="composer-enter-label" title="넣은 뒤 바로 보내기 (끄면 입력창에 넣기만)"><input type="checkbox" id="composer-enter" checked> 바로 전송</label>
         </div>
       </div>
       <div id="composer-tabs">
-        <button id="composer-history" title="최근에 보낸 프롬프트를 골라 편집기에 넣기 (Alt+↑/↓: 차례로 넘겨 보기)">기록</button>
+        <button id="composer-history" title="보낸 프롬프트 다시 쓰기 (Alt+↑/↓)">기록</button>
         <button id="composer-fold" title="프롬프트 편집기 접기/펼치기">프롬프트 편집기 ▾</button>
       </div>
     </div>
@@ -53,7 +54,7 @@
     </div>
     <div id="shots" hidden></div>
     <footer id="status">
-      <span id="status-text"></span><span id="status-model" title="지금 세션의 모델 · effort · 컨텍스트 사용률"></span><span id="status-mode"></span><span id="status-limits"></span>
+      <span id="status-text"></span><span id="status-model" title="모델 · effort · 컨텍스트 사용률"></span><span id="status-mode"></span><span id="status-limits"></span>
     </footer>
   </main>
   <aside id="diff" class="side" hidden>

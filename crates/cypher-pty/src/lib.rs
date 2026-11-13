@@ -15,6 +15,8 @@ pub struct SpawnOptions {
     pub env: Vec<(String, String)>,
     /// 부모 환경에서 뺄 변수.
     pub env_remove: Vec<String>,
+    /// 새 프로세스의 PATH 맨 앞에 더할 폴더.
+    pub path_first: Option<PathBuf>,
     pub cols: u16,
     pub rows: u16,
 }
@@ -62,6 +64,14 @@ impl PtySession {
         }
         for (key, value) in &opts.env {
             cmd.env(key, value);
+        }
+        if let Some(dir) = &opts.path_first {
+            // 새 프로세스가 받을 PATH(가상 터미널이 새로 꾸린 환경의 것) 앞에 폴더를 더한다.
+            let base = cmd.get_env("PATH").map(|value| value.to_os_string()).or_else(|| std::env::var_os("PATH")).unwrap_or_default();
+            let mut path = dir.clone().into_os_string();
+            path.push(";");
+            path.push(base);
+            cmd.env("PATH", path);
         }
 
         let mut child = pair
@@ -156,6 +166,7 @@ mod tests {
                 cwd: std::env::temp_dir(),
                 env: vec![],
                 env_remove: vec![],
+                path_first: None,
                 cols: 80,
                 rows: 24,
             },

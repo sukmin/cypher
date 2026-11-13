@@ -1,7 +1,7 @@
 // 닫은 항목 다시 열기(Ctrl+Shift+R): 닫은 항목을 기억해 두었다가 같은 자리(그룹·폴더·별칭·색)에 되살린다.
 //
 // - Claude 세션: 닫을 때의 대화 번호로 대화를 이어 연다(`claude --resume`). 대화가 없던 세션과 다른 터미널은 같은 폴더에서 새로 시작한다.
-// - 메모·브레인스토밍·이미지: 닫을 때 저장소의 `closed` 폴더로 옮겨 둔 내용을 제자리로 되돌린 뒤 연다(30일 보관).
+// - 메모·마인드맵·이미지: 닫을 때 저장소의 `closed` 폴더로 옮겨 둔 내용을 제자리로 되돌린 뒤 연다(30일 보관).
 // - 사이트·HTTP: 보던 주소·파일로 다시 연다.
 //
 // 목록은 이 컴퓨터에 기억한다(localStorage). 보관 기간(30일)이 지난 것은 목록에서도 뺀다.
@@ -13,6 +13,7 @@ const KEEP_MS = 30 * 24 * 60 * 60 * 1000;
 const STORED = {
   memo: (saved) => (saved.memo ? { kind: 'memo', id: saved.memo, ext: null } : null),
   mindmap: (saved) => (saved.map ? { kind: 'mindmap', id: saved.map, ext: null } : null),
+  erd: (saved) => (saved.erd ? { kind: 'erd', id: saved.erd, ext: null } : null),
   image: (saved) => (saved.image ? { kind: 'image', id: saved.image, ext: saved.ext } : null),
 };
 
@@ -94,7 +95,7 @@ export function showClosed() {
     const row = make('div', 'row');
     const use = make('button', 'row-title', `${api.icon(record)} ${record.label}`);
     const where = record.group ? `◆ ${record.group}` : api.baseName(record.cwd || '');
-    use.title = `${api.kindLabel(record)} · ${where}\n${record.cwd || ''}\n누르면 같은 자리에 다시 엽니다`;
+    use.title = `${api.kindLabel(record)} · ${where}\n${record.cwd || ''}\n클릭: 같은 자리에 다시 열기`;
     use.onclick = () => { close(); reopen(record); };
     const note = make('span', 'row-note', `${where} · ${when(record.at)}`);
     const remove = make('button', 'close', '×');
@@ -109,7 +110,7 @@ export function showClosed() {
   const close = openPopup('닫은 항목 다시 열기', [
     ...rows,
     make('p', 'note', list.length
-      ? 'Claude 세션은 대화를 이어서 열고, 메모·브레인스토밍·이미지는 보관해 둔 내용(30일)으로 엽니다. Ctrl+Shift+R은 가장 나중에 닫은 것을 바로 엽니다.'
+      ? 'Claude 세션은 대화를 이어서 열고, 메모·마인드맵·이미지는 보관해 둔 내용(30일)으로 엽니다. Ctrl+Shift+R은 가장 나중에 닫은 것을 바로 엽니다.'
       : '닫은 항목이 없습니다. 항목을 닫으면 여기에 30일 동안 남고, Ctrl+Shift+R로 가장 나중에 닫은 것을 바로 다시 엽니다.'),
     clear,
   ]);

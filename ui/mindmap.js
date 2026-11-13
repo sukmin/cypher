@@ -1,4 +1,4 @@
-// 브레인스토밍(마인드맵) 항목: 생각을 가지로 뻗어 가며 정리한다.
+// 마인드맵 항목: 생각을 가지로 뻗어 가며 정리한다.
 //
 // 두 화면을 오가며 만든다. 둘은 같은 내용을 가리킨다.
 // - 그림: 가지를 누르고 Tab(하위)·Enter(형제)로 더하고, 글자를 치면 고치고, 끌어서 옮긴다. 글이 없는 가지도 둘 수 있다.
@@ -574,7 +574,7 @@ const SAVE_RETRY_MS = 5000;       // 자동 저장에 실패했을 때 다시 �
 const MAX_PDF_SIDE = 190 * 96;    // PDF 한 쪽의 한 변 한도(CSS 픽셀). mindmap.rs의 MAX_PAGE_INCHES와 같다.
 
 /**
- * 브레인스토밍 항목의 화면을 host 안에 만든다.
+ * 마인드맵 항목의 화면을 host 안에 만든다.
  * saved: { map(저장 번호), path(연결된 파일), code(개요 글 창을 열어 두었는지), text(처음 넣을 내용) }
  */
 export function createMindmap(item, host, saved = {}, onChange = () => {}) {
@@ -616,24 +616,24 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
   const $title = make('span', 'doc-title', '');
   const $zoom = make('span', 'image-zoom', '100%');
   // 그림 ↔ 코드 전환: 지금 화면 쪽이 눌린 모양이다.
-  const $modeMap = button('그림', '그림으로 봅니다 (Ctrl+E) · 코드에 오류가 있으면 고친 뒤에 바뀝니다', () => setMode(false));
-  const $modeCode = button('코드', '같은 내용을 코드(개요 글)로 보고 고칩니다 (Ctrl+E)', () => setMode(true));
+  const $modeMap = button('그림', '그림으로 보기 (Ctrl+E)', () => setMode(false));
+  const $modeCode = button('코드', '코드(개요 글)로 보고 고치기 (Ctrl+E)', () => setMode(true));
   const $mode = make('span', 'mm-mode');
   $mode.append($modeMap, $modeCode);
-  const $fold = button('접기', '고른 가지 아래를 접거나 폅니다 (Ctrl+/)', () => toggleFold());
+  const $fold = button('접기', '고른 가지 접기·펴기 (Ctrl+/)', () => toggleFold());
   // 그림에서만 쓰는 단추(코드 화면에서는 숨긴다).
   const mapOnly = [
-    button('+ 하위', '고른 가지 아래에 새 가지 (Tab) · 글을 적지 않고 Enter를 누르면 빈 가지로 남습니다', () => addChild()),
-    button('+ 형제', '고른 가지 다음에 새 가지 (Enter)', () => addSibling(1)),
-    button('삭제', '고른 가지와 그 아래를 지웁니다 (Delete)', () => removeSelected()),
+    button('+ 하위', '하위 가지 추가 (Tab)', () => addChild()),
+    button('+ 형제', '형제 가지 추가 (Enter)', () => addSibling(1)),
+    button('삭제', '고른 가지 삭제 (Delete)', () => removeSelected()),
     button('색', '고른 가지의 색', (ev) => colorMenu(ev)),
-    button('표식', '고른 가지에 깃발·별·순위·진행·이모지 표식을 붙이거나 뗍니다 (가지를 오른쪽 클릭해도 됩니다)', (ev) => showMenu(ev, markItems(selected || root))),
+    button('표식', '표식 붙이기·떼기 (가지 오른쪽 클릭)', (ev) => showMenu(ev, markItems(selected || root))),
     $fold,
-    button('맞춤', '그림 전체가 보이게 (Ctrl+0)', () => fit()),
+    button('맞춤', '전체 맞춤 (Ctrl+0)', () => fit()),
     button('축소', '축소 (Ctrl+-, Ctrl+휠)', () => zoomBy(1 / 1.25)),
     $zoom,
     button('확대', '확대 (Ctrl++, Ctrl+휠)', () => zoomBy(1.25)),
-    button('구조', '가지를 양쪽으로 펼칠지, 오른쪽으로만 펼칠지', (ev) => showMenu(ev, [
+    button('구조', '펼치는 방향: 양쪽 · 오른쪽', (ev) => showMenu(ev, [
       { label: `${logic ? '' : '● '}양쪽으로 펼치기 (마인드맵)`, action: () => change(() => { logic = false; }) },
       { label: `${logic ? '● ' : ''}오른쪽으로만 펼치기 (논리도)`, action: () => change(() => { logic = true; }) },
     ])),
@@ -643,9 +643,9 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     $mode,
     ...mapOnly,
     $title,
-    button('열기', '개요 파일(.md, .txt)을 이 항목으로 엽니다 (Ctrl+O)', () => openFile()),
-    button('저장', '파일로 저장합니다 (Ctrl+S) · 내용은 저장하지 않아도 자동으로 보관됩니다', () => saveFile(false)),
-    button('내보내기', 'PNG 이미지·PDF·SVG로 내보내거나, 사이드바의 이미지 항목으로 넣습니다', (ev) => showMenu(ev, [
+    button('열기', '개요 파일(.md, .txt) 열기 (Ctrl+O)', () => openFile()),
+    button('저장', '파일로 저장 (Ctrl+S) · 내용은 자동 보관됨', () => saveFile(false)),
+    button('내보내기', 'PNG·PDF·SVG로 내보내기 · 이미지 항목으로 넣기', (ev) => showMenu(ev, [
       { label: 'PNG 이미지로 내보내기…', action: () => exportAs('png') },
       { label: 'PDF로 내보내기…', action: () => exportAs('pdf') },
       { label: 'SVG로 내보내기…', action: () => exportAs('svg') },
@@ -663,7 +663,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
   const $problems = make('div', 'mm-problems');
   const $guide = make('div', 'mm-guide');
   const $guideHead = make('button', 'mm-guide-head');
-  $guideHead.title = '코드 쓰는 법을 펴거나 접습니다';
+  $guideHead.title = '코드 쓰는 법 펴기·접기';
   const $guideBody = make('div', 'mm-guide-body');
   for (const [sample, what] of [
     ['# 중심 주제', '첫 줄에 하나만'],
@@ -741,7 +741,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     applyView();
     $title.textContent = `${path ? `${baseName(path)}${fileDirty() ? ' *' : ''} · ` : ''}가지 ${countAll(root) - 1}개${picked.size > 1 ? ` · ${picked.size}개 고름` : ''}`;
     $fold.textContent = selected?.fold && selected.children.length ? '펴기' : '접기';
-    $title.title = path || '아직 파일로 저장하지 않았습니다(내용은 자동으로 보관됩니다)';
+    $title.title = path || '파일로 저장하지 않음 (자동 보관됨)';
   }
   const countAll = (node) => 1 + node.children.reduce((sum, child) => sum + countAll(child), 0);
 
@@ -868,7 +868,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     try {
       await invoke('mindmap_write', { id, text: now });
     } catch (err) {
-      setStatus(`브레인스토밍 자동 저장 실패: ${err}`);
+      setStatus(`마인드맵 자동 저장 실패: ${err}`);
       // 쓰지 못했으면 저장소의 내용을 모르는 것으로 둔다: 저장소의 옛 내용을 새것인 줄 알고 읽어 들이지 않고(reload),
       // 같은 내용이라도 다시 쓴다. 그 사이 더 새 내용을 쓰고 있으면 그쪽에 맡긴다.
       if (stored !== now) return;
@@ -1475,8 +1475,8 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     $problems.className = `mm-problems ${codeErrors.length ? 'bad' : 'ok'}`;
     $modeMap.classList.toggle('blocked', codeErrors.length > 0);
     $modeMap.title = codeErrors.length
-      ? '코드에 오류가 있어 그림으로 바꿀 수 없습니다. 아래 안내대로 고쳐 주세요'
-      : '그림으로 봅니다 (Ctrl+E) · 코드에 오류가 있으면 고친 뒤에 바뀝니다';
+      ? '코드에 오류가 있어 그림으로 바꿀 수 없음 · 아래 안내대로 수정'
+      : '그림으로 보기 (Ctrl+E)';
     if (!codeErrors.length) {
       $problems.replaceChildren(make('div', 'head', `✓ 오류 없음 · 가지 ${countAll(root) - 1}개 — 그림에 반영됐습니다. [그림](Ctrl+E)을 누르면 그림으로 돌아갑니다.`));
       return;
@@ -1654,7 +1654,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
 
   const fileDirty = () => !!path && fileText !== null && text() !== fileText;
   const startDir = () => (path ? path.slice(0, path.lastIndexOf('\\')) : item.startCwd);
-  const fileName = () => (clip(root.text.split('\n')[0].trim().replace(/[\\/:*?"<>|]/g, '_'), 60) || '브레인스토밍');
+  const fileName = () => (clip(root.text.split('\n')[0].trim().replace(/[\\/:*?"<>|]/g, '_'), 60) || '마인드맵');
 
   async function openFile(given) {
     try {
@@ -1711,7 +1711,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
         const image = await invoke('image_store', await svgToPng(made.svg, made.width, made.height), {
           headers: { 'x-name': encodeURIComponent(fileName()), 'x-ext': 'png' },
         });
-        await api.addImages([image], { near: item, source: `브레인스토밍: ${fileName()}` });
+        await api.addImages([image], { near: item, source: `마인드맵: ${fileName()}` });
         return setStatus('이 항목과 같은 묶음에 이미지 항목으로 넣었습니다.');
       } else {
         saved = await printPdf(made);
@@ -1787,7 +1787,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
       changed();
       fit(1);
     } else if (text() !== stored) scheduleSave();
-    setStatus('브레인스토밍의 내용을 다시 읽었습니다.');
+    setStatus('마인드맵의 내용을 다시 읽었습니다.');
   }
 
   showMode();
@@ -1801,7 +1801,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
       } catch (err) {
         // 읽지 못한 것은 내용이 없는 것과 다르다. 기본 내용으로 덮어쓰지 않게 자동 저장을 멈추고, 이 항목을 다시 볼 때 다시 읽는다.
         unread = true;
-        setStatus(`브레인스토밍의 내용을 읽지 못했습니다: ${err} · 이 항목을 다시 보면 다시 읽습니다(그때까지 자동 저장하지 않습니다).`);
+        setStatus(`마인드맵의 내용을 읽지 못했습니다: ${err} · 이 항목을 다시 보면 다시 읽습니다(그때까지 자동 저장하지 않습니다).`);
       }
     }
     load(given ?? kept ?? '# 중심 주제\n');
@@ -1826,7 +1826,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     ready,
     focus: () => { if (codeMode) $codeText.focus(); else if (!editing) $stage.focus(); if (!fitted) fit(1); reload(); },
     /** 사이드바에 보일 기본 이름: 중심 주제. */
-    title: () => clip(root.text.split('\n')[0].trim(), 40) || '브레인스토밍',
+    title: () => clip(root.text.split('\n')[0].trim(), 40) || '마인드맵',
     state: () => ({ map: id, path, code: codeMode, ...(codeMode && $codeText.value !== codeApplied ? { draft: $codeText.value } : {}) }),
     /** 그림 ↔ 코드 화면을 바꾼다. 코드에 오류가 있어 그림으로 바꾸지 못했으면 false. */
     setMode: (code) => setMode(!!code),

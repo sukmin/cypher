@@ -574,19 +574,19 @@ export function createReader(item, host, saved = {}, onChange = () => {}) {
   };
   const $title = make('span', 'doc-title');
   const $note = make('span', 'reader-note');
-  const $open = button('파일 열기', '볼 Markdown·글자 파일 고르기 (Ctrl+O)', () => pick());
-  const $back = button('← 뒤로', '링크를 따라 오기 전에 보던 문서로 (Alt+←)', () => back());
+  const $open = button('파일 열기', 'Markdown·글자 파일 열기 (Ctrl+O)', () => pick());
+  const $back = button('← 뒤로', '이전 문서로 (Alt+←)', () => back());
   const $zoom = make('span', 'reader-zoom');
   const tools = [
-    button('새로 고침', '파일을 다시 읽기 (바뀌면 스스로 다시 읽습니다)', () => reload()),
-    button('목차', '제목 목록에서 골라 그 자리로 가기', (ev) => contents(ev)),
-    button('찾기', '이 문서에서 찾기 (Ctrl+F)', () => find()),
-    button('메모로 편집', '이 파일을 메모 항목으로 열어 고치기', () => api.openMemo?.(path)),
-    button('Claude에 넣기', '이 파일의 경로를 Claude 세션 입력창에 넣습니다', (ev) => api.toClaude?.(item, path, ev)),
-    button('탐색기에서 보기', '이 파일을 탐색기에서 보여 주기', () => outside(path, false)),
-    button('−', '글자 작게 (Ctrl+빼기 · Ctrl+휠)', () => setZoom(currentZoom() - 10)),
+    button('새로 고침', '다시 읽기 (바뀌면 자동 갱신)', () => reload()),
+    button('목차', '목차에서 골라 이동', (ev) => contents(ev)),
+    button('찾기', '찾기 (Ctrl+F)', () => find()),
+    button('메모로 편집', '메모 항목으로 열어 고치기', () => api.openMemo?.(path)),
+    button('Claude에 넣기', '파일 경로를 Claude 세션 입력창에 넣기', (ev) => api.toClaude?.(item, path, ev)),
+    button('탐색기에서 보기', '탐색기에서 보기', () => outside(path, false)),
+    button('−', '글자 작게 (Ctrl+−, Ctrl+휠)', () => setZoom(currentZoom() - 10)),
     $zoom,
-    button('+', '글자 크게 (Ctrl+더하기 · Ctrl+휠) · Ctrl+0: 기본 크기', () => setZoom(currentZoom() + 10)),
+    button('+', '글자 크게 (Ctrl++, Ctrl+휠) · 기본 크기 (Ctrl+0)', () => setZoom(currentZoom() + 10)),
   ];
   const bar = make('div', 'doc-bar');
   bar.append($title, $note, $open, $back, ...tools);

@@ -311,7 +311,7 @@ li.attention .dot.kind { background: none; box-shadow: none; color: var(--text);
 /* 사이드바 목록에 초점이 있을 때(빈 곳을 누른 뒤 ↑/↓로 항목 사이를 오간다) */
 #sessions:focus { outline: none; box-shadow: inset 0 0 0 1px var(--accent); }
 
-/* ───────── 브레인스토밍(마인드맵) 항목 ───────── */
+/* ───────── 마인드맵 항목 ───────── */
 
 .mm-body { flex: 1; min-height: 0; display: flex; }
 /* 그림 ↔ 코드 전환 단추: 붙어 있는 두 단추 중 지금 화면 쪽이 눌린 모양 */
@@ -562,3 +562,64 @@ span.reader-image { color: var(--dim); }
 /* 찾은 곳(CSS Custom Highlight) */
 ::highlight(reader-hit) { background-color: var(--hit); color: var(--text); }
 ::highlight(reader-hit-cur) { background-color: var(--hit-cur); color: var(--text); }
+
+/* ───────── 사이드바: 지금 하는 일(Claude 세션이 쓰고 있는 도구) ───────── */
+
+.sub .tool { color: var(--text); font-variant-numeric: tabular-nums; }
+li.approval .sub .tool { color: inherit; }
+/* 같은 일을 잇달아 하고 있을 때의 횟수 */
+.sub .repeat { margin-right: 5px; padding: 0 4px; font-weight: normal; color: var(--on-accent); background: var(--busy); border-radius: 6px; }
+:root[data-theme="win32"] #sessions li.active .sub .tool { color: inherit; }
+
+/* 폴더 줄: 그룹 폴더가 보이고 있다는 표시 */
+#folder-tag { flex: none; color: var(--accent); font-size: 11px; }
+#folder-tag[hidden] { display: none; }
+
+/* ───────── ERD 항목: 왼쪽은 코드(erDiagram 글), 오른쪽은 그림 ───────── */
+
+.doc.erd .doc-bar { flex-wrap: wrap; row-gap: 4px; overflow: visible; }
+.doc.erd .doc-title.bad { color: var(--dead); }
+.erd-body { flex: 1; min-height: 0; display: flex; }
+.erd-codeview { flex: 0 0 36%; min-width: 220px; max-width: 560px; display: flex; flex-direction: column; border-right: 1px solid var(--line); background: var(--field); }
+.erd-codeview[hidden] { display: none; }
+.erd-code {
+  flex: 1;
+  min-height: 0;
+  padding: 10px 12px;
+  resize: none;
+  outline: none;
+  border: none;
+  border-radius: 0;
+  color: var(--text);
+  background: var(--field);
+  font: 13px/20px var(--mono-font);
+  white-space: pre;
+  overflow: auto;
+  tab-size: 4;
+  user-select: text;
+}
+.erd-problems { flex: none; max-height: 40%; overflow-y: auto; border-top: 1px solid var(--line); background: var(--panel); font-size: 12px; }
+.erd-problems[hidden] { display: none; }
+.erd-problem { padding: 5px 12px 6px; border-top: 1px solid var(--line); cursor: pointer; }
+.erd-problem:first-child { border-top: none; }
+.erd-problem:hover { background: var(--hover); }
+.erd-problem b { margin-right: 6px; color: var(--dead); }
+.erd-problem small { display: block; margin-top: 2px; font-size: 11px; color: var(--dim); }
+.erd-stage { flex: 1; min-width: 0; position: relative; overflow: hidden; outline: none; background: var(--field); font-family: var(--ui-font); cursor: grab; }
+.erd-stage.grabbing { cursor: grabbing; }
+.erd-svg { position: absolute; inset: 0; width: 100%; height: 100%; display: block; user-select: none; }
+.erd-entity, .erd-rel { cursor: pointer; }
+.erd-stage.grabbing .erd-entity, .erd-stage.grabbing .erd-rel { cursor: grabbing; }
+/* 마우스를 올린 개체와 그 개체의 관계선 */
+.erd-entity.hot > rect:first-child { stroke: var(--accent); stroke-width: 2; }
+.erd-rel.hot path, .erd-rel.hot circle { stroke: var(--accent); stroke-width: 2; }
+.erd-rel.hot text { fill: var(--accent); }
+.erd-empty { position: absolute; left: 0; right: 0; top: 38%; padding: 0 30px; text-align: center; color: var(--dim); line-height: 1.7; pointer-events: none; }
+.erd-empty[hidden] { display: none; }
+
+/* ───────── 쉬는 세션: 다시 시작한 뒤 아직 재개하지 않은 세션 ───────── */
+
+li.dormant .dot { background: none; border: 1px solid var(--idle); }
+li.dormant .name, li.dormant .sub { opacity: 0.65; }
+#sessions li.group .wake { visibility: visible; font-size: 10px; color: var(--attention); }
+#sessions li.group .wake:hover { color: var(--accent); }

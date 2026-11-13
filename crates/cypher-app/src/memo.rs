@@ -250,7 +250,7 @@ pub async fn text_open(path: Option<String>, start: Option<String>, kind: Option
         let path = match path {
             Some(path) => PathBuf::from(path),
             None => {
-                let mut dialog = rfd::FileDialog::new().set_title(if mindmap { "브레인스토밍으로 열 개요 파일" } else { "메모로 열 파일" });
+                let mut dialog = rfd::FileDialog::new().set_title(if mindmap { "마인드맵으로 열 개요 파일" } else { "메모로 열 파일" });
                 dialog = if mindmap {
                     dialog.add_filter("개요 글(Markdown·글자 파일)", &["md", "markdown", "txt"])
                 } else {
@@ -294,7 +294,7 @@ pub async fn text_save(
         let path = match path {
             Some(path) => PathBuf::from(path),
             None => {
-                let mut dialog = rfd::FileDialog::new().set_title(if mindmap { "브레인스토밍 저장" } else { "메모 저장" }).set_file_name(name);
+                let mut dialog = rfd::FileDialog::new().set_title(if mindmap { "마인드맵 저장" } else { "메모 저장" }).set_file_name(name);
                 dialog = if mindmap {
                     dialog.add_filter("Markdown 개요", &["md"]).add_filter("글자 파일", &["txt"])
                 } else {

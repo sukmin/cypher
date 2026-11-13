@@ -137,18 +137,18 @@ export function createImage(item, host, saved = {}, onChange = () => {}) {
   const $zoom = make('span', 'image-zoom', '');
   const $info = button('정보', '파일 정보 보이기/숨기기 (I)', () => toggleInfo());
   const tools = [
-    button('맞춤', '창에 꽉 차게 보기 (F 또는 0)', () => { vp.resetFit(); layout(); }),
-    button('1:1', '실제 크기: 그림 1픽셀을 화면 1픽셀로 (1)', () => { vp.setActual(); layout(); }),
+    button('맞춤', '창에 맞춤 (F, 0)', () => { vp.resetFit(); layout(); }),
+    button('1:1', '실제 크기 (1)', () => { vp.setActual(); layout(); }),
     button('−', '축소 (-)', () => zoom(1 / ZOOM_STEP)),
     $zoom,
-    button('+', '확대 (+) · 마우스 휠을 Alt나 Ctrl과 함께 굴리면 커서 기준으로 확대/축소', () => zoom(ZOOM_STEP)),
+    button('+', '확대 (+) · Alt·Ctrl+휠: 커서 기준 확대·축소', () => zoom(ZOOM_STEP)),
     $info,
-    button('복사', '그림을 클립보드에 복사 (Ctrl+C)', copy),
-    button('저장', '그림을 다른 곳에 파일로 저장 (Ctrl+S)', save),
-    button('Claude에 넣기', '이 그림 파일의 경로를 Claude 세션 입력창에 넣습니다(Claude가 그림을 읽을 수 있게)', (ev) => api.toClaude(item, path, ev)),
+    button('복사', '복사 (Ctrl+C)', copy),
+    button('저장', '다른 곳에 저장 (Ctrl+S)', save),
+    button('Claude에 넣기', '그림 경로를 Claude 세션 입력창에 넣기', (ev) => api.toClaude(item, path, ev)),
   ];
-  const $open = button('파일 열기', '이미지 파일을 골라 넣기 (Ctrl+O)', pick);
-  const $paste = button('붙여넣기', '클립보드의 그림을 넣기 (Ctrl+V)', paste);
+  const $open = button('파일 열기', '이미지 파일 열기 (Ctrl+O)', pick);
+  const $paste = button('붙여넣기', '클립보드의 그림 붙여넣기 (Ctrl+V)', paste);
   const bar = make('div', 'doc-bar');
   bar.append($title, $open, $paste, ...tools);
 
@@ -222,8 +222,8 @@ export function createImage(item, host, saved = {}, onChange = () => {}) {
   async function load() {
     if (!image) {
       showNote('이미지 파일을 여기에 끌어다 놓거나, 파일을 고르거나, 클립보드의 그림을 붙여넣으세요.', [
-        button('파일 열기', '이미지 파일을 골라 넣기 (Ctrl+O)', pick),
-        button('붙여넣기', '클립보드의 그림을 넣기 (Ctrl+V)', paste),
+        button('파일 열기', '이미지 파일 열기 (Ctrl+O)', pick),
+        button('붙여넣기', '클립보드의 그림 붙여넣기 (Ctrl+V)', paste),
       ]);
       layout();
       return;

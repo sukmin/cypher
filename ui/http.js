@@ -67,9 +67,9 @@ export function createHttp(item, host, saved = {}, onChange = () => {}) {
   const $file = make('select', 'http-file');
   $file.title = '요청 파일 고르기 / 새 파일 만들기';
   const $save = make('button', 'http-save', '저장');
-  $save.title = '저장 (Ctrl+S). 고친 내용은 자동으로도 저장됩니다';
+  $save.title = '저장 (Ctrl+S) · 자동 저장됨';
   const $history = make('button', '', '기록');
-  $history.title = '지난 실행의 요청·응답 기록 보기';
+  $history.title = '요청·응답 기록 보기';
   const bar = make('div', 'doc-bar');
   bar.append($title, $file, $save, $history);
 

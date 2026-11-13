@@ -1,4 +1,4 @@
-//! 브레인스토밍(마인드맵) 항목: 내용의 자동 저장과 내보내기.
+//! 마인드맵 항목: 내용의 자동 저장과 내보내기.
 //!
 //! 내용은 개요 글(첫 줄 `# 중심 주제`, 그 아래 `- 가지`)이다. 항목마다 `%APPDATA%\cypher\mindmaps\<번호>.md`에
 //! UTF-8로 계속 적어 둔다(파일로 따로 저장하지 않아도 다시 시작하면 그대로 돌아온다). 같은 그룹의 Claude 세션이
@@ -98,11 +98,11 @@ pub fn mindmap_remove(id: String, keep: bool) -> Result<Option<String>, String> 
 fn safe_name(name: &str) -> String {
     let safe: String = name.chars().map(|c| if r#"\/:*?"<>|"#.contains(c) || c.is_control() { '_' } else { c }).collect();
     let safe: String = safe.trim().chars().take(80).collect();
-    if safe.is_empty() { "브레인스토밍".into() } else { safe }
+    if safe.is_empty() { "마인드맵".into() } else { safe }
 }
 
 /// 저장할 곳을 묻는다. 취소하면 None.
-fn ask_target(name: &str, ext: &str, start: Option<&str>) -> Option<PathBuf> {
+fn ask_target(title: &str, name: &str, ext: &str, start: Option<&str>) -> Option<PathBuf> {
     let label = match ext {
         "png" => "PNG 이미지",
         "svg" => "SVG 그림",
@@ -110,7 +110,7 @@ fn ask_target(name: &str, ext: &str, start: Option<&str>) -> Option<PathBuf> {
         _ => "파일",
     };
     let mut dialog = rfd::FileDialog::new()
-        .set_title("브레인스토밍 내보내기")
+        .set_title(title)
         .set_file_name(format!("{}.{ext}", safe_name(name)))
         .add_filter(label, &[ext]);
     if let Some(dir) = start.filter(|d| Path::new(d).is_dir()) {
@@ -142,12 +142,14 @@ pub async fn mindmap_export(request: tauri::ipc::Request<'_>) -> Result<Option<S
     };
     let header = |key: &str| request.headers().get(key).and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
     let (name, start, ext) = (percent_decode(&header("x-name")), percent_decode(&header("x-start")), header("x-ext"));
+    // 저장 창의 제목. 화면이 주지 않으면 마인드맵의 것이다(ERD 항목도 이 명령으로 그림을 내보낸다).
+    let title = Some(percent_decode(&header("x-title"))).filter(|title| !title.is_empty()).unwrap_or_else(|| "마인드맵 내보내기".into());
     if !matches!(ext.as_str(), "png" | "svg") {
         return Err("내보낼 수 없는 형식입니다".into());
     }
     let bytes = bytes.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let Some(target) = ask_target(&name, &ext, Some(start.as_str())) else { return Ok(None) };
+        let Some(target) = ask_target(&title, &name, &ext, Some(start.as_str())) else { return Ok(None) };
         fs::write(&target, bytes).map_err(err)?;
         Ok(Some(target.to_string_lossy().into_owned()))
     })
@@ -183,7 +185,7 @@ pub async fn mindmap_pdf(
         .map_err(|problem| format!("PDF를 만들지 못했습니다: {problem}"))?;
         let data = reply["data"].as_str().ok_or("PDF를 만들지 못했습니다")?;
         let bytes = base64::engine::general_purpose::STANDARD.decode(data).map_err(err)?;
-        let Some(target) = target.map(PathBuf::from).or_else(|| ask_target(&name, "pdf", start.as_deref())) else { return Ok(None) };
+        let Some(target) = target.map(PathBuf::from).or_else(|| ask_target("마인드맵 내보내기", &name, "pdf", start.as_deref())) else { return Ok(None) };
         fs::write(&target, bytes).map_err(err)?;
         Ok(Some(target.to_string_lossy().into_owned()))
     })
@@ -200,7 +202,7 @@ mod tests {
         assert!(is_id("b1a2c3"));
         assert!(!is_id("..\\밖") && !is_id("") && !is_id("a/b"));
         assert_eq!(safe_name("결제: 개편/안?"), "결제_ 개편_안_");
-        assert_eq!(safe_name("  "), "브레인스토밍");
+        assert_eq!(safe_name("  "), "마인드맵");
         assert_eq!(percent_decode("%EA%B0%80%20b%"), "가 b%");
     }
 }

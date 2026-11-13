@@ -173,7 +173,7 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
   };
   const $title = make('span', 'doc-title');
   const $wrap = button('줄 바꿈', '자동 줄 바꿈 켜기/끄기 (Alt+Z)', () => setWrap(!wrap));
-  const $json = button('{ } JSON 정리', 'JSON을 공백 2칸 들여쓰기로 정리 (Ctrl+Z로 되돌림)', tidyJson);
+  const $json = button('{ } JSON 정리', 'JSON 들여쓰기 정리 (Ctrl+Z: 되돌리기)', tidyJson);
   const bar = make('div', 'doc-bar');
   bar.append(
     $title,
@@ -226,12 +226,12 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
   const $pos = make('span', 'stat');
   const $chars = make('span', 'stat');
   const $pages = make('span', 'stat');
-  $pages.title = '200자 원고지(20칸 × 10줄) 매수. 줄이 바뀌면 남은 칸은 채운 것으로 봅니다.';
+  $pages.title = '200자 원고지 매수 (20칸 × 10줄)';
   const $invisible = make('button', 'stat invisible');
-  $invisible.title = '눈에 안 보이거나 일반 공백과 헷갈리는 문자가 있습니다. 눌러서 찾거나 정리합니다.';
+  $invisible.title = '보이지 않거나 헷갈리는 문자 있음 · 눌러서 찾기·정리';
   $invisible.onclick = (ev) => invisibleMenu(ev);
   const $changed = make('button', 'stat invisible', '다른 곳에서 바뀜');
-  $changed.title = '연결된 파일이 다른 곳에서 바뀌었습니다. 이 메모에는 그 변경이 들어 있지 않습니다. 눌러서 다시 읽거나 덮어씁니다.';
+  $changed.title = '파일이 다른 곳에서 바뀜 · 눌러서 다시 읽기·덮어쓰기';
   $changed.hidden = true;
   $changed.onclick = () => askChanged($changed);
   const $note = make('span', 'stat note-text');
@@ -264,7 +264,7 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
   function refreshTitle() {
     const now = `${dirty() ? '● ' : ''}${path || title()}`;
     $title.textContent = now;
-    $title.title = path ? `${path}${dirty() ? ' (저장하지 않은 변경 있음)' : ''}` : '파일로 저장하지 않은 메모(내용은 임시 저장됩니다)';
+    $title.title = path ? `${path}${dirty() ? ' (저장하지 않은 변경 있음)' : ''}` : '파일로 저장하지 않은 메모 (임시 저장됨)';
     $save.classList.toggle('on', dirty());
     const looksJson = /\.(json|canvas)$/i.test(path || '') || (!path && /^\s*[{[]/.test($text.value));
     $json.hidden = !looksJson;

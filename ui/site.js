@@ -100,12 +100,12 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
   const act = (action) => invoke('site_action', { id, action }).catch((err) => setStatus(String(err)));
   const $address = make('input', 'site-address');
   Object.assign($address, { spellcheck: false, autocomplete: 'off', value: url, placeholder: '주소나 검색어를 입력하고 Enter' });
-  $address.title = '주소를 입력하고 Enter를 누르면 그 주소로 갑니다 (주소가 아니면 검색합니다)';
+  $address.title = '주소나 검색어 입력 후 Enter';
   const $home = button('⌂', '처음 간 주소로', () => (home ? go(home) : $address.focus()));
-  const $star = button('☆', '즐겨찾기: 지금 페이지를 넣거나 빼고, 넣어 둔 페이지로 갑니다', (ev) => bookmarkMenu(ev));
+  const $star = button('☆', '즐겨찾기 넣기·빼기·가기', (ev) => bookmarkMenu(ev));
   const $claude = button('Claude에게', '', (ev) => handoff(ev, false));
   $claude.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); handoff(ev, true); };
-  const $external = button('외부 브라우저', '지금 주소를 Windows 기본 브라우저에서 엽니다 (Claude가 조작하지 않는 바깥 브라우저)', () => {
+  const $external = button('외부 브라우저', 'Windows 기본 브라우저로 열기', () => {
     if (!url) return setStatus('아직 연 페이지가 없습니다.');
     invoke('link_open', { target: url, cwd: item.startCwd, openFile: false, line: null, col: null }).catch((err) => setStatus(String(err)));
   });
@@ -116,7 +116,7 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
     button('⟳', '새로 고침', () => act('reload')),
     $home,
     $address,
-    button('캡처', '보이는 화면을 찍어 이 항목과 같은 묶음에 이미지 항목으로 넣기 (Shift+클릭: 페이지 전체)', (ev) => capture(ev.shiftKey)),
+    button('캡처', '화면을 찍어 이미지 항목으로 넣기 · Shift+클릭: 페이지 전체', (ev) => capture(ev.shiftKey)),
     $star, $claude, $external,
   );
   const $view = make('div', 'site-view');
@@ -133,8 +133,8 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
     const by = api.controller(item);
     $claude.textContent = by ? `Claude: ${by}` : 'Claude에게';
     $claude.classList.toggle('on', !!by);
-    $claude.title = `${by ? `지금 "${by}" 세션이 이 브라우저를 조작합니다. ` : ''}이 브라우저를 같은 그룹의 Claude 세션에 넘깁니다(여러 개면 고릅니다). `
-      + '넘겨받은 세션이 이 페이지를 읽고 조작합니다 · 오른쪽 클릭: 세션 고르기, 새 Claude 세션에 넘기기';
+    $claude.title = `${by ? `"${by}" 세션이 조작 중 · ` : ''}같은 그룹의 Claude 세션에 넘기기`
+      + ' · 오른쪽 클릭: 세션 고르기·새 세션';
     $home.title = home ? `처음 간 주소로: ${home}` : '처음 간 주소로';
   }
 
