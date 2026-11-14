@@ -183,7 +183,7 @@ fn claude_shim() -> Option<PathBuf> {
 
 /// Claude 세션에 Cypher 도구를 연결하는 MCP 설정 파일을 만든다(`--mcp-config`로 넘긴다).
 /// 전달 프로그램이 MCP 서버 노릇을 하며 이 앱으로 요청을 나른다. 어느 세션이 부른 도구인지 알 수 있게
-/// (같은 그룹의 브라우저·항목을 찾는다) 세션 번호를 넣어 세션마다 파일을 따로 만든다.
+/// (같은 워크스페이스의 브라우저·항목을 찾는다) 세션 번호를 넣어 세션마다 파일을 따로 만든다.
 pub fn write_mcp_config(port: u16, token: &str, session: u32) -> Option<PathBuf> {
     let bridge = std::env::current_exe().ok()?.with_file_name("cypher-bridge.exe");
     if !bridge.exists() {
@@ -214,7 +214,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         .item(&item("palette", "빠른 이동·명령 찾기\tCtrl+Shift+K")?)
         .item(&item("reopen", "닫은 항목 다시 열기…\tCtrl+Shift+R")?)
         .item(&item("notices", "알림 기록\tCtrl+Shift+A")?)
-        .item(&item("templates", "그룹 틀: 저장·불러오기…")?)
+        .item(&item("templates", "워크스페이스 틀: 저장·불러오기…")?)
         .separator()
         .item(&item("snippets", "자주 쓰는 지시\tCtrl+Shift+P")?)
         .item(&item("broadcast", "동시 입력 켜기/끄기\tCtrl+Shift+B")?)
@@ -318,7 +318,7 @@ fn main() {
                 config_error,
                 config_path,
             });
-            // 그룹별 브라우저 프로필이 한 폴더로 합쳐지지 않게 한다(본창의 웹뷰가 만들어진 뒤여야 한다).
+            // 워크스페이스별 브라우저 프로필이 한 폴더로 합쳐지지 않게 한다(본창의 웹뷰가 만들어진 뒤여야 한다).
             site::adopt_data_folder_override(app.handle());
             monitor::start(app.handle().clone());
             drops::watch(app.handle());

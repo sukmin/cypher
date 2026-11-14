@@ -53,7 +53,7 @@ pub struct Session {
     pub scrollback: u32,
     /// PowerShell·cmd 세션이 다른 프로그램과 글자를 주고받을 때 UTF-8을 쓰게 한다(Claude 세션은 해당 없음).
     pub utf8: bool,
-    /// Claude 세션이 새로 만든 파일을 그 세션의 묶음에 항목으로 놓을지.
+    /// Claude 세션이 새로 만든 파일을 그 세션의 워크스페이스에 항목으로 놓을지.
     /// "known": 문서(.md, .txt)·이미지·HTTP 요청만, "all": 그 밖의 글자 파일도 문서로, "off": 놓지 않음.
     pub show_created: String,
     /// Claude 세션이 지금 쓰는 도구(`Edit · main.js`, `Bash · cargo build`)를 사이드바의 그 줄에 보여 줄지.
@@ -104,7 +104,7 @@ impl Default for Session {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Browser {
-    /// Claude 세션에 Cypher 도구(같은 그룹의 브라우저 조작, 항목 보기 등)를 연결할지.
+    /// Claude 세션에 Cypher 도구(같은 워크스페이스의 브라우저 조작, 항목 보기 등)를 연결할지.
     pub enabled: bool,
     /// "chrome" 엔진의 브라우저를 처음 띄울 때 여는 주소. 기본은 빈 페이지(Cypher가 스스로 어떤 사이트에도 접속하지 않게).
     pub home: String,
@@ -157,10 +157,10 @@ pub const DEFAULT_TEXT: &str = r#"# Cypher 설정. 고친 뒤 Cypher를 다시 �
 
 [session]
 # restore = true       # 다시 시작할 때 이전 세션과 배치를 되살림
-# restore_on_click = true   # 되살린 세션을 바로 띄우지 않고, 사이드바에서 누른 세션(이나 묶음 머리의 ▶)만 재개. false면 모두 바로 띄움
+# restore_on_click = true   # 되살린 세션을 바로 띄우지 않고, 사이드바에서 누른 세션(이나 워크스페이스 머리의 ▶)만 재개. false면 모두 바로 띄움
 # scrollback = 10000   # 세션마다 기억할 지난 출력 줄 수
 # utf8 = true          # PowerShell·cmd 세션의 글자 인코딩을 UTF-8로 (Claude 세션은 해당 없음)
-# Claude 세션이 새로 만든 파일을 그 세션의 묶음에 항목으로 놓기.
+# Claude 세션이 새로 만든 파일을 그 세션의 워크스페이스에 항목으로 놓기.
 #   "known": 문서(.md, .txt)·이미지·HTTP 요청(.http)만 / "all": 그 밖의 글자 파일도 문서로 / "off": 놓지 않음
 # show_created = "known"
 # Claude 세션이 지금 쓰는 도구(Edit · main.js, Bash · cargo build)를 사이드바의 그 줄에 표시.
@@ -175,7 +175,7 @@ pub const DEFAULT_TEXT: &str = r#"# Cypher 설정. 고친 뒤 Cypher를 다시 �
 # magnet_distance = 14     # 달라붙는 거리(픽셀). 작을수록 잘 떨어집니다
 
 [browser]
-# enabled = true                      # Claude 세션에 Cypher 도구(같은 그룹의 브라우저 조작, 항목 보기 등)를 연결
+# enabled = true                      # Claude 세션에 Cypher 도구(같은 워크스페이스의 브라우저 조작, 항목 보기 등)를 연결
 # home = "about:blank"                # "chrome" 엔진의 브라우저를 처음 띄울 때 여는 주소(기본은 빈 페이지)
 # engine = "webview"                  # "webview": 사이드바의 사이트 항목을 조작 / "chrome": 설치된 Chrome·Edge를 전용 프로필로 띄워 조작
 # chrome_path = ""                    # "chrome" 엔진이 쓸 실행 파일. 비우면 Chrome, Edge, Chromium, Brave 순으로 찾음

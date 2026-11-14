@@ -1,12 +1,12 @@
 //! Claude 세션이 쓰는 브라우저 조작 도구.
 //!
-//! 조작 대상은 그 세션과 같은 그룹에 있는 사이트 항목(사이드바의 브라우저)이다. 어느 사이트를 조작할지는
-//! 화면 쪽이 정해 준다(사용자가 넘겨준 것 → 같은 그룹에서 마지막으로 쓴 것 → 없으면 새로 만든다).
+//! 조작 대상은 그 세션과 같은 워크스페이스에 있는 사이트 항목(사이드바의 브라우저)이다. 어느 사이트를 조작할지는
+//! 화면 쪽이 정해 준다(사용자가 넘겨준 것 → 같은 워크스페이스에서 마지막으로 쓴 것 → 없으면 새로 만든다).
 //! 조작은 포트를 열지 않고 WebView2의 개발자 도구 프로토콜(CDP)을 앱 안에서 직접 부른다.
 //! 웹 페이지 쪽 웹뷰에는 어떤 앱 명령 권한도 주지 않는다(capabilities 참고).
 //!
 //! 설정에서 엔진을 "chrome"으로 바꾸면 사이트 항목 대신 설치된 Chrome·Edge를 띄워 조작한다(`chrome.rs`).
-//! 어느 엔진이든 브라우저(프로필)는 그룹마다 따로다: 세션은 자기 그룹의 브라우저만 조작하고, 로그인 상태도 그룹끼리 섞이지 않는다.
+//! 어느 엔진이든 브라우저(프로필)는 워크스페이스마다 따로다: 세션은 자기 워크스페이스의 브라우저만 조작하고, 로그인 상태도 워크스페이스끼리 섞이지 않는다.
 
 use serde_json::{json, Value};
 use std::collections::HashMap;
@@ -57,13 +57,13 @@ fn chrome_engine(app: &AppHandle) -> bool {
     app.state::<crate::AppState>().config.browser.engine.eq_ignore_ascii_case("chrome")
 }
 
-/// "chrome" 엔진에서 그 프로필(그룹)의 브라우저를 띄운다. 이미 떠 있으면 앞으로 가져오고, 주소가 있으면 그리로 간다.
+/// "chrome" 엔진에서 그 프로필(워크스페이스)의 브라우저를 띄운다. 이미 떠 있으면 앞으로 가져오고, 주소가 있으면 그리로 간다.
 fn open_chrome(app: &AppHandle, profile: &str, url: Option<&str>) -> Result<(), String> {
     let settings = &app.state::<crate::AppState>().config.browser;
     crate::chrome::open(profile, &settings.chrome_path, &settings.home, url)
 }
 
-/// 화면이 건넨 프로필 번호를 확인한다. 없거나 빈 글이면 그룹 없는 곳의 브라우저(공용 프로필)다.
+/// 화면이 건넨 프로필 번호를 확인한다. 없거나 빈 글이면 워크스페이스 없는 곳의 브라우저(공용 프로필)다.
 fn chrome_profile(profile: Option<String>) -> Result<String, String> {
     let profile = profile.unwrap_or_default();
     if !profile.is_empty() {
@@ -74,7 +74,7 @@ fn chrome_profile(profile: Option<String>) -> Result<String, String> {
 
 // ───────────────────────── 화면에서 부르는 명령("chrome" 엔진 전용) ─────────────────────────
 
-/// 설치된 Chrome(또는 Edge)을 Cypher 전용 프로필로 띄운다. `profile`은 지금 보고 있는 항목의 그룹이 쓰는 프로필의 번호.
+/// 설치된 Chrome(또는 Edge)을 Cypher 전용 프로필로 띄운다. `profile`은 지금 보고 있는 항목의 워크스페이스가 쓰는 프로필의 번호.
 #[tauri::command]
 pub async fn browser_open(app: AppHandle, url: Option<String>, profile: Option<String>) -> Result<(), String> {
     if !chrome_engine(&app) {
@@ -91,7 +91,7 @@ pub async fn browser_where(app: AppHandle, profile: Option<String>) -> Option<St
 
 /// Chrome에 보이는 화면(또는 `full`이면 페이지 전체)을 찍어 이미지 저장소에 넣는다.
 /// 화면 쪽이 돌려받은 그림으로, 찍으라고 한 그때 보고 있던 항목의 묶음에 이미지 항목을 만든다
-/// (사건으로 따로 알리지 않는다: 찍는 사이 다른 그룹의 항목으로 옮겨 가면 그림이 그 그룹에 들어간다).
+/// (사건으로 따로 알리지 않는다: 찍는 사이 다른 워크스페이스의 항목으로 옮겨 가면 그림이 그 워크스페이스에 들어간다).
 #[tauri::command]
 pub async fn browser_capture(app: AppHandle, full: Option<bool>, profile: Option<String>) -> Result<crate::image::Captured, String> {
     let profile = chrome_profile(profile)?;
@@ -104,7 +104,7 @@ pub async fn browser_capture(app: AppHandle, full: Option<bool>, profile: Option
 
 // ───────────────────────── 개발자 도구 프로토콜 ─────────────────────────
 
-/// 도구가 조작하는 대상: 사이트 항목의 웹뷰, 또는 "chrome" 엔진이 그 그룹의 프로필로 띄운 브라우저.
+/// 도구가 조작하는 대상: 사이트 항목의 웹뷰, 또는 "chrome" 엔진이 그 워크스페이스의 프로필로 띄운 브라우저.
 enum Target {
     Site(Box<tauri::Webview>),
     /// 프로필 번호.
@@ -230,7 +230,7 @@ fn dialog_note(dialog: &Dialog, answer: &Answer, planned: bool, waiting: bool) -
     format!("{head}({}){quoted} → {did}.{tail}", dialog.kind)
 }
 
-/// 브라우저 하나(사이트 항목, 또는 그 그룹의 Chrome)의 확인 창 상태.
+/// 브라우저 하나(사이트 항목, 또는 그 워크스페이스의 Chrome)의 확인 창 상태.
 #[derive(Default)]
 struct Dialogs {
     /// 지금 이 브라우저를 쓰고 있는 도구의 수.
@@ -318,13 +318,13 @@ pub fn forget_dialogs(key: &str) {
     }
 }
 
-/// 사이트 항목의 확인 창 상태를 가리키는 열쇠. 프로필까지 넣는다: 항목이 다른 그룹으로 옮겨지면 옛 그룹의
+/// 사이트 항목의 확인 창 상태를 가리키는 열쇠. 프로필까지 넣는다: 항목이 다른 워크스페이스로 옮겨지면 옛 워크스페이스의
 /// 세션이 정해 둔 답이 따라가지 않는다.
 pub fn site_dialogs(id: u32, profile: &str) -> String {
     format!("site-{id}/{profile}")
 }
 
-/// "chrome" 엔진에서 그 프로필(그룹)의 브라우저의 확인 창 상태를 가리키는 열쇠.
+/// "chrome" 엔진에서 그 프로필(워크스페이스)의 브라우저의 확인 창 상태를 가리키는 열쇠.
 pub fn chrome_dialogs(profile: &str) -> String {
     format!("chrome/{profile}")
 }
@@ -764,8 +764,8 @@ pub fn tools() -> Value {
     let none = json!({ "type": "object", "properties": {} });
     json!([
         { "name": "browser_read", "inputSchema": none,
-          "description": "이 세션과 같은 그룹에 있는 Cypher 브라우저(사이드바의 사이트 항목)에 지금 열려 있는 페이지를 읽는다(사용자가 로그인해 둔 상태 그대로). 주소, 제목, 누르거나 입력할 수 있는 요소 목록(번호 포함), 페이지 글자를 돌려준다. 조작하기 전에 먼저 부른다." },
-        { "name": "browser_navigate", "description": "브라우저를 그 주소로 이동시킨다. 같은 그룹에 브라우저(사이트 항목)가 없으면 새로 만들어 연다.",
+          "description": "이 세션과 같은 워크스페이스에 있는 Cypher 브라우저(사이드바의 사이트 항목)에 지금 열려 있는 페이지를 읽는다(사용자가 로그인해 둔 상태 그대로). 주소, 제목, 누르거나 입력할 수 있는 요소 목록(번호 포함), 페이지 글자를 돌려준다. 조작하기 전에 먼저 부른다." },
+        { "name": "browser_navigate", "description": "브라우저를 그 주소로 이동시킨다. 같은 워크스페이스에 브라우저(사이트 항목)가 없으면 새로 만들어 연다.",
           "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] } },
         { "name": "browser_click", "description": "browser_read가 준 번호(ref)의 요소를 누른다.",
           "inputSchema": { "type": "object", "properties": { "ref": { "type": "integer" } }, "required": ["ref"] } },
@@ -783,7 +783,7 @@ pub fn tools() -> Value {
         { "name": "browser_eval", "description": "페이지에서 JavaScript 식을 실행하고 값을 받는다. 다른 도구로 안 되는 읽기·조작에만 쓴다.",
           "inputSchema": { "type": "object", "properties": { "script": { "type": "string" } }, "required": ["script"] } },
         { "name": "browser_tabs", "inputSchema": none,
-          "description": "이 세션과 같은 그룹에 있는 브라우저(사이트 항목)의 목록과, 그중 지금 조작 대상인 것을 알려 준다. 브라우저가 여러 개일 때 어느 것을 조작할지 확인하는 데 쓴다." },
+          "description": "이 세션과 같은 워크스페이스에 있는 브라우저(사이트 항목)의 목록과, 그중 지금 조작 대상인 것을 알려 준다. 브라우저가 여러 개일 때 어느 것을 조작할지 확인하는 데 쓴다." },
         { "name": "browser_select", "description": "조작 대상을 browser_tabs가 준 번호(id)의 브라우저로 바꾼다.",
           "inputSchema": { "type": "object", "properties": { "id": { "type": "integer" } }, "required": ["id"] } },
         { "name": "browser_dialog",
@@ -891,7 +891,7 @@ fn plan_text(answer: &Answer, waiting: Option<&Dialog>) -> String {
     )
 }
 
-/// "chrome" 엔진에서, 그 프로필(그룹)의 브라우저에 도구 하나를 실행한다.
+/// "chrome" 엔진에서, 그 프로필(워크스페이스)의 브라우저에 도구 하나를 실행한다.
 pub(crate) fn on_chrome(profile: &str, name: &str, args: &Value) -> ToolResult {
     let dialogs = chrome_dialogs(profile);
     if name == "browser_dialog" {
@@ -904,12 +904,12 @@ pub(crate) fn on_chrome(profile: &str, name: &str, args: &Value) -> ToolResult {
 pub fn call(app: &AppHandle, session: Option<u32>, name: &str, args: &Value) -> ToolResult {
     let choosing = matches!(name, "browser_tabs" | "browser_select");
     if chrome_engine(app) {
-        // 이 엔진의 브라우저는 사이드바 항목이 아니라 그룹마다 하나씩 따로 띄우는 Chrome이다. 부른 세션의 그룹이 쓰는
-        // 프로필을 화면에 물어 그 브라우저만 조작한다(부른 세션을 알 수 없거나 그룹에 들지 않은 세션이면 화면이 거절한다).
+        // 이 엔진의 브라우저는 사이드바 항목이 아니라 워크스페이스마다 하나씩 따로 띄우는 Chrome이다. 부른 세션의 워크스페이스가 쓰는
+        // 프로필을 화면에 물어 그 브라우저만 조작한다(부른 세션을 알 수 없거나 워크스페이스에 들지 않은 세션이면 화면이 거절한다).
         let scope = crate::mcp::ask_ui(app, "chrome_scope", json!({ "session": session }))?;
         let profile = crate::site::profile_key(scope["profile"].as_str().unwrap_or(""))?.to_string();
         if choosing {
-            return Ok(text("브라우저 엔진이 chrome으로 설정되어 있어 이 그룹의 브라우저는 하나뿐입니다(이 그룹 전용 프로필의 Chrome)."));
+            return Ok(text("브라우저 엔진이 chrome으로 설정되어 있어 이 워크스페이스의 브라우저는 하나뿐입니다(이 워크스페이스 전용 프로필의 Chrome)."));
         }
         // 확인 창에 줄 답을 정해 두는 것은 브라우저가 떠 있지 않아도 된다.
         if name != "browser_dialog" && !crate::chrome::is_open(&profile) {
@@ -923,7 +923,7 @@ pub fn call(app: &AppHandle, session: Option<u32>, name: &str, args: &Value) -> 
         let reply = crate::mcp::ask_ui(app, name, json!({ "session": session, "site": args["id"] }))?;
         return Ok(text(reply["text"].as_str().unwrap_or("")));
     }
-    // 어느 사이트 항목을 조작할지는 화면이 정한다. 이동하라는 요청이면, 그룹에 브라우저가 없을 때 새로 만든다.
+    // 어느 사이트 항목을 조작할지는 화면이 정한다. 이동하라는 요청이면, 워크스페이스에 브라우저가 없을 때 새로 만든다.
     let found = crate::mcp::ask_ui(app, "browser_target", json!({ "session": session, "create": name == "browser_navigate" }))?;
     let id = found["key"].as_u64().and_then(|n| u32::try_from(n).ok()).ok_or("조작할 브라우저를 찾지 못했습니다")?;
     let profile = found["profile"].as_str().unwrap_or("");
@@ -932,7 +932,7 @@ pub fn call(app: &AppHandle, session: Option<u32>, name: &str, args: &Value) -> 
         // 답을 정해 두기만 한다(웹뷰가 아직 없어도 된다).
         plan_dialog(&dialogs, args)?
     } else {
-        // 그 사이트 항목의 그룹이 쓰는 프로필로 웹뷰를 만든다(화면이 알려 준다).
+        // 그 사이트 항목의 워크스페이스가 쓰는 프로필로 웹뷰를 만든다(화면이 알려 준다).
         let webview = crate::site::ensure(app, id, found["url"].as_str().unwrap_or("about:blank"), profile)?;
         // 방금 받은 그 웹뷰만 조작한다(이름으로 다시 찾으면, 그사이 항목이 옮겨져 다시 만들어진 다른 프로필의 웹뷰일 수 있다).
         crate::site::with_shown_on(&webview, |webview| operate(&Target::Site(Box::new(webview.clone())), &dialogs, name, args))?

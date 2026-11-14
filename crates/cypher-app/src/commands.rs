@@ -67,7 +67,7 @@ pub fn open_claude_file(which: String) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// 사용자의 것을 두는 폴더들(메모·마인드맵·ERD·할 일·이미지). 같은 그룹의 Claude 세션에 파일 경로를 알려 줄 때 쓴다.
+/// 사용자의 것을 두는 폴더들(메모·마인드맵·ERD·할 일·이미지). 같은 워크스페이스의 Claude 세션에 파일 경로를 알려 줄 때 쓴다.
 #[tauri::command]
 pub fn store_dirs() -> serde_json::Value {
     let dir = |name: &str| crate::user_dir().join(name).to_string_lossy().into_owned();
@@ -221,7 +221,7 @@ pub fn session_create(
         if let Some(original) = original {
             env.push(("CYPHER_STATUSLINE".into(), original.command));
         }
-        // Cypher 도구(같은 그룹의 브라우저 조작, 항목 보기 등)를 이 세션에 연결한다.
+        // Cypher 도구(같은 워크스페이스의 브라우저 조작, 항목 보기 등)를 이 세션에 연결한다.
         let mcp = state.mcp.then(|| crate::write_mcp_config(state.status_port, &state.token, id)).flatten();
         Some((settings, mcp))
     };

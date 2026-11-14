@@ -703,7 +703,7 @@ export function createErd(item, host, saved = {}, onChange = () => {}) {
     button('내보내기', 'PNG·SVG로 저장 · 이미지 항목으로 넣기', (ev) => showMenu(ev, [
       { label: 'PNG로 저장…', action: () => exportAs('png') },
       { label: 'SVG로 저장…', action: () => exportAs('svg') },
-      { label: '이미지 항목으로 넣기 (같은 묶음)', action: () => exportAs('item') },
+      { label: '이미지 항목으로 넣기 (같은 워크스페이스)', action: () => exportAs('item') },
     ])),
   );
   const body = make('div', 'erd-body');
@@ -870,7 +870,7 @@ export function createErd(item, host, saved = {}, onChange = () => {}) {
     }
   }
 
-  /** 밖에서(같은 그룹의 Claude 세션이 파일을 직접 고친 경우 등) 저장소의 글이 바뀌었으면 읽어 들인다. */
+  /** 밖에서(같은 워크스페이스의 Claude 세션이 파일을 직접 고친 경우 등) 저장소의 글이 바뀌었으면 읽어 들인다. */
   async function reload() {
     if (disposed) return;
     const base = stored;
@@ -909,7 +909,7 @@ export function createErd(item, host, saved = {}, onChange = () => {}) {
           headers: { 'x-name': encodeURIComponent(name), 'x-ext': 'png' },
         });
         await api.addImages([image], { near: item, source: `ERD: ${name}` });
-        return setStatus('이 항목과 같은 묶음에 이미지 항목으로 넣었습니다.');
+        return setStatus('이 항목과 같은 워크스페이스에 이미지 항목으로 넣었습니다.');
       }
       setStatus(saved ? `내보냈습니다: ${saved}` : '');
     } catch (err) {
@@ -993,7 +993,7 @@ export function createErd(item, host, saved = {}, onChange = () => {}) {
   $codeView.hidden = !codeShown;
   $toggle.classList.toggle('on', codeShown);
   const ready = (async () => {
-    // 처음 넣을 내용이 주어졌으면(Claude 세션이 만든 것, 그룹 틀) 그것으로, 아니면 자동 저장소에서 읽는다.
+    // 처음 넣을 내용이 주어졌으면(Claude 세션이 만든 것, 워크스페이스 틀) 그것으로, 아니면 자동 저장소에서 읽는다.
     const given = typeof saved.text === 'string' ? saved.text : null;
     let kept = null;
     if (given == null) {
@@ -1020,7 +1020,7 @@ export function createErd(item, host, saved = {}, onChange = () => {}) {
     flush,
     /** erDiagram 글. */
     text: () => $code.value,
-    /** 내용을 통째로 바꾼다. 같은 그룹의 Claude 세션이 고칠 때 쓴다(초점을 옮기지 않는다). */
+    /** 내용을 통째로 바꾼다. 같은 워크스페이스의 Claude 세션이 고칠 때 쓴다(초점을 옮기지 않는다). */
     setText: (source) => { unread = false; replaceText(String(source ?? '')); return true; },
     /** 글자를 커서 자리에 넣는다(끌어다 놓기 등). */
     insert: (text) => { $code.focus(); if (document.activeElement === $code) document.execCommand('insertText', false, text); },

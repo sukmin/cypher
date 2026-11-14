@@ -94,7 +94,7 @@ fn relay_mcp() {
         eprintln!("Cypher 본체에 연결하지 못했습니다");
         std::process::exit(1);
     };
-    // 어느 Claude 세션이 띄운 것인지 함께 알린다(같은 그룹의 브라우저·항목을 찾는 데 쓴다).
+    // 어느 Claude 세션이 띄운 것인지 함께 알린다(같은 워크스페이스의 브라우저·항목을 찾는 데 쓴다).
     let session = std::env::var("CYPHER_SESSION").unwrap_or_default();
     if writeln!(stream, "{token}\nmcp {session}").is_err() {
         return;

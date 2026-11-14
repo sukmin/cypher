@@ -284,7 +284,7 @@ body.site-shown #toasts { right: auto; left: 14px; bottom: 56px; }
 /* 방금 만들어져 아직 열어 보지 않은 항목(메모·이미지 …)의 종류 기호 */
 li.attention .dot.kind { background: none; box-shadow: none; color: var(--text); text-shadow: 0 0 6px var(--attention); }
 
-/* ───────── 작업영역 맨 위: 지금 보고 있는 항목(그룹 › 별칭·이름 · 폴더) ───────── */
+/* ───────── 스테이지 맨 위: 지금 보고 있는 항목(워크스페이스 › 별칭·이름 · 폴더) ───────── */
 
 #where {
   flex: none;
@@ -480,7 +480,7 @@ li.attention .dot.kind { background: none; box-shadow: none; color: var(--text);
 .reader-empty { margin: 40px 34px; max-width: 520px; color: var(--dim); line-height: 1.7; }
 .reader-empty[hidden] { display: none; }
 
-/* 빈 항목의 작업 영역(empty.js): 볼 파일이나 실행할 명령을 아직 정하지 않은 항목. 파일을 끌어다 놓거나 고르거나 경로를 적는다. */
+/* 빈 항목이 스테이지에 보여 주는 자리(empty.js): 볼 파일이나 실행할 명령을 아직 정하지 않은 항목. 파일을 끌어다 놓거나 고르거나 경로를 적는다. */
 .empty-zone {
   flex: 1;
   min-height: 100%;
@@ -607,7 +607,7 @@ li.approval .sub .tool { color: inherit; }
 :root[data-theme="win32"] #sessions li.active .sub .tool { color: inherit; }
 
 
-/* 그룹의 폴더 줄: 그룹 이름 바로 아래 한 줄을 통째로 써서 그룹 폴더와 고르는 단추(▾, 폴더…)를 둔다. */
+/* 워크스페이스의 폴더 줄: 워크스페이스 이름 바로 아래 한 줄을 통째로 써서 워크스페이스 폴더와 고르는 단추(▾, 폴더…)를 둔다. */
 #sessions li.group .group-folder {
   flex: 0 0 100%; /* 머리의 다른 것들 아래로 내려가 한 줄을 다 쓴다 */
   display: flex;
@@ -685,7 +685,7 @@ li.dormant .name, li.dormant .sub { opacity: 0.65; }
 #sessions li.group .wake { visibility: visible; font-size: 10px; color: var(--attention); }
 #sessions li.group .wake:hover { color: var(--accent); }
 
-/* ───────── 북마크: 항목에 붙인 숫자(Ctrl+숫자로 바로 가기). 사이드바 줄·창 제목 줄·작업영역 표시줄에 눈에 띄게 보인다 ───────── */
+/* ───────── 북마크: 항목에 붙인 숫자(Ctrl+숫자로 바로 가기). 사이드바 줄·창 제목 줄·스테이지 표시줄에 눈에 띄게 보인다 ───────── */
 
 .mark {
   flex: none;

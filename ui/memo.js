@@ -906,7 +906,7 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
     find: () => openFind(false),
     text: () => $text.value,
     /**
-     * 같은 그룹의 Claude 세션이 글을 넣는다: 끝에 덧붙이거나(`replace`가 거짓) 통째로 바꾼다.
+     * 같은 워크스페이스의 Claude 세션이 글을 넣는다: 끝에 덧붙이거나(`replace`가 거짓) 통째로 바꾼다.
      * 사용자가 다른 곳에 입력하는 중일 수 있으므로 초점은 옮기지 않는다. 통째로 바꿀 때는 바꾸기 전 글을
      * 닫은 메모 보관 폴더에 30일 동안 남기고 그 경로를 돌려준다(남길 글이 없었으면 null).
      */

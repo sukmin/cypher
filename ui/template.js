@@ -1,4 +1,4 @@
-// 그룹 틀: 그룹 하나(세션 폴더, 메모, 사이트 주소, HTTP 폴더 …)를 파일로 저장해 두고,
+// 워크스페이스 틀: 워크스페이스 하나(세션 폴더, 메모, 사이트 주소, HTTP 폴더 …)를 파일로 저장해 두고,
 // 같은 종류의 업무를 시작할 때 한 번에 펼친다.
 //
 // 틀에 담기는 것: 터미널 세션(프로필과 폴더 — 대화는 담지 않고 새로 시작한다), 메모(글 또는 연결된 파일),
@@ -31,7 +31,7 @@ export async function saveTemplate(group) {
     setStatus(`틀로 저장할 항목이 없습니다${packed.skipped.length ? ` (${packed.skipped.join(' · ')})` : ''}.`);
     return false;
   }
-  const name = await ask('틀 이름 (이 묶음의 항목 구성을 이 이름으로 저장합니다)', '예: 결제 개편', group.name);
+  const name = await ask('틀 이름 (이 워크스페이스의 항목 구성을 이 이름으로 저장합니다)', '예: 결제 개편', group.name);
   if (!name) return false;
   try {
     const existing = await invoke('template_list');
@@ -63,20 +63,20 @@ async function openTemplate(info, elsewhere) {
   const dir = elsewhere ? await api.pickFolder(`"${info.name}" 틀의 모든 항목을 열 폴더`) : null;
   if (elsewhere && !dir) return;
   const group = await ask(
-    `"${info.name}" 틀을 펼칠 그룹 이름${dir ? ` (모든 항목을 ${dir}에서 엽니다)` : ''}`,
-    '있는 그룹 이름을 적으면 그 그룹에 더합니다', info.name,
+    `"${info.name}" 틀을 펼칠 워크스페이스 이름${dir ? ` (모든 항목을 ${dir}에서 엽니다)` : ''}`,
+    '있는 워크스페이스 이름을 적으면 그 워크스페이스에 더합니다', info.name,
   );
   if (!group) return;
   setStatus(`틀을 펼치는 중: ${info.name}…`);
   try {
     const { made, skipped } = await api.open(template, { group, cwd: dir });
-    setStatus(`틀을 펼쳤습니다: ${info.name} → 그룹 "${group}"에 항목 ${made}개${skipped.length ? ` — ${skipped.join(' · ')}` : ''}`);
+    setStatus(`틀을 펼쳤습니다: ${info.name} → 워크스페이스 "${group}"에 항목 ${made}개${skipped.length ? ` — ${skipped.join(' · ')}` : ''}`);
   } catch (err) {
     notice('틀을 펼치지 못했습니다', `${info.name}: ${err}`);
   }
 }
 
-/** 그룹 틀 창: 저장해 둔 틀을 펼치거나 지우고, 지금 보고 있는 묶음을 틀로 저장한다. */
+/** 워크스페이스 틀 창: 저장해 둔 틀을 펼치거나 지우고, 지금 보고 있는 묶음을 틀로 저장한다. */
 export async function showTemplates() {
   const { invoke, make, openPopup, setStatus } = api;
   let list = [];
@@ -92,7 +92,7 @@ export async function showTemplates() {
     use.title = `${info.name}\n${info.summary || `항목 ${info.items}개`}\n저장: ${when(info.saved)}\n클릭: 저장해 둔 폴더대로 펼치기`;
     use.onclick = () => { close(); openTemplate(info, false); };
     const here = make('button', 'template-here', '다른 폴더에서…');
-    here.title = '폴더를 골라 모든 항목을 그 폴더에서 열기 (그 그룹에 폴더를 정해 두지 않았으면 그룹의 폴더로도 정합니다)';
+    here.title = '폴더를 골라 모든 항목을 그 폴더에서 열기 (그 워크스페이스에 폴더를 정해 두지 않았으면 워크스페이스의 폴더로도 정합니다)';
     here.onclick = () => { close(); openTemplate(info, true); };
     const remove = make('button', 'close', '×');
     remove.title = '이 틀 지우기';
@@ -106,16 +106,16 @@ export async function showTemplates() {
     return row;
   });
   const current = api.current();
-  const save = make('button', 'row add', current ? `지금 보고 있는 묶음을 틀로 저장… (${current.name} · 항목 ${current.list.length}개)` : '틀로 저장할 묶음이 없습니다');
+  const save = make('button', 'row add', current ? `지금 보고 있는 워크스페이스를 틀로 저장… (${current.name} · 항목 ${current.list.length}개)` : '틀로 저장할 워크스페이스가 없습니다');
   save.disabled = !current;
   save.onclick = async () => { close(); if (await saveTemplate(current)) showTemplates(); };
   const folder = make('button', 'row add', '틀 폴더 열기 (파일을 복사해 다른 PC로 옮길 수 있습니다)');
   folder.onclick = () => invoke('template_folder').catch((err) => setStatus(String(err)));
-  const close = openPopup('그룹 틀', [
+  const close = openPopup('워크스페이스 틀', [
     ...rows,
     make('p', 'note', list.length
-      ? '틀을 누르면 그 구성대로 그룹이 만들어집니다. 세션은 대화를 잇지 않고 새로 시작하고, 메모·마인드맵은 저장할 때의 글로, 사이트·HTTP·문서는 그 주소·파일로 엽니다.'
-      : '저장해 둔 틀이 없습니다. 업무 하나를 그룹으로 꾸민 뒤(세션, 메모, 사이트, HTTP …) 틀로 저장해 두면, 같은 종류의 업무를 시작할 때 한 번에 펼칩니다. 묶음 머리를 오른쪽 클릭해도 저장할 수 있습니다.'),
+      ? '틀을 누르면 그 구성대로 워크스페이스가 만들어집니다. 세션은 대화를 잇지 않고 새로 시작하고, 메모·마인드맵은 저장할 때의 글로, 사이트·HTTP·문서는 그 주소·파일로 엽니다.'
+      : '저장해 둔 틀이 없습니다. 업무 하나를 워크스페이스로 꾸민 뒤(세션, 메모, 사이트, HTTP …) 틀로 저장해 두면, 같은 종류의 업무를 시작할 때 한 번에 펼칩니다. 워크스페이스 머리를 오른쪽 클릭해도 저장할 수 있습니다.'),
     save, folder,
   ]);
 }

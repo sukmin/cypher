@@ -1,7 +1,7 @@
-// 할 일 항목: 그룹(업무)의 체크 목록.
+// 할 일 항목: 워크스페이스(업무)의 체크 목록.
 //
 // 내용은 Markdown 체크 목록 글이다(다른 곳에서도 그대로 읽힌다). 화면은 그 글을 목록으로 보여 주고,
-// 체크·고치기·옮기기는 모두 글의 그 줄을 고치는 일이다. 그래서 같은 그룹의 Claude 세션이 글을 통째로 쓰거나
+// 체크·고치기·옮기기는 모두 글의 그 줄을 고치는 일이다. 그래서 같은 워크스페이스의 Claude 세션이 글을 통째로 쓰거나
 // (todo_write) 파일을 직접 고쳐도 같은 것을 본다.
 //
 //   # 결제 개편              ← 제목(사이드바의 이름)
@@ -197,7 +197,7 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
   // 할 일이 하나도 없는 동안의 빈 영역: 아래 칸에 적거나, 체크 목록이 든 파일을 끌어다 놓거나 골라 그 내용으로 채운다.
   const zone = emptyZone(make, {
     title: '할 일이 없습니다',
-    hint: '아래 칸에 할 일을 적고 Enter를 누르면 목록에 들어갑니다. 같은 그룹의 Claude 세션에게 "할 일 목록을 만들어 줘"라고 해도 됩니다. 체크 목록이 든 Markdown·글자 파일을 여기에 끌어다 놓거나 고르면 그 내용으로 채웁니다(원본 파일은 바뀌지 않습니다).',
+    hint: '아래 칸에 할 일을 적고 Enter를 누르면 목록에 들어갑니다. 같은 워크스페이스의 Claude 세션에게 "할 일 목록을 만들어 줘"라고 해도 됩니다. 체크 목록이 든 Markdown·글자 파일을 여기에 끌어다 놓거나 고르면 그 내용으로 채웁니다(원본 파일은 바뀌지 않습니다).',
     pick: { label: '파일에서 가져오기…', tip: '체크 목록이 든 Markdown·글자 파일 고르기', action: () => pickFile() },
     path: { placeholder: '또는 파일 경로를 적고 Enter', action: (given) => takeFile(given) },
   });
@@ -599,7 +599,7 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
     }
   }
 
-  /** 밖에서(같은 그룹의 Claude 세션이 파일을 직접 고친 경우 등) 저장소의 글이 바뀌었으면 읽어 들인다. */
+  /** 밖에서(같은 워크스페이스의 Claude 세션이 파일을 직접 고친 경우 등) 저장소의 글이 바뀌었으면 읽어 들인다. */
   async function reload() {
     if (disposed || editing) return;
     const base = stored;
@@ -669,7 +669,7 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
   }
 
   const ready = (async () => {
-    // 처음 넣을 내용이 주어졌으면(Claude 세션이 만든 것, 그룹 틀) 그것으로, 아니면 자동 저장소에서 읽는다.
+    // 처음 넣을 내용이 주어졌으면(Claude 세션이 만든 것, 워크스페이스 틀) 그것으로, 아니면 자동 저장소에서 읽는다.
     const given = typeof saved.text === 'string' ? saved.text : null;
     let kept = null;
     if (given == null) {
@@ -700,7 +700,7 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
     flush: () => { finishEdit(); return flush(); },
     /** Markdown 체크 목록 글. */
     text: () => text,
-    /** 내용을 통째로 바꾼다. 같은 그룹의 Claude 세션이 고칠 때 쓴다(초점을 옮기지 않는다). */
+    /** 내용을 통째로 바꾼다. 같은 워크스페이스의 Claude 세션이 고칠 때 쓴다(초점을 옮기지 않는다). */
     setText: (source) => {
       settle();
       selected = -1; // 줄이 통째로 바뀌므로 고른 줄 표시는 푼다(옛 줄 번호가 엉뚱한 줄을 가리키지 않게).

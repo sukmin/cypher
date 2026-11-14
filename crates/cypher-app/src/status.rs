@@ -53,6 +53,39 @@ struct HookPayload {
     agent: Option<String>,
     /// 서브에이전트의 종류(예: Explore, general-purpose).
     agent_type: Option<String>,
+    /// 응답 완료(Stop)일 때: 그때 아직 돌고 있는 배경 작업. Claude Code가 알려 주지 않았으면 없다.
+    background: Option<Background>,
+}
+
+/// 응답 완료(Stop) 신호에 딸려 오는 "아직 돌고 있는 배경 작업"(`background_tasks`)에서 화면이 쓰는 것.
+/// 화면은 이것으로 끝났는데도 남아 있는 서브에이전트 표시를 지운다(종료 신호가 오지 않는 경우가 있다).
+#[derive(Clone, Serialize, Debug, PartialEq)]
+struct Background {
+    /// 돌고 있는 서브에이전트·팀원의 번호(번호가 없는 것은 빈 글).
+    agents: Vec<String>,
+    /// 돌고 있는 워크플로 수. 그 안에서 도는 서브에이전트는 목록에 따로 나오지 않을 수 있다.
+    workflows: u32,
+}
+
+/// 훅 내용의 `background_tasks`를 읽는다. 그 값이 없으면(옛 버전, 작업 목록을 읽지 못한 때) None.
+fn background(v: &Value) -> Option<Background> {
+    let tasks = v["background_tasks"].as_array()?;
+    let mut found = Background { agents: Vec::new(), workflows: 0 };
+    for task in tasks {
+        // 목록에는 돌고 있는 것만 온다고 하지만, 끝난 것으로 적혀 있으면 세지 않는다.
+        let status = task["status"].as_str().unwrap_or("").to_ascii_lowercase();
+        if matches!(status.as_str(), "completed" | "failed" | "killed" | "stopped" | "cancelled" | "canceled" | "done") {
+            continue;
+        }
+        // 종류는 사람이 읽는 이름(subagent, workflow, teammate, shell …)이거나, 모르는 종류면 안에서 쓰는 이름 그대로다.
+        let kind = task["type"].as_str().unwrap_or("").to_ascii_lowercase();
+        if kind.contains("workflow") {
+            found.workflows += 1;
+        } else if (kind.contains("agent") || kind.contains("teammate")) && !kind.contains("remote") && !kind.contains("cloud") {
+            found.agents.push(task["id"].as_str().unwrap_or("").to_string());
+        }
+    }
+    Some(found)
 }
 
 /// Claude 세션이 새로 만든 파일. 화면이 그 세션의 묶음에 종류에 맞는 항목으로 놓는다.
@@ -319,6 +352,7 @@ fn read(id: u32, v: &Value) -> Option<Message> {
         }
         return Some(Message::Hook(HookPayload {
             id,
+            background: if event == "Stop" { background(v) } else { None },
             event,
             // SessionEnd에서는 끝난 까닭(clear, logout, prompt_input_exit …)을 종류 자리에 싣는다.
             kind: text(&v["notification_type"]).or_else(|| text(&v["reason"])),
@@ -437,6 +471,33 @@ mod tests {
             panic!("훅으로 읽혀야 한다");
         };
         assert_eq!((h.event.as_str(), h.agent.as_deref()), ("SubagentStart", Some("agent-abc123")));
+        assert_eq!(h.background, None); // 돌고 있는 배경 작업은 응답 완료 신호에서만 읽는다.
+    }
+
+    #[test]
+    fn 완료_신호에서_아직_돌고_있는_배경_작업을_읽는다() {
+        let stop = |body: &str| match parse(3, body) {
+            Some(Message::Hook(h)) => h.background,
+            _ => panic!("훅으로 읽혀야 한다"),
+        };
+        // 서브에이전트·팀원은 번호를, 워크플로는 수를 센다. 셸 같은 다른 작업과 끝난 것으로 적힌 것은 세지 않는다.
+        let body = r#"{"hook_event_name":"Stop","background_tasks":[
+            {"id":"a1","type":"subagent","status":"running","agent_type":"Explore"},
+            {"id":"t1","type":"teammate","status":"running"},
+            {"type":"local_agent","status":"running"},
+            {"id":"w1","type":"workflow","status":"running","name":"review"},
+            {"id":"s1","type":"shell","status":"running","command":"tail -f log"},
+            {"id":"a2","type":"subagent","status":"completed"}]}"#;
+        assert_eq!(stop(body), Some(Background { agents: vec!["a1".into(), "t1".into(), String::new()], workflows: 1 }));
+        // 돌고 있는 것이 없으면 빈 목록이고, 목록을 주지 않았으면(옛 버전) 알 수 없다.
+        assert_eq!(stop(r#"{"hook_event_name":"Stop","background_tasks":[]}"#), Some(Background { agents: vec![], workflows: 0 }));
+        assert_eq!(stop(r#"{"hook_event_name":"Stop"}"#), None);
+        assert_eq!(stop(r#"{"hook_event_name":"Stop","background_tasks":"x"}"#), None);
+        // 서브에이전트 종료 신호에 딸려 온 목록은 쓰지 않는다(본 세션이 기다리며 돌리는 서브에이전트는 배경 작업이 아니라 그 목록에 없을 수 있다).
+        let Some(Message::Hook(h)) = parse(3, r#"{"hook_event_name":"SubagentStop","agent_id":"a1","background_tasks":[]}"#) else {
+            panic!("훅으로 읽혀야 한다")
+        };
+        assert_eq!(h.background, None);
     }
 
     #[test]

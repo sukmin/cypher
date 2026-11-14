@@ -4,21 +4,21 @@
 //! 본창에 웹뷰를 하나 더 붙여 그 항목의 창 자리에 겹쳐 놓는다. 화면 쪽이 자리(위치·크기)를 알려 주면
 //! 그대로 옮기고, 그 창이 화면에 없거나 메뉴·대화상자가 열려 있는 동안에는 숨긴다.
 //!
-//! 같은 그룹의 Claude 세션은 이 웹뷰를 브라우저 도구로 조작할 수 있다(`browser.rs`). 화면에 보이지 않는
+//! 같은 워크스페이스의 Claude 세션은 이 웹뷰를 브라우저 도구로 조작할 수 있다(`browser.rs`). 화면에 보이지 않는
 //! 사이트를 조작할 때는 웹뷰를 창 밖 자리에 잠깐 꺼내 놓는다(숨긴 웹뷰는 화면을 그리지 않아 찍을 수 없다).
 //! 조작하는 중에 화면이 숨기라고 하면(메뉴·대화상자가 열림, 다른 항목으로 바뀜) 숨기는 대신 창 밖 자리로 옮긴다.
 //!
 //! 이 웹뷰가 여는 웹 페이지에는 어떤 앱 명령 권한도 주지 않는다.
 //!
-//! 로그인 상태(쿠키·저장소)는 **같은 그룹의 사이트 항목끼리만** 함께 쓴다. 그룹마다 브라우저 프로필(데이터 폴더
-//! `%LOCALAPPDATA%\cypher\site-profiles\<프로필 번호>`)이 따로 있어서, 한 그룹에서 로그인해 둔 계정을 다른 그룹의
-//! 사이트 항목이나 그 그룹의 Claude 세션이 쓸 수 없다. 그룹이 없는 사이트 항목은 본창과 같은 공용 프로필을 쓴다
-//! (Claude 세션은 그룹 없는 사이트 항목을 조작할 수 없다). 항목이 다른 그룹으로 옮겨지면 웹뷰를 닫고
-//! 새 그룹의 프로필로 다시 만든다.
+//! 로그인 상태(쿠키·저장소)는 **같은 워크스페이스의 사이트 항목끼리만** 함께 쓴다. 워크스페이스마다 브라우저 프로필(데이터 폴더
+//! `%LOCALAPPDATA%\cypher\site-profiles\<프로필 번호>`)이 따로 있어서, 한 워크스페이스에서 로그인해 둔 계정을 다른 워크스페이스의
+//! 사이트 항목이나 그 워크스페이스의 Claude 세션이 쓸 수 없다. 워크스페이스가 없는 사이트 항목은 본창과 같은 공용 프로필을 쓴다
+//! (Claude 세션은 워크스페이스 없는 사이트 항목을 조작할 수 없다). 항목이 다른 워크스페이스로 옮겨지면 웹뷰를 닫고
+//! 새 워크스페이스의 프로필로 다시 만든다.
 //!
 //! 어느 항목이 어느 프로필을 써야 하는지는 화면이 정해서 알려 준다(`site_profile`). 웹뷰를 만드는 쪽(화면의 `site_open`,
-//! Claude의 도구 호출)은 그것을 바꾸지 못한다: 들고 온 프로필이 화면이 알려 준 것과 다르면(도는 사이에 항목이 다른 그룹으로
-//! 옮겨졌다) 웹뷰를 만들지 않고 거절한다. 그러지 않으면 옮겨 간 항목이 옛 그룹의 로그인 상태로 되살아난다.
+//! Claude의 도구 호출)은 그것을 바꾸지 못한다: 들고 온 프로필이 화면이 알려 준 것과 다르면(도는 사이에 항목이 다른 워크스페이스로
+//! 옮겨졌다) 웹뷰를 만들지 않고 거절한다. 그러지 않으면 옮겨 간 항목이 옛 워크스페이스의 로그인 상태로 되살아난다.
 //! 화면이 알려 준 것이 없는 항목(닫힌 항목)의 웹뷰도 만들지 않는다.
 
 use serde::Serialize;
@@ -94,8 +94,8 @@ fn profile_dir(profile: &str) -> Result<Option<PathBuf>, String> {
 }
 
 /// 웹뷰 엔진은 환경 변수 `WEBVIEW2_USER_DATA_FOLDER`가 있으면 앱이 정한 데이터 폴더를 무시하고 그 폴더만 쓴다.
-/// 그대로 두면 그룹별 프로필이 모두 그 한 폴더로 합쳐진다. 그래서 본창의 웹뷰가 만들어진 뒤에(본창은 그 폴더를
-/// 그대로 쓴다) 이 프로세스에서 그 변수를 지우고, 공용 프로필(그룹 없는 사이트 항목)에는 그 폴더를 직접 지정한다.
+/// 그대로 두면 워크스페이스별 프로필이 모두 그 한 폴더로 합쳐진다. 그래서 본창의 웹뷰가 만들어진 뒤에(본창은 그 폴더를
+/// 그대로 쓴다) 이 프로세스에서 그 변수를 지우고, 공용 프로필(워크스페이스 없는 사이트 항목)에는 그 폴더를 직접 지정한다.
 /// 평소에는 이 변수가 없다. 시험할 때 본창의 저장소를 다른 곳으로 돌려 띄우는 경우에 해당한다.
 /// (`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`는 건드리지 않는다: 같은 폴더를 쓰는 엔진은 실행 인자가 같아야 한다.)
 pub fn adopt_data_folder_override(app: &AppHandle) {
@@ -179,8 +179,8 @@ fn id_of(webview: &tauri::Webview) -> u32 {
     webview.label().strip_prefix("site-").and_then(|n| n.parse().ok()).unwrap_or(0)
 }
 
-/// 도구가 도는 사이에 항목이 다른 그룹으로 옮겨졌을 때 Claude에게 돌려주는 말.
-const MOVED: &str = "이 브라우저(사이트 항목)는 방금 다른 그룹으로 옮겨졌습니다. 다시 시도하면 이 세션이 다룰 수 있는 브라우저를 새로 고릅니다.";
+/// 도구가 도는 사이에 항목이 다른 워크스페이스로 옮겨졌을 때 Claude에게 돌려주는 말.
+const MOVED: &str = "이 브라우저(사이트 항목)는 방금 다른 워크스페이스로 옮겨졌습니다. 다시 시도하면 이 세션이 다룰 수 있는 브라우저를 새로 고릅니다.";
 
 /// 도구가 도는 사이에 항목이 닫혔을 때 Claude에게 돌려주는 말.
 const GONE: &str = "이 브라우저(사이트 항목)는 방금 닫혔습니다. 다시 시도하면 이 세션이 다룰 수 있는 브라우저를 새로 고릅니다.";
@@ -208,7 +208,7 @@ fn close_and_wait(app: &AppHandle, id: u32) -> Result<(), String> {
     let deadline = Instant::now() + Duration::from_secs(3);
     while app.get_webview(&label(id)).is_some() {
         if Instant::now() > deadline {
-            return Err("옛 그룹의 브라우저 화면을 닫지 못했습니다. 잠시 뒤에 다시 해 보세요.".into());
+            return Err("옛 워크스페이스의 브라우저 화면을 닫지 못했습니다. 잠시 뒤에 다시 해 보세요.".into());
         }
         thread::sleep(Duration::from_millis(30));
     }
@@ -216,7 +216,7 @@ fn close_and_wait(app: &AppHandle, id: u32) -> Result<(), String> {
 }
 
 /// 웹뷰가 없으면 그 프로필로 만든다. `place`가 없으면(Claude가 먼저 연 경우) 숨긴 채로 만든다.
-/// 이미 있는 웹뷰가 다른 프로필로 만들어진 것이면(항목이 다른 그룹으로 옮겨졌다) 닫고 새 프로필로 다시 만든다.
+/// 이미 있는 웹뷰가 다른 프로필로 만들어진 것이면(항목이 다른 워크스페이스로 옮겨졌다) 닫고 새 프로필로 다시 만든다.
 /// `profile`이 화면이 알려 준 그 항목의 프로필과 다르면 만들지 않는다. 창 스레드에서 부르면 안 된다(닫히기를 기다린다).
 /// 오래 걸릴 수 있으니(앞선 만들기·닫기를 기다린다) 비동기 명령에서는 `blocking`으로 감싸 부른다.
 fn create(app: &AppHandle, id: u32, url: &str, place: Option<Place>, profile: &str) -> Result<tauri::Webview, String> {
@@ -270,8 +270,8 @@ fn create(app: &AppHandle, id: u32, url: &str, place: Option<Place>, profile: &s
     Ok(webview)
 }
 
-/// Claude의 브라우저 도구가 쓴다: 그 사이트 항목의 웹뷰가 없으면 화면에 보이지 않는 채로(그 그룹의 프로필로) 만든다.
-/// 그 사이에 항목이 다른 그룹으로 옮겨져 프로필이 달라졌으면 거절한다.
+/// Claude의 브라우저 도구가 쓴다: 그 사이트 항목의 웹뷰가 없으면 화면에 보이지 않는 채로(그 워크스페이스의 프로필로) 만든다.
+/// 그 사이에 항목이 다른 워크스페이스로 옮겨져 프로필이 달라졌으면 거절한다.
 pub fn ensure(app: &AppHandle, id: u32, url: &str, profile: &str) -> Result<tauri::Webview, String> {
     create(app, id, url, None, profile)
 }
@@ -283,7 +283,7 @@ pub fn with_shown<T>(app: &AppHandle, id: u32, run: impl FnOnce(&tauri::Webview)
     Ok(with_shown_on(&webview, run))
 }
 
-/// `with_shown`과 같지만, 이미 손에 든 웹뷰에 대해 한다. 그 웹뷰가 그사이에 닫혔으면(항목이 다른 그룹으로 옮겨져
+/// `with_shown`과 같지만, 이미 손에 든 웹뷰에 대해 한다. 그 웹뷰가 그사이에 닫혔으면(항목이 다른 워크스페이스로 옮겨져
 /// 새 프로필로 다시 만들어졌다) 조작은 오류로 끝난다: 이름으로 다시 찾지 않으므로 다른 프로필의 웹뷰를 건드리지 않는다.
 pub fn with_shown_on<T>(webview: &tauri::Webview, run: impl FnOnce(&tauri::Webview) -> T) -> T {
     let id = id_of(webview);
@@ -313,13 +313,13 @@ pub fn with_shown_on<T>(webview: &tauri::Webview, run: impl FnOnce(&tauri::Webvi
 }
 
 /// 기다리는 일(잠금, 웹뷰가 닫히기, 웹뷰 만들기)을 비동기 명령의 작업 스레드가 아닌, 막혀도 되는 스레드에서 한다.
-/// 그러지 않으면 여러 사이트가 한꺼번에 프로필을 바꿀 때(그룹 합치기 등) 다른 명령들이 함께 멈춘다.
+/// 그러지 않으면 여러 사이트가 한꺼번에 프로필을 바꿀 때(워크스페이스 합치기 등) 다른 명령들이 함께 멈춘다.
 async fn blocking<T: Send + 'static>(work: impl FnOnce() -> Result<T, String> + Send + 'static) -> Result<T, String> {
     tauri::async_runtime::spawn_blocking(work).await.map_err(err)?
 }
 
 /// 사이트 웹뷰를 만들어 그 자리(본창 안의 위치·크기, 화면 배율 100% 기준)에 놓는다. 이미 있으면 자리만 옮긴다.
-/// `profile`은 그 항목의 그룹이 쓰는 브라우저 프로필의 번호(그룹이 없으면 빈 글). 지금 열려 있는 주소를 돌려준다.
+/// `profile`은 그 항목의 워크스페이스가 쓰는 브라우저 프로필의 번호(워크스페이스가 없으면 빈 글). 지금 열려 있는 주소를 돌려준다.
 #[tauri::command]
 #[allow(clippy::too_many_arguments)]
 pub async fn site_open(app: AppHandle, id: u32, url: String, x: f64, y: f64, width: f64, height: f64, profile: Option<String>) -> Result<String, String> {
@@ -371,7 +371,7 @@ pub fn site_action(app: AppHandle, id: u32, action: String) -> Result<(), String
 }
 
 /// 사이트에 보이는 화면(또는 `full`이면 페이지 전체)을 찍어 이미지 저장소에 넣는다.
-/// 화면 쪽이 돌려받은 그림으로 이 사이트 항목과 같은 그룹에 이미지 항목을 만든다.
+/// 화면 쪽이 돌려받은 그림으로 이 사이트 항목과 같은 워크스페이스에 이미지 항목을 만든다.
 #[tauri::command]
 pub async fn site_capture(app: AppHandle, id: u32, full: Option<bool>) -> Result<crate::image::Captured, String> {
     with_shown(&app, id, |webview| {
@@ -380,7 +380,7 @@ pub async fn site_capture(app: AppHandle, id: u32, full: Option<bool>) -> Result
     .inspect_err(|problem| crate::log(&format!("사이트 캡처 실패: {problem}")))
 }
 
-/// 화면이 그 사이트 항목이 써야 하는 프로필을 알려 준다(항목을 만들었을 때와 그룹이 바뀌었을 때).
+/// 화면이 그 사이트 항목이 써야 하는 프로필을 알려 준다(항목을 만들었을 때와 워크스페이스가 바뀌었을 때).
 /// 다른 프로필로 떠 있던 웹뷰는 닫는다. 다시 보이거나 도구가 쓸 때 새 프로필로 만들어진다.
 #[tauri::command]
 pub async fn site_profile(app: AppHandle, id: u32, profile: String) -> Result<(), String> {
@@ -422,11 +422,11 @@ mod tests {
         assert_eq!(may_use(&assigned, 5, ""), Err(GONE));
         assigned.insert(5, "pa".to_string());
         assert_eq!(may_use(&assigned, 5, "pa"), Ok(()));
-        // 그 항목이 다른 그룹으로 옮겨져 화면이 새 프로필을 알려 왔다: 옛 프로필을 들고 온 도구 호출은 거절한다.
+        // 그 항목이 다른 워크스페이스로 옮겨져 화면이 새 프로필을 알려 왔다: 옛 프로필을 들고 온 도구 호출은 거절한다.
         assigned.insert(5, "pb".to_string());
         assert_eq!(may_use(&assigned, 5, "pa"), Err(MOVED));
         assert_eq!(may_use(&assigned, 5, "pb"), Ok(()));
-        // 그룹이 없는 항목(공용 프로필, 빈 글)도 같은 규칙이다.
+        // 워크스페이스가 없는 항목(공용 프로필, 빈 글)도 같은 규칙이다.
         assigned.insert(6, String::new());
         assert_eq!(may_use(&assigned, 6, ""), Ok(()));
         assert_eq!(may_use(&assigned, 6, "pa"), Err(MOVED));

@@ -6,7 +6,7 @@
 // - 그 밖의 곳(사이드바, 다른 종류의 창, 빈 화면)에 놓으면 항목으로 만든다:
 //   이미지 → 이미지 항목 · 글자 파일·글자 → 메모 · .csv·.tsv → 표 · .http → HTTP · 링크·바로 가기 → 사이트.
 //   사이드바의 묶음(머리나 그 안의 줄)에 놓으면 그 묶음에, 창에 놓으면 그 창 항목의 묶음에 만든다.
-//   항목은 그룹 안에서만 만들 수 있으므로, 어느 그룹인지 정할 수 없는 곳에 놓으면 만들지 않고 알려 준다.
+//   항목은 워크스페이스 안에서만 만들 수 있으므로, 어느 워크스페이스인지 정할 수 없는 곳에 놓으면 만들지 않고 알려 준다.
 //
 // 파일의 경로는 화면에서는 보이지 않으므로 앱에 물어서 받는다(drops.rs).
 
@@ -23,7 +23,7 @@ const TEXT_NAME = /\.(txt|md|markdown|json|jsonl|log|csv|tsv|xml|ya?ml|toml|ini|
 /**
  * given: { invoke, listen, setStatus, quote, baseName, itemOfPane(pane), itemOfRow(li), contextOfHead(li),
  *          newItem(kind, opts), addImages(list, opts), pasteInto(item, text), screenEmpty(), reveal(items),
- *          groupFor(context) → 그 자리에 놓은 것이 들어갈 그룹(정할 수 없으면 알리고 빈 글) }
+ *          groupFor(context) → 그 자리에 놓은 것이 들어갈 워크스페이스(정할 수 없으면 알리고 빈 글) }
  */
 export function initDrop(given) {
   api = given;
@@ -217,7 +217,7 @@ const stem = (name) => name.replace(/\.[^.]*$/, '');
 /** 놓인 것을 사이드바 항목으로 만든다. */
 async function intoItems(data, context) {
   const { invoke, newItem, addImages } = api;
-  // 항목은 그룹 안에서만 만든다. 놓은 자리로 그룹을 정할 수 없으면(그룹이 하나도 없거나, 여럿인데 빈 곳에 놓음)
+  // 항목은 워크스페이스 안에서만 만든다. 놓은 자리로 워크스페이스를 정할 수 없으면(워크스페이스가 하나도 없거나, 여럿인데 빈 곳에 놓음)
   // 까닭을 한 번 알리고 아무것도 만들지 않는다.
   if (!api.groupFor(context)) return;
   const made = [], skipped = [];

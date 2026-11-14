@@ -1712,7 +1712,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
           headers: { 'x-name': encodeURIComponent(fileName()), 'x-ext': 'png' },
         });
         await api.addImages([image], { near: item, source: `마인드맵: ${fileName()}` });
-        return setStatus('이 항목과 같은 묶음에 이미지 항목으로 넣었습니다.');
+        return setStatus('이 항목과 같은 워크스페이스에 이미지 항목으로 넣었습니다.');
       } else {
         saved = await printPdf(made);
       }
@@ -1749,7 +1749,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
   const resize = new ResizeObserver(() => { if (!fitted || auto) fit(fitMax); });
   resize.observe($stage);
 
-  /** 밖에서(같은 그룹의 Claude 세션 등) 저장소의 내용을 바꿨으면 그 내용을 읽어 들인다. */
+  /** 밖에서(같은 워크스페이스의 Claude 세션 등) 저장소의 내용을 바꿨으면 그 내용을 읽어 들인다. */
   async function reload() {
     if (disposed || editing) return;
     if (unread) return reread();
@@ -1836,7 +1836,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     flush: () => { if (editing) commitEdit(); return flush(); },
     /** 개요 글. */
     text,
-    /** 내용을 통째로 바꾼다(되돌릴 수 있다). 같은 그룹의 Claude 세션이 고칠 때 쓴다. */
+    /** 내용을 통째로 바꾼다(되돌릴 수 있다). 같은 워크스페이스의 Claude 세션이 고칠 때 쓴다. */
     setText: (source) => {
       // 코드 화면에 오류가 있어 반영하지 못한 글이 있으면 덮어쓰지 않는다(고치던 글이 사라진다). 바꾸지 못했으면 false.
       if (codeMode) checkCode(); // 방금 쳐서 아직 검사하지 않은 올바른 글은 먼저 반영한다(오류로 잘못 보지 않게).

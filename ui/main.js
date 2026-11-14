@@ -59,14 +59,14 @@ const MAX_PROMPTS = 50;         // 기억해 둘 보낸 프롬프트 수
 const KINDS = {
   memo: { label: '메모', icon: '✎', hint: '글자 편집기', create: createMemo },
   http: { label: 'HTTP', icon: '⇄', hint: 'HTTP 요청(.http) 쓰고 보내기', create: createHttp },
-  site: { label: '사이트', icon: '◎', hint: '브라우저 · 같은 그룹의 Claude가 조작 가능', create: createSite },
+  site: { label: '사이트', icon: '◎', hint: '브라우저 · 같은 워크스페이스의 Claude가 조작 가능', create: createSite },
   image: { label: '이미지', icon: '▣', hint: '그림 보기(파일·붙여넣기·화면 캡처)', create: createImage },
   mindmap: { label: '마인드맵', icon: '✺', hint: '생각을 가지로 정리 · 그림이나 코드로 작성', create: createMindmap },
   erd: { label: 'ERD', icon: '⊞', hint: '개체 관계도 · erDiagram 글을 그림으로', create: createErd },
   // 문서·명령·표는 볼 파일이나 실행할 명령을 먼저 묻지 않는다. 빈 항목으로 만들고, 대상은 그 항목의 빈 영역에서 정한다
   // (파일을 끌어다 놓기, 고르기, 경로 적기 — empty.js).
   reader: { label: '문서', icon: '❏', hint: 'Markdown·글자 파일 읽기 · 바뀌면 자동 갱신', create: createReader },
-  todo: { label: '할 일', icon: '☑', hint: '업무의 체크 목록 · 같은 그룹의 Claude가 채우고 체크', create: createTodo },
+  todo: { label: '할 일', icon: '☑', hint: '업무의 체크 목록 · 같은 워크스페이스의 Claude가 채우고 체크', create: createTodo },
   run: { label: '명령', icon: '▷', hint: '자주 돌리는 명령(시험·빌드·개발 서버)을 단추로 두고 실행 · 성공·실패 표시', create: createRun },
   table: { label: '표', icon: '▤', hint: 'CSV·TSV·JSON 파일을 표로 보기 · 정렬·거르기 · 바뀌면 자동 갱신', create: createTable },
 };
@@ -98,21 +98,21 @@ let broadcast = false;
 let closing = false;
 let limits = null;              // 계정 사용 한도(어느 Claude 세션이든 마지막으로 알려 준 값)
 let filterWaiting = false;      // 대기 중인 세션만 목록에 보이기
-let collapsed = new Set();      // 접어 둔 묶음(그룹·폴더)의 열쇠
+let collapsed = new Set();      // 접어 둔 묶음(워크스페이스·폴더)의 열쇠
 let drag = null;                // 목록에서 끌고 있는 세션 { s, x, y, active, ghost }
 let restoring = false;          // 지난번 항목을 되살리는 중(이 동안에는 상태를 적지 않는다)
 let renaming = null;            // 사이드바에서 별칭을 고치고 있는 항목의 번호
 let composerFor = null;         // 프롬프트 편집기가 지금 맡고 있는 세션
 try { collapsed = new Set(JSON.parse(localStorage.getItem('cypher.collapsed') || '[]')); } catch { /* 무시 */ }
-let storeDirs = {};            // 메모·마인드맵·이미지를 두는 폴더(같은 그룹의 Claude 세션에 경로를 알려 줄 때 쓴다)
-let groupList = [];            // 만들어 둔 그룹 이름(세션이 없어도 남는다)
+let storeDirs = {};            // 메모·마인드맵·이미지를 두는 폴더(같은 워크스페이스의 Claude 세션에 경로를 알려 줄 때 쓴다)
+let groupList = [];            // 만들어 둔 워크스페이스 이름(세션이 없어도 남는다)
 try { groupList = JSON.parse(localStorage.getItem('cypher.groups') || '[]'); } catch { /* 무시 */ }
 groupList = Array.isArray(groupList) ? groupList.filter((g) => typeof g === 'string' && g) : [];
-// 그룹 이름 → 그 그룹이 쓰는 브라우저 프로필의 번호. 그룹 이름을 바꿔도 번호는 그대로라 로그인 상태가 유지된다.
-// (그룹 이름이 무엇이든 열쇠로 쓸 수 있게 원형이 없는 객체에 담는다.)
+// 워크스페이스 이름 → 그 워크스페이스가 쓰는 브라우저 프로필의 번호. 워크스페이스 이름을 바꿔도 번호는 그대로라 로그인 상태가 유지된다.
+// (워크스페이스 이름이 무엇이든 열쇠로 쓸 수 있게 원형이 없는 객체에 담는다.)
 let groupProfiles = Object.create(null);
 try { Object.assign(groupProfiles, JSON.parse(localStorage.getItem('cypher.profiles') || '{}')); } catch { /* 무시 */ }
-// 그룹 이름 → 그 그룹에서 여는 세션이 시작될 폴더(그룹 폴더). 정해 두지 않은 그룹은 그 그룹에 있는 항목의 폴더나 기본 폴더(사용자 폴더)를 쓴다.
+// 워크스페이스 이름 → 그 워크스페이스에서 여는 세션이 시작될 폴더(워크스페이스 폴더). 정해 두지 않은 워크스페이스는 그 워크스페이스에 있는 항목의 폴더나 기본 폴더(사용자 폴더)를 쓴다.
 let groupFolders = Object.create(null);
 try { Object.assign(groupFolders, JSON.parse(localStorage.getItem('cypher.groupFolders') || '{}')); } catch { /* 무시 */ }
 // 브라우저 시작 페이지: 새 사이트 항목과 "chrome" 엔진의 브라우저가 처음 여는 주소. 비어 있으면 빈 화면으로 연다.
@@ -140,16 +140,16 @@ async function init() {
   const loaded = await invoke('app_config');
   config = loaded.config;
   if (loaded.error) setStatus(`설정 파일 오류(기본값으로 동작): ${loaded.error}`);
-  // 기본 폴더는 사용자 폴더다. 세션이 시작될 폴더는 그룹마다 정한다(그룹을 만들 때, 또는 그룹 오른쪽 클릭 → 그룹 폴더 정하기).
+  // 기본 폴더는 사용자 폴더다. 세션이 시작될 폴더는 워크스페이스마다 정한다(워크스페이스를 만들 때, 또는 워크스페이스 오른쪽 클릭 → 워크스페이스 폴더 정하기).
   folder = await invoke('home_dir');
   storeDirs = await invoke('store_dirs').catch(() => ({}));
   // 테마·글꼴·글자 크기를 적용한다. 바뀔 때마다 열려 있는 터미널과 항목 화면을 맞춘다.
   initLook({ invoke, make, openPopup, config, onChange: applyLook });
 
-  // 사이드바 맨 위에는 "+ 그룹"만 둔다. 세션과 항목은 그룹 밖(루트)에 만들 수 없고, 그룹 머리의 +로 그 그룹 안에 만든다.
-  // (맨 위에 "+ Claude" 같은 단추가 있으면 어느 그룹에 생길지 눈에 보이지 않아 엉뚱한 그룹에 세션이 생긴다.)
-  const groupButton = make('button', '', '+ 그룹');
-  groupButton.title = '새 그룹 만들기 · 세션과 항목은 그룹 안에서만 만듭니다(그룹 머리의 +)';
+  // 사이드바 맨 위에는 "+ 워크스페이스"만 둔다. 세션과 항목은 워크스페이스 밖(루트)에 만들 수 없고, 워크스페이스 머리의 +로 그 워크스페이스 안에 만든다.
+  // (맨 위에 "+ Claude" 같은 단추가 있으면 어느 워크스페이스에 생길지 눈에 보이지 않아 엉뚱한 워크스페이스에 세션이 생긴다.)
+  const groupButton = make('button', '', '+ 워크스페이스');
+  groupButton.title = '새 워크스페이스 만들기 · 세션과 항목은 워크스페이스 안에서만 만듭니다(워크스페이스 머리의 +)';
   groupButton.onclick = () => newGroup();
   $('new-buttons').append(groupButton);
 
@@ -171,9 +171,9 @@ async function init() {
   initSite({
     invoke, listen, make, setStatus, showMenu, captured: onCaptured,
     zoom: () => currentLook().zoom,
-    // 이 브라우저를 넘겨받을 수 있는 Claude 세션: 같은 이름 붙인 그룹에서 돌고 있는 것.
+    // 이 브라우저를 넘겨받을 수 있는 Claude 세션: 같은 이름 붙인 워크스페이스에서 돌고 있는 것.
     claudes: (item) => controllersOf(item).map((s) => ({ s, label: label(s) })),
-    // 이 사이트 항목의 그룹이 쓰는 브라우저 프로필. 항목이 다른 그룹으로 옮겨지면 그 그룹의 프로필로 다시 연다.
+    // 이 사이트 항목의 워크스페이스가 쓰는 브라우저 프로필. 항목이 다른 워크스페이스로 옮겨지면 그 워크스페이스의 프로필로 다시 연다.
     profile: (item) => ensureProfile(item),
     // 지금 이 브라우저를 조작하는 Claude 세션의 이름(없으면 빈 글).
     controller: (item) => { const by = [...sessions.values()].find((s) => s.browser === item.key && !s.exited && canControl(s, item)); return by ? label(by) : ''; },
@@ -193,7 +193,7 @@ async function init() {
     itemOfRow: (row) => sessions.get(Number(row.dataset.key)),
     contextOfHead: (head) => ({ group: head.dataset.group || '', cwd: head.dataset.cwd || folder }),
     screenEmpty: () => !visible.length,
-    // 놓은 자리(묶음 머리, 항목의 줄이나 창)의 그룹. 빈 곳에 놓았으면 지금 보는 항목의 그룹으로 정한다.
+    // 놓은 자리(묶음 머리, 항목의 줄이나 창)의 워크스페이스. 빈 곳에 놓았으면 지금 보는 항목의 워크스페이스로 정한다.
     groupFor: (context) => groupFor({ group: context.near?.group || context.group }),
   });
   initPalette({ make, openPopup, entries: paletteEntries });
@@ -244,7 +244,7 @@ async function init() {
       tool('캡처', 'capture', '화면을 찍어 이미지 항목으로 넣기 · Shift+클릭: 페이지 전체', (ev) => captureBrowser(ev.shiftKey)),
     );
   }
-  // 같은 그룹의 Claude 세션이 Cypher 도구로 물어 오는 것(조작할 브라우저, 그룹의 항목, 마인드맵 쓰기)에 답한다.
+  // 같은 워크스페이스의 Claude 세션이 Cypher 도구로 물어 오는 것(조작할 브라우저, 워크스페이스의 항목, 마인드맵 쓰기)에 답한다.
   listen('mcp-request', ({ payload }) => onMcpRequest(payload));
   initSidebarKeys();
   listen('menu', ({ payload }) => runMenu(payload));
@@ -300,14 +300,14 @@ async function init() {
   const auto = await invoke('autostart');
   if (auto) {
     // 바로 시작 모드: 지난 세션은 되살리지 않지만 메모·HTTP 항목은 사이드바에 남긴다.
-    // 세션은 그룹 안에서만 열리므로, 그룹 없이 쓰던 것을 모으는 `root` 그룹(없으면 만든다)에 연다.
+    // 세션은 워크스페이스 안에서만 열리므로, 워크스페이스 없이 쓰던 것을 모으는 `root` 워크스페이스(없으면 만든다)에 연다.
     await restore({ docsOnly: true });
     await newSession(auto[0], { group: adoptGroup(), cwd: auto[1] });
   } else {
     await restore();
   }
-  // 되살릴 항목이 없어도 사이드바는 그린다: 항목 없이 남아 있는 그룹의 머리(세션·항목을 만드는 길은 그 머리의 +뿐이다)와,
-  // 그룹이 하나도 없을 때의 안내 줄이 여기서 나온다.
+  // 되살릴 항목이 없어도 사이드바는 그린다: 항목 없이 남아 있는 워크스페이스의 머리(세션·항목을 만드는 길은 그 머리의 +뿐이다)와,
+  // 워크스페이스가 하나도 없을 때의 안내 줄이 여기서 나온다.
   render();
 }
 
@@ -343,9 +343,9 @@ function openClaudeFile(which) {
     .catch((err) => setStatus(String(err)));
 }
 
-/** 지금 보고 있는 항목의 그룹(그룹에 든 항목을 보고 있지 않으면 빈 글). 새 세션은 이 그룹에 들어간다. */
+/** 지금 보고 있는 항목의 워크스페이스(워크스페이스에 든 항목을 보고 있지 않으면 빈 글). 새 세션은 이 워크스페이스에 들어간다. */
 const viewedGroup = () => (active && sessions.has(active.key) && active.group) || '';
-/** 그 그룹에 따로 정해 둔 폴더(그룹 폴더). 정해 두지 않았으면 빈 글. */
+/** 그 워크스페이스에 따로 정해 둔 폴더(워크스페이스 폴더). 정해 두지 않았으면 빈 글. */
 const groupFolderOf = (name) => (name && typeof groupFolders[name] === 'string' ? groupFolders[name] : '');
 
 /** 폴더를 고르는 창이 처음 보여 줄 곳: 지금 보는 항목의 폴더, 없으면 가장 최근에 세션을 시작한 폴더, 그것도 없으면 기본 폴더. */
@@ -355,48 +355,48 @@ const startFolderHint = () => {
 };
 
 /**
- * 새 세션·항목이 들어갈 그룹. 그룹 밖(루트)에는 아무것도 만들 수 없다.
- * 정해 준 그룹 → 지금 보고 있는 항목의 그룹 → 그룹이 하나뿐이면 그 그룹. 정할 수 없으면 까닭을 알리고 빈 글을 돌려준다.
+ * 새 세션·항목이 들어갈 워크스페이스. 워크스페이스 밖(루트)에는 아무것도 만들 수 없다.
+ * 정해 준 워크스페이스 → 지금 보고 있는 항목의 워크스페이스 → 워크스페이스가 하나뿐이면 그 워크스페이스. 정할 수 없으면 까닭을 알리고 빈 글을 돌려준다.
  */
 function groupFor(opts) {
   const group = opts.group || (!opts.restoring && viewedGroup()) || (groupList.length === 1 ? groupList[0] : '');
   if (!group) {
-    notice('그룹 안에서만 만들 수 있습니다', groupList.length
-      ? '어느 그룹에 만들지 알 수 없습니다. 만들 그룹의 머리에 있는 +를 누르거나, 그 그룹의 항목을 보고 있을 때 다시 하세요.'
-      : '먼저 사이드바 위의 [+ 그룹]으로 그룹을 만드세요. 세션과 항목은 그룹 머리의 +로 그 그룹 안에 만듭니다.');
+    notice('워크스페이스 안에서만 만들 수 있습니다', groupList.length
+      ? '어느 워크스페이스에 만들지 알 수 없습니다. 만들 워크스페이스의 머리에 있는 +를 누르거나, 그 워크스페이스의 항목을 보고 있을 때 다시 하세요.'
+      : '먼저 사이드바 위의 [+ 워크스페이스]로 워크스페이스를 만드세요. 세션과 항목은 워크스페이스 머리의 +로 그 워크스페이스 안에 만듭니다.');
   }
   return group;
 }
 
-/** 그룹 없이 쓰던 항목을 모아 두는 그룹의 이름. */
+/** 워크스페이스 없이 쓰던 항목을 모아 두는 워크스페이스의 이름. */
 const ROOT_GROUP = 'root';
 
 /**
- * 그룹 없이 적혀 있던 항목(이전 버전에서 그룹 없이 쓰던 세션·항목, 그때 닫은 항목의 기록)을 넣을 그룹: `root`.
- * 없으면 만든다. 그룹의 폴더는 정하지 않는다(여러 폴더의 항목이 섞여 있고, 항목마다 자기 폴더를 그대로 쓴다).
+ * 워크스페이스 없이 적혀 있던 항목(이전 버전에서 워크스페이스 없이 쓰던 세션·항목, 그때 닫은 항목의 기록)을 넣을 워크스페이스: `root`.
+ * 없으면 만든다. 워크스페이스의 폴더는 정하지 않는다(여러 폴더의 항목이 섞여 있고, 항목마다 자기 폴더를 그대로 쓴다).
  */
 function adoptGroup() {
   ensureGroup(ROOT_GROUP);
   return ROOT_GROUP;
 }
 
-/** 그룹 폴더를 정하거나(path) 푼다(빈 글). */
+/** 워크스페이스 폴더를 정하거나(path) 푼다(빈 글). */
 function setGroupFolder(name, path) {
   if (!name) return;
   if (path) groupFolders[name] = path; else delete groupFolders[name];
   localStorage.setItem('cypher.groupFolders', JSON.stringify(groupFolders));
   render(); // 묶음 머리의 폴더 줄과 풍선말을 맞춘다.
   setStatus(path
-    ? `그룹 "${name}"의 폴더: ${path} (이 그룹에서 여는 세션은 여기서 시작합니다)`
-    : `그룹 "${name}"의 폴더를 풀었습니다. 이 그룹의 세션은 기본 폴더(${folder})에서 시작합니다.`);
+    ? `워크스페이스 "${name}"의 폴더: ${path} (이 워크스페이스에서 여는 세션은 여기서 시작합니다)`
+    : `워크스페이스 "${name}"의 폴더를 풀었습니다. 이 워크스페이스의 세션은 기본 폴더(${folder})에서 시작합니다.`);
 }
 
 async function pickGroupFolder(name) {
-  const picked = await invoke('pick_folder', { start: groupFolderOf(name) || startFolderHint(), title: `그룹 "${name}"의 세션을 시작할 폴더` });
+  const picked = await invoke('pick_folder', { start: groupFolderOf(name) || startFolderHint(), title: `워크스페이스 "${name}"의 세션을 시작할 폴더` });
   if (picked) setGroupFolder(name, picked);
 }
 
-/** 그룹의 폴더 줄의 ▾(또는 경로): 지금 보는 항목의 폴더와 최근에 세션을 시작한 폴더에서 골라 그 그룹의 폴더로 정하거나 푼다. */
+/** 워크스페이스의 폴더 줄의 ▾(또는 경로): 지금 보는 항목의 폴더와 최근에 세션을 시작한 폴더에서 골라 그 워크스페이스의 폴더로 정하거나 푼다. */
 function groupFolderMenu(ev, name) {
   const own = groupFolderOf(name);
   const here = active && sessions.has(active.key) ? (active.project || active.startCwd) : '';
@@ -408,10 +408,10 @@ function groupFolderMenu(ev, name) {
     choices.push({ label: `${baseName(path)}  —  ${path}${note}`, action: () => setGroupFolder(name, path) });
   }
   showMenu(ev, [
-    { caption: own ? `그룹 "${name}"의 폴더: ${own}` : `그룹 "${name}"의 폴더: 정하지 않음` },
+    { caption: own ? `워크스페이스 "${name}"의 폴더: ${own}` : `워크스페이스 "${name}"의 폴더: 정하지 않음` },
     ...choices,
     { label: '다른 폴더 고르기…', action: () => pickGroupFolder(name) },
-    ...(own ? [{ label: '그룹 폴더 풀기 (기본 폴더에서 시작)', action: () => setGroupFolder(name, '') }] : []),
+    ...(own ? [{ label: '워크스페이스 폴더 풀기 (기본 폴더에서 시작)', action: () => setGroupFolder(name, '') }] : []),
   ]);
 }
 
@@ -473,22 +473,22 @@ function ask(title, placeholder = '', value = '') {
 /**
  * 세션을 새로 연다.
  * opts.show: 'replace'(지금 창 자리에), 'split'(나란히 추가), 'hidden'(목록에만)
- * opts.cwd / opts.resume(이어갈 Claude 세션 번호) / opts.worktree(워크트리 이름) / opts.group(그룹)
+ * opts.cwd / opts.resume(이어갈 Claude 세션 번호) / opts.worktree(워크트리 이름) / opts.group(워크스페이스)
  */
 async function newSession(profileId, opts = {}) {
   const profile = config.profiles.find((p) => p.id === profileId);
   if (!profile) return null;
-  // 세션은 그룹 안에서만 연다. 그룹을 정해 주지 않았으면 지금 보고 있는 항목의 그룹에 연다.
+  // 세션은 워크스페이스 안에서만 연다. 워크스페이스를 정해 주지 않았으면 지금 보고 있는 항목의 워크스페이스에 연다.
   const group = groupFor(opts);
   if (!group) return null;
   if (!opts.restoring) lastProfile = profileId;
-  // 시작 폴더: 정해 주지 않았으면 그 그룹의 폴더(그룹 폴더), 그것도 없으면 기본 폴더(사용자 폴더).
+  // 시작 폴더: 정해 주지 않았으면 그 워크스페이스의 폴더(워크스페이스 폴더), 그것도 없으면 기본 폴더(사용자 폴더).
   let start = opts.cwd || folder;
   const own = opts.cwd ? '' : groupFolderOf(group);
   if (own) {
     // 네트워크 경로(\\서버\…)는 있는지 확인하지 않고 그대로 쓴다(확인하는 명령이 네트워크 경로를 보지 않는다).
     const [exists] = /^[\\/]{2}/.test(own) ? [true] : await invoke('dirs_exist', { paths: [own] }).catch(() => [true]);
-    if (exists === false) setStatus(`그룹 "${group}"의 폴더가 없어 기본 폴더(${folder})에서 시작합니다: ${own}`);
+    if (exists === false) setStatus(`워크스페이스 "${group}"의 폴더가 없어 기본 폴더(${folder})에서 시작합니다: ${own}`);
     else start = own;
   }
   $('empty').hidden = true;
@@ -603,7 +603,7 @@ function wake(s) {
 function wakeGroup(group) {
   const resting = group.list.filter((s) => s.dormant && sessions.has(s.key));
   for (const s of resting) wake(s);
-  if (resting.length) setStatus(`"${group.name}" 묶음의 세션 ${resting.length}개를 재개했습니다.`);
+  if (resting.length) setStatus(`"${group.name}" 워크스페이스의 세션 ${resting.length}개를 재개했습니다.`);
   // 화면이 비어 있으면 그 가운데 첫 세션을 보여 준다.
   if (resting.length && !visible.length) activate(resting[0]);
   render();
@@ -617,12 +617,12 @@ function wakeGroup(group) {
 async function newItem(kind, opts = {}) {
   const def = KINDS[kind];
   if (!def) return null;
-  // 항목은 그룹 안에서만 만든다. 그룹을 정해 주지 않았으면 지금 보고 있는 항목의 그룹에 만든다.
+  // 항목은 워크스페이스 안에서만 만든다. 워크스페이스를 정해 주지 않았으면 지금 보고 있는 항목의 워크스페이스에 만든다.
   const group = groupFor(opts);
   if (!group) return null;
   $('empty').hidden = true;
   // 폴더는 지금 보고 있는 항목의 것을 따른다(같은 업무의 요청 파일·메모가 한 폴더에 모이게).
-  // 보고 있는 항목이 없으면 그 그룹의 폴더, 그것도 없으면 기본 폴더.
+  // 보고 있는 항목이 없으면 그 워크스페이스의 폴더, 그것도 없으면 기본 폴더.
   const base = !opts.restoring && active && sessions.has(active.key) ? (active.project || active.startCwd) : groupFolderOf(group) || folder;
   const cwd = (opts.cwd || base).replace(/\//g, '\\').replace(/(?<=[^:\\])\\+$/, '');
 
@@ -796,8 +796,8 @@ function layout() {
   $('empty').textContent = sessions.size
     ? '화면에 띄운 항목이 없습니다. 사이드바에서 항목을 누르거나 화면으로 끌어다 놓으세요.'
     : groupList.length
-      ? '그룹 머리의 +를 눌러 세션이나 메모·HTTP·사이트·문서·할 일 같은 항목을 더하세요.'
-      : '왼쪽 위의 [+ 그룹]으로 그룹을 만들고, 그룹 머리의 +로 세션이나 항목을 더하세요.';
+      ? '워크스페이스 머리의 +를 눌러 세션이나 메모·HTTP·사이트·문서·할 일 같은 항목을 더하세요.'
+      : '왼쪽 위의 [+ 워크스페이스]로 워크스페이스를 만들고, 워크스페이스 머리의 +로 세션이나 항목을 더하세요.';
   syncComposer();
   syncSites(); // 사이트 항목의 웹뷰를 새 창 자리에 맞춘다.
   requestAnimationFrame(() => {
@@ -883,7 +883,7 @@ function showDropHint(hit) {
 
 /** 항목을 고른다(화면에 없으면 지금 창 자리에 놓는다). `keepFocus`이면 초점을 옮기지 않는다(사이드바에서 방향키로 오갈 때). */
 function activate(s, { keepFocus = false } = {}) {
-  if (!s || !sessions.has(s.key)) return; // 기다리는 사이 닫힌 항목(넘기기, 그룹 틀 펼치기)은 화면에 올리지 않는다.
+  if (!s || !sessions.has(s.key)) return; // 기다리는 사이 닫힌 항목(넘기기, 워크스페이스 틀 펼치기)은 화면에 올리지 않는다.
   if (!visible.includes(s)) {
     placeInActive(s);
     layout();
@@ -975,7 +975,7 @@ async function closeSession(s, { forget = false } = {}) {
 
 /**
  * 종료된 세션을 같은 자리에서 다시 시작한다. Claude 세션은 하던 대화를 이어 가고, 다른 터미널은 같은 폴더에서 새로 뜬다.
- * 사이드바의 순서, 화면에서의 자리, 별칭·색·그룹은 그대로 둔다.
+ * 사이드바의 순서, 화면에서의 자리, 별칭·색·워크스페이스는 그대로 둔다.
  */
 async function restartSession(s) {
   if (!isTerm(s) || !sessions.has(s.key)) return;
@@ -1153,8 +1153,35 @@ function endClaude(s) {
   render();
 }
 
+/** 서브에이전트 번호를 견줄 수 있게 다듬는다: 신호에 따라 `agent-` 머리가 붙기도 하고 빠지기도 한다. */
+const agentKey = (id) => String(id || '').replace(/^agent-/, '');
+
+/**
+ * 응답 완료(Stop) 신호에 딸려 온 "아직 돌고 있는 배경 작업"으로 서브에이전트 표시를 맞춘다.
+ * 서브에이전트의 종료 신호는 오지 않을 때가 있다(사용자가 멈춘 것, 오류로 끝난 것 등). 그러면 끝난 서브에이전트가
+ * 사이드바에 계속 "실행 중"으로 남고, 그 세션의 완료도 "서브에이전트를 기다리는 중"으로 미뤄진다.
+ * 완료 신호가 올 때는 본 세션이 기다리며 돌리는 서브에이전트가 없으므로, 그때 돌고 있는 것은 모두 이 목록에 있다.
+ * `background`가 없으면(목록을 주지 않는 옛 Claude Code) 아무것도 하지 않는다.
+ */
+function settleAgents(s, background) {
+  if (!background || !Array.isArray(background.agents) || !s.agents.size) return;
+  // 워크플로가 도는 동안에는 그 안의 서브에이전트가 목록에 따로 나오지 않을 수 있으므로 지우지 않는다.
+  if (background.workflows) return;
+  const left = new Set(background.agents.map(agentKey).filter(Boolean));
+  const tracked = [...s.agents.keys()];
+  // 목록에 없는 것은 끝난 것이다. 번호가 하나도 맞지 않으면 번호 체계가 다른 것이므로 번호로는 가리지 않는다.
+  if (!background.agents.length || tracked.some((key) => left.has(key))) {
+    for (const key of tracked) if (!left.has(key)) s.agents.delete(key);
+  }
+  // 번호로 가리지 못했으면 수만 맞춘다: 먼저 시작한 것부터 끝난 것으로 본다.
+  for (const key of tracked) {
+    if (s.agents.size <= background.agents.length) break;
+    s.agents.delete(key);
+  }
+}
+
 /** Claude Code 훅: 요청 시작, 응답 완료(Stop), 입력·승인 대기(Notification), 서브에이전트 시작·종료, Claude Code 종료(SessionEnd). */
-function onHook({ id, event, kind, message, agent, agent_type: agentType, force }) {
+function onHook({ id, event, kind, message, agent, agent_type: agentType, background, force }) {
   const s = byId(id);
   if (!s) return;
   if (event === 'SessionEnd') {
@@ -1168,7 +1195,7 @@ function onHook({ id, event, kind, message, agent, agent_type: agentType, force 
   // 서브에이전트: 돌고 있는 것의 번호와 종류를 모아 두고 사이드바에 보여 준다.
   if (event === 'SubagentStart' || event === 'SubagentStop') {
     if (agent) {
-      if (event === 'SubagentStart') s.agents.set(agent, agentType || ''); else s.agents.delete(agent);
+      if (event === 'SubagentStart') s.agents.set(agentKey(agent), agentType || ''); else s.agents.delete(agentKey(agent));
     }
     if (s.heldStop) s.heldAt = performance.now(); // 서브에이전트에 움직임이 있으면 조용한 시간을 다시 잰다.
     return render();
@@ -1200,6 +1227,8 @@ function onHook({ id, event, kind, message, agent, agent_type: agentType, force 
   // 서브에이전트가 아직 돌고 있을 때의 완료 신호는 "잠깐 멈춤"이다(끝나면 Claude가 이어서 답한다).
   // 이때는 끝났다고 알리지 않고, 서브에이전트가 모두 끝난 뒤의 완료 신호를 기다린다.
   // 그 신호가 끝내 오지 않는 경우(서브에이전트 종료 신호가 빠짐 등)는 refreshActivity()가 챙긴다.
+  // 그 전에, 완료 신호가 알려 준 "아직 돌고 있는 배경 작업"에 없는 서브에이전트는 끝난 것이므로 표시에서 지운다.
+  if (event === 'Stop' && !force) settleAgents(s, background);
   if (event === 'Stop' && s.agents.size && !force) {
     s.heldStop = true;
     s.heldAt = performance.now();
@@ -1300,7 +1329,7 @@ function toolTip(s) {
 // ───────────────────────── 알림 기록 ─────────────────────────
 // 떴다가 사라지는 알림을 모아 둔다(notices.js). 사이드바 아래 [알림 N] 단추의 숫자는 아직 보지 않은 알림 수.
 
-/** 그 항목이 속한 묶음의 이름(그룹 이름, 없으면 폴더 이름). */
+/** 그 항목이 속한 묶음의 이름(워크스페이스 이름, 없으면 폴더 이름). */
 const groupName = (s) => s.group || baseName(s.startCwd);
 
 /** 알림 기록에 남긴다. `s`는 그 알림이 가리키는 항목(없으면 null). */
@@ -1411,7 +1440,7 @@ function sessionItem(s) {
     s === active && 'active', visible.includes(s) && 'shown', s.waiting, tone && `tone-${tone}`,
     s.exited ? 'exited' : s.dormant ? 'dormant' : s.busy ? 'busy' : s.attention && 'attention',
   ].filter(Boolean).join(' '));
-  li.title = '끌기: 화면 분할·순서 바꾸기·묶음 옮기기 · 두 번 누르기: 별칭 · 오른쪽 클릭: 메뉴';
+  li.title = '끌기: 화면 분할·순서 바꾸기·워크스페이스 옮기기 · 두 번 누르기: 별칭 · 오른쪽 클릭: 메뉴';
   if (s.color) li.style.borderLeftColor = s.color;
   li.onclick = (ev) => {
     if (ev.target.closest('input')) return; // 별칭을 고치는 중
@@ -1565,8 +1594,8 @@ function onUsage({ sessions: perSession }) {
   }
 }
 
-// ───────────────────────── 세션 묶음(그룹) ─────────────────────────
-// 세션은 기본으로 시작 폴더별로 묶인다. 그룹 이름을 지정한 세션은 폴더와 무관하게 그 그룹으로 묶인다.
+// ───────────────────────── 세션 묶음(워크스페이스) ─────────────────────────
+// 세션은 기본으로 시작 폴더별로 묶인다. 워크스페이스 이름을 지정한 세션은 폴더와 무관하게 그 워크스페이스로 묶인다.
 
 const groupKey = (s) => (s.group ? `g:${s.group}` : `d:${s.startCwd}`);
 function saveGroups() {
@@ -1576,15 +1605,15 @@ function saveGroups() {
 const saveProfiles = () => localStorage.setItem('cypher.profiles', JSON.stringify(groupProfiles));
 
 /**
- * 그 항목의 그룹이 쓰는 브라우저 프로필의 번호. 브라우저의 로그인 상태는 프로필마다 따로라서, 한 그룹에서 로그인해 둔
- * 계정을 다른 그룹의 브라우저나 Claude 세션이 쓸 수 없다. 그룹이 없는 항목과, 아직 브라우저를 쓴 적이 없는 그룹은 빈 글이다.
+ * 그 항목의 워크스페이스가 쓰는 브라우저 프로필의 번호. 브라우저의 로그인 상태는 프로필마다 따로라서, 한 워크스페이스에서 로그인해 둔
+ * 계정을 다른 워크스페이스의 브라우저나 Claude 세션이 쓸 수 없다. 워크스페이스가 없는 항목과, 아직 브라우저를 쓴 적이 없는 워크스페이스는 빈 글이다.
  */
 function profileOf(item) {
   const id = item?.group ? groupProfiles[item.group] : '';
   return typeof id === 'string' && /^[a-z0-9]{1,40}$/.test(id) ? id : '';
 }
 
-/** 브라우저를 띄울 때 쓴다: 그 항목의 그룹이 쓰는 프로필의 번호를 돌려주고, 아직 없으면 만든다. 그룹이 없으면 빈 글(공용 프로필). */
+/** 브라우저를 띄울 때 쓴다: 그 항목의 워크스페이스가 쓰는 프로필의 번호를 돌려주고, 아직 없으면 만든다. 워크스페이스가 없으면 빈 글(공용 프로필). */
 function ensureProfile(item) {
   if (!item?.group) return '';
   if (!profileOf(item)) {
@@ -1597,7 +1626,7 @@ function ensureProfile(item) {
 /** 지금 보고 있는 항목(닫힌 것이면 null). */
 const viewing = () => (active && sessions.has(active.key) ? active : null);
 
-/** 그룹을 목록에 올린다. 올려 둔 그룹은 세션이 없어도 사이드바에 남는다. */
+/** 워크스페이스를 목록에 올린다. 올려 둔 워크스페이스는 세션이 없어도 사이드바에 남는다. */
 function ensureGroup(name) {
   if (!name || groupList.includes(name)) return;
   groupList.push(name);
@@ -1605,8 +1634,8 @@ function ensureGroup(name) {
 }
 
 /**
- * 그룹을 만든다(이미 있으면 그대로 둔다). `path`를 주면 그 그룹의 폴더로 정한다. 만든(또는 있던) 그룹의 이름을 돌려준다.
- * 세션과 항목은 그룹 안에서만 만들 수 있으므로, 무엇을 하든 그룹부터 만든다.
+ * 워크스페이스를 만든다(이미 있으면 그대로 둔다). `path`를 주면 그 워크스페이스의 폴더로 정한다. 만든(또는 있던) 워크스페이스의 이름을 돌려준다.
+ * 세션과 항목은 워크스페이스 안에서만 만들 수 있으므로, 무엇을 하든 워크스페이스부터 만든다.
  */
 function createGroup(name, path = '') {
   const given = String(name ?? '').trim();
@@ -1618,22 +1647,22 @@ function createGroup(name, path = '') {
   return given;
 }
 
-/** "+ 그룹" 단추: 이름을 묻고 그룹을 만든 뒤, 그 그룹의 세션이 시작될 폴더를 고르게 한다(취소하면 나중에 그룹 오른쪽 클릭 메뉴에서 정한다). */
+/** "+ 워크스페이스" 단추: 이름을 묻고 워크스페이스를 만든 뒤, 그 워크스페이스의 세션이 시작될 폴더를 고르게 한다(취소하면 나중에 워크스페이스 오른쪽 클릭 메뉴에서 정한다). */
 async function newGroup() {
-  const name = await ask('새 그룹 이름 (세션과 항목은 그룹 안에서만 만듭니다)', '예: 결제 개편');
+  const name = await ask('새 워크스페이스 이름 (세션과 항목은 워크스페이스 안에서만 만듭니다)', '예: 결제 개편');
   if (!name) return '';
   const fresh = !groupList.includes(name);
   createGroup(name);
-  if (!fresh) { setStatus(`그룹 "${name}"은(는) 이미 있습니다. 그룹 머리의 +로 세션·항목을 더하세요.`); return name; }
-  const picked = await invoke('pick_folder', { start: startFolderHint(), title: `그룹 "${name}"의 세션을 시작할 폴더 (취소: 나중에 정하기)` }).catch(() => null);
+  if (!fresh) { setStatus(`워크스페이스 "${name}"은(는) 이미 있습니다. 워크스페이스 머리의 +로 세션·항목을 더하세요.`); return name; }
+  const picked = await invoke('pick_folder', { start: startFolderHint(), title: `워크스페이스 "${name}"의 세션을 시작할 폴더 (취소: 나중에 정하기)` }).catch(() => null);
   if (picked && groupList.includes(name)) setGroupFolder(name, picked);
-  setStatus(`그룹 "${name}"을(를) 만들었습니다${picked ? ` (폴더: ${picked})` : ' (폴더는 그룹 이름 아래의 폴더 줄에서 정합니다)'}. 그룹 머리의 +로 세션·항목을 더하세요.`);
+  setStatus(`워크스페이스 "${name}"을(를) 만들었습니다${picked ? ` (폴더: ${picked})` : ' (폴더는 워크스페이스 이름 아래의 폴더 줄에서 정합니다)'}. 워크스페이스 머리의 +로 세션·항목을 더하세요.`);
   return name;
 }
 
-/** 세션·항목을 그 그룹으로 옮긴다. 그룹 밖으로는 뺄 수 없다(이름이 비면 아무것도 하지 않는다). */
+/** 세션·항목을 그 워크스페이스로 옮긴다. 워크스페이스 밖으로는 뺄 수 없다(이름이 비면 아무것도 하지 않는다). */
 function moveToGroup(list, name) {
-  if (!name) return setStatus('항목은 그룹 안에만 둘 수 있습니다. 옮길 그룹의 이름을 적어 주세요.');
+  if (!name) return setStatus('항목은 워크스페이스 안에만 둘 수 있습니다. 옮길 워크스페이스의 이름을 적어 주세요.');
   ensureGroup(name);
   for (const s of list) s.group = name;
   render();
@@ -1641,29 +1670,29 @@ function moveToGroup(list, name) {
 }
 
 async function askGroup(list, current = '') {
-  const name = await ask('옮길 그룹 이름 (없는 이름이면 새 그룹을 만듭니다)', groupList.length ? `있는 그룹: ${groupList.join(', ')}` : '예: 결제 개편', current);
+  const name = await ask('옮길 워크스페이스 이름 (없는 이름이면 새 워크스페이스를 만듭니다)', groupList.length ? `있는 워크스페이스: ${groupList.join(', ')}` : '예: 결제 개편', current);
   if (name) moveToGroup(list, name);
 }
 
-/** 그 이름의 그룹에 지금 들어 있는 항목 전부. 사이드바가 "대기만 보기"로 걸러져 있어도, 이름을 묻는 사이 새 항목이 생겼어도 빠뜨리지 않는다. */
+/** 그 이름의 워크스페이스에 지금 들어 있는 항목 전부. 사이드바가 "대기만 보기"로 걸러져 있어도, 이름을 묻는 사이 새 항목이 생겼어도 빠뜨리지 않는다. */
 const membersOf = (name) => [...sessions.values()].filter((s) => s.group === name);
 
 async function renameGroup(group) {
-  const name = await ask('그룹 이름', '', group.name);
+  const name = await ask('워크스페이스 이름', '', group.name);
   if (!name || name === group.name) return;
-  // 같은 이름의 그룹이 이미 있으면 그쪽으로 합쳐진다.
+  // 같은 이름의 워크스페이스가 이미 있으면 그쪽으로 합쳐진다.
   const merging = groupList.includes(name) || [...sessions.values()].some((s) => s.group === name);
   groupList = [...new Set(groupList.map((g) => (g === group.name ? name : g)))];
   saveGroups();
-  // 이름만 바꾼 것이면 브라우저 프로필(로그인 상태)이 새 이름을 따라간다. 그 이름으로 예전에 없앤 그룹의 프로필이
-  // 남아 있어도 지금 이 그룹의 것으로 바꾼다. 이미 있는 그룹에 합치는 것이면 옮겨 가는 항목들이 그 그룹의 프로필을 쓴다.
+  // 이름만 바꾼 것이면 브라우저 프로필(로그인 상태)이 새 이름을 따라간다. 그 이름으로 예전에 없앤 워크스페이스의 프로필이
+  // 남아 있어도 지금 이 워크스페이스의 것으로 바꾼다. 이미 있는 워크스페이스에 합치는 것이면 옮겨 가는 항목들이 그 워크스페이스의 프로필을 쓴다.
   if (!merging) {
     if (groupProfiles[group.name]) groupProfiles[name] = groupProfiles[group.name];
     else delete groupProfiles[name];
     delete groupProfiles[group.name];
     saveProfiles();
   }
-  // 그룹 폴더도 이름을 따라간다. 이미 있는 그룹에 합칠 때는 그 그룹이 정해 둔 폴더가 먼저다.
+  // 워크스페이스 폴더도 이름을 따라간다. 이미 있는 워크스페이스에 합칠 때는 그 워크스페이스가 정해 둔 폴더가 먼저다.
   const own = groupFolderOf(group.name);
   if (own && !(merging && groupFolderOf(name))) groupFolders[name] = own;
   else if (!merging) delete groupFolders[name];
@@ -1673,19 +1702,19 @@ async function renameGroup(group) {
 }
 
 /**
- * 그룹을 없앤다. 항목은 그룹 밖에 둘 수 없으므로, 세션·항목이 남아 있으면 물어보고 모두 닫은 뒤에 없앤다.
- * 닫기를 취소한 항목(저장하지 않은 메모 등)이 남으면 그룹을 그대로 둔다. 없앴으면 참.
+ * 워크스페이스를 없앤다. 항목은 워크스페이스 밖에 둘 수 없으므로, 세션·항목이 남아 있으면 물어보고 모두 닫은 뒤에 없앤다.
+ * 닫기를 취소한 항목(저장하지 않은 메모 등)이 남으면 워크스페이스를 그대로 둔다. 없앴으면 참.
  */
 async function deleteGroup(group) {
   const members = membersOf(group.name);
   if (members.length) {
     const running = members.filter((s) => isTerm(s) && !s.dormant && !s.exited).length;
-    if (!confirm(`그룹 "${group.name}"에 세션·항목이 ${members.length}개 있습니다${running ? ` (실행 중인 세션 ${running}개)` : ''}.\n모두 닫고 그룹을 삭제할까요?`)) return false;
+    if (!confirm(`워크스페이스 "${group.name}"에 세션·항목이 ${members.length}개 있습니다${running ? ` (실행 중인 세션 ${running}개)` : ''}.\n모두 닫고 워크스페이스를 삭제할까요?`)) return false;
     for (const s of members) await closeSession(s);
-    // 닫는 사이 취소한 항목이나 새로 생긴 항목이 있으면 그룹을 남긴다.
+    // 닫는 사이 취소한 항목이나 새로 생긴 항목이 있으면 워크스페이스를 남긴다.
     const left = membersOf(group.name).length;
     if (left) {
-      notice('그룹을 지우지 않았습니다', `그룹 "${group.name}"에 닫지 않은 항목이 ${left}개 남아 있습니다. 그 항목을 닫거나 다른 그룹으로 옮긴 뒤에 다시 지우세요.`);
+      notice('워크스페이스를 지우지 않았습니다', `워크스페이스 "${group.name}"에 닫지 않은 항목이 ${left}개 남아 있습니다. 그 항목을 닫거나 다른 워크스페이스로 옮긴 뒤에 다시 지우세요.`);
       return false;
     }
   }
@@ -1695,15 +1724,15 @@ async function deleteGroup(group) {
   localStorage.setItem('cypher.groupFolders', JSON.stringify(groupFolders));
   render();
   setStatus(members.length
-    ? `그룹 "${group.name}"을(를) 지웠습니다 (세션·항목 ${members.length}개를 닫음 · 다시 열기: Ctrl+Shift+R).`
-    : `그룹 "${group.name}"을(를) 지웠습니다.`);
+    ? `워크스페이스 "${group.name}"을(를) 지웠습니다 (세션·항목 ${members.length}개를 닫음 · 다시 열기: Ctrl+Shift+R).`
+    : `워크스페이스 "${group.name}"을(를) 지웠습니다.`);
   return true;
 }
 
-/** 그 묶음에 새 항목을 넣을 때 쓸 그룹 이름과 폴더. */
+/** 그 묶음에 새 항목을 넣을 때 쓸 워크스페이스 이름과 폴더. */
 function groupContext(group) {
   const first = group.list.find((s) => sessions.has(s.key));
-  // 그룹 폴더를 정해 둔 그룹은 그 폴더가 먼저다.
+  // 워크스페이스 폴더를 정해 둔 워크스페이스는 그 폴더가 먼저다.
   // 폴더 묶음은 시작 폴더로 묶이므로 그 폴더를 그대로 써야 새 항목이 같은 묶음에 들어간다.
   const own = group.logical ? groupFolderOf(group.name) : '';
   const cwd = own || (!first ? folder : group.logical ? (first.project || first.startCwd) : first.startCwd);
@@ -1712,21 +1741,21 @@ function groupContext(group) {
 
 /**
  * 그 묶음에 새 항목을 더하는 메뉴 항목들: 터미널 프로필들과 그 밖의 종류(메모, HTTP …).
- * 폴더는 그 그룹의 폴더, 정해 두지 않았으면 그 묶음에 이미 있는 항목의 것을 따른다(없으면 기본 폴더).
+ * 폴더는 그 워크스페이스의 폴더, 정해 두지 않았으면 그 묶음에 이미 있는 항목의 것을 따른다(없으면 기본 폴더).
  */
 function addItems(group) {
   const opts = groupContext(group);
-  // 그룹 폴더를 정해 둔 그룹의 새 세션은 폴더를 넘기지 않는다. newSession이 그 그룹의 폴더를 찾아 쓰고,
+  // 워크스페이스 폴더를 정해 둔 워크스페이스의 새 세션은 폴더를 넘기지 않는다. newSession이 그 워크스페이스의 폴더를 찾아 쓰고,
   // 그 폴더가 없어졌으면 기본 폴더에서 시작한다.
   const forSession = group.logical && groupFolderOf(group.name) ? { group: opts.group } : opts;
   return [
-    { caption: `폴더: ${opts.cwd}${group.logical && groupFolderOf(group.name) ? ' (그룹 폴더)' : ''}` },
+    { caption: `폴더: ${opts.cwd}${group.logical && groupFolderOf(group.name) ? ' (워크스페이스 폴더)' : ''}` },
     ...config.profiles.map((p) => ({ label: `+ ${p.label} 세션`, action: () => newSession(p.id, forSession) })),
     ...Object.entries(KINDS).map(([kind, def]) => ({ label: `+ ${def.label}`, action: () => createKind(kind, opts) })),
   ];
 }
 
-// ── 그룹 틀: 묶음의 항목 구성을 파일로 저장해 두고, 같은 종류의 업무를 시작할 때 한 번에 펼친다(template.js) ──
+// ── 워크스페이스 틀: 묶음의 항목 구성을 파일로 저장해 두고, 같은 종류의 업무를 시작할 때 한 번에 펼친다(template.js) ──
 
 const MAX_TEMPLATE_ITEMS = 40;  // 틀 하나로 한 번에 펼치는 항목 수
 
@@ -1795,8 +1824,8 @@ function templateSaved(kind, saved) {
 }
 
 /**
- * 틀을 그룹으로 펼친다. `cwd`를 주면 모든 항목을 그 폴더에서 열고, 아니면 저장해 둔 폴더에서 연다
- * (없어진 폴더의 항목은 기본 폴더에서). `cwd`를 줬고 그 그룹에 폴더를 정해 두지 않았으면 그 폴더를 그룹의 폴더로 정한다.
+ * 틀을 워크스페이스로 펼친다. `cwd`를 주면 모든 항목을 그 폴더에서 열고, 아니면 저장해 둔 폴더에서 연다
+ * (없어진 폴더의 항목은 기본 폴더에서). `cwd`를 줬고 그 워크스페이스에 폴더를 정해 두지 않았으면 그 폴더를 워크스페이스의 폴더로 정한다.
  * 만든 항목 수와 건너뛴 것의 까닭을 돌려준다.
  */
 async function openTemplate(template, { group, cwd = null }) {
@@ -1841,7 +1870,7 @@ async function openTemplate(template, { group, cwd = null }) {
 
 function groupMenu(group, ev) {
   // 사이드바가 "대기만 보기"로 걸러져 있으면 받은 묶음에는 대기 중인 항목만 들어 있다.
-  // 묶음 전체를 다루는 일(틀로 저장, 그룹으로 만들기)은 걸러지지 않은 묶음으로 하고,
+  // 묶음 전체를 다루는 일(틀로 저장, 워크스페이스로 만들기)은 걸러지지 않은 묶음으로 하고,
   // 화면에 보이는 것을 다루는 일(나란히 보기, 모두 닫기)은 보이는 항목으로 한다.
   const live = group.list.filter((s) => sessions.has(s.key));
   const whole = groupsInOrder().find((g) => g.key === group.key) ?? group;
@@ -1850,18 +1879,18 @@ function groupMenu(group, ev) {
   items.push(...addItems(group));
   const resting = whole.list.filter((s) => s.dormant && sessions.has(s.key)).length;
   if (resting) items.push({ label: `쉬는 세션 ${resting}개 모두 재개`, action: () => wakeGroup(whole) });
-  if (all.length) items.push({ label: '이 묶음을 틀로 저장… (같은 구성을 다시 펼칠 수 있게)', action: () => saveTemplate(whole) });
+  if (all.length) items.push({ label: '이 워크스페이스를 틀로 저장… (같은 구성을 다시 펼칠 수 있게)', action: () => saveTemplate(whole) });
   if (group.logical) {
-    // 그룹 폴더: 이 그룹에서 여는 세션이 시작될 폴더. 정해 두지 않으면 기본 폴더(사용자 폴더)에서 시작한다.
+    // 워크스페이스 폴더: 이 워크스페이스에서 여는 세션이 시작될 폴더. 정해 두지 않으면 기본 폴더(사용자 폴더)에서 시작한다.
     const own = groupFolderOf(group.name);
-    items.push({ label: own ? '그룹 폴더 바꾸기…' : '그룹 폴더 정하기… (이 그룹의 세션이 시작될 폴더)', action: () => pickGroupFolder(group.name) });
-    items.push({ label: '그룹 이름 바꾸기', action: () => renameGroup(group) });
-    items.push({ label: '그룹 삭제', action: () => deleteGroup(whole) }); // 항목이 남아 있으면 물어보고 모두 닫은 뒤 지운다.
+    items.push({ label: own ? '워크스페이스 폴더 바꾸기…' : '워크스페이스 폴더 정하기… (이 워크스페이스의 세션이 시작될 폴더)', action: () => pickGroupFolder(group.name) });
+    items.push({ label: '워크스페이스 이름 바꾸기', action: () => renameGroup(group) });
+    items.push({ label: '워크스페이스 삭제', action: () => deleteGroup(whole) }); // 항목이 남아 있으면 물어보고 모두 닫은 뒤 지운다.
   } else {
-    items.push({ label: '이 묶음을 그룹으로 만들기…', action: () => askGroup(all) });
+    items.push({ label: '이 묶음을 워크스페이스로 만들기…', action: () => askGroup(all) });
   }
   items.push({
-    label: '이 묶음만 나란히 보기',
+    label: '이 워크스페이스만 나란히 보기',
     action: () => {
       tree = balanced(live.slice(0, MAX_PANES));
       layout();
@@ -1869,9 +1898,9 @@ function groupMenu(group, ev) {
     },
   });
   items.push({
-    label: '이 묶음의 세션 모두 닫기',
+    label: '이 워크스페이스의 세션 모두 닫기',
     action: () => {
-      if (confirm(`"${group.name}" 묶음의 세션 ${live.length}개를 모두 닫을까요?`)) live.forEach(closeSession);
+      if (confirm(`"${group.name}" 워크스페이스의 세션 ${live.length}개를 모두 닫을까요?`)) live.forEach(closeSession);
     },
   });
   showMenu(ev, items);
@@ -1887,7 +1916,7 @@ document.addEventListener('mousemove', (ev) => {
     drag.ghost = make('div', 'drag-ghost', label(drag.s));
     document.body.append(drag.ghost);
     $list.classList.add('dragging');
-    render(); // "새 그룹" 놓을 자리를 보여 준다.
+    render(); // "새 워크스페이스" 놓을 자리를 보여 준다.
   }
   drag.ghost.style.left = `${ev.clientX + 12}px`;
   drag.ghost.style.top = `${ev.clientY + 8}px`;
@@ -1918,12 +1947,12 @@ document.addEventListener('mouseup', (ev) => {
     else render();
     return;
   }
-  // 다른 항목의 줄에 놓음: 그 줄의 위나 아래로 순서를 옮긴다. 다른 그룹의 줄이면 그 그룹으로도 옮긴다.
+  // 다른 항목의 줄에 놓음: 그 줄의 위나 아래로 순서를 옮긴다. 다른 워크스페이스의 줄이면 그 워크스페이스로도 옮긴다.
   const over = rowUnder(point, ev.clientY);
   if (over) {
     if (over.target !== s) {
       if (over.target.group) ensureGroup(over.target.group);
-      if (over.target.group) s.group = over.target.group; // 그룹 밖으로는 옮기지 않는다.
+      if (over.target.group) s.group = over.target.group; // 워크스페이스 밖으로는 옮기지 않는다.
       placeInOrder(s, over.target, over.after);
       saveState();
     }
@@ -1956,19 +1985,19 @@ function placeInOrder(s, target, after) {
 }
 
 /**
- * 사이드바에 보이는 차례대로의 묶음들: 만들어 둔 그룹이 먼저(비어 있어도), 그 뒤로 폴더 묶음이 처음 나온 순서대로.
- * `waitingOnly`이면 대기 중인 세션만 담고 빈 그룹은 뺀다.
+ * 사이드바에 보이는 차례대로의 묶음들: 만들어 둔 워크스페이스가 먼저(비어 있어도), 그 뒤로 폴더 묶음이 처음 나온 순서대로.
+ * `waitingOnly`이면 대기 중인 세션만 담고 빈 워크스페이스는 뺀다.
  */
 function groupsInOrder({ waitingOnly = false } = {}) {
   const groups = new Map();
   if (!waitingOnly) {
-    for (const name of groupList) groups.set(`g:${name}`, { key: `g:${name}`, logical: true, name, hint: `그룹: ${name}`, list: [] });
+    for (const name of groupList) groups.set(`g:${name}`, { key: `g:${name}`, logical: true, name, hint: `워크스페이스: ${name}`, list: [] });
   }
   for (const s of sessions.values()) {
     if (waitingOnly && !s.waiting) continue;
     const key = groupKey(s);
     if (!groups.has(key)) {
-      groups.set(key, { key, logical: !!s.group, name: s.group || baseName(s.startCwd), hint: s.group ? `그룹: ${s.group}` : s.startCwd, list: [] });
+      groups.set(key, { key, logical: !!s.group, name: s.group || baseName(s.startCwd), hint: s.group ? `워크스페이스: ${s.group}` : s.startCwd, list: [] });
     }
     groups.get(key).list.push(s);
   }
@@ -2021,7 +2050,7 @@ function render() {
       'group', group.logical && 'logical', group.list.some((s) => s.attention || s.waiting) && 'attention',
     ].filter(Boolean).join(' '));
     const ownFolder = group.logical ? groupFolderOf(group.name) : '';
-    head.title = `${group.hint}\n${group.logical ? `그룹 폴더: ${ownFolder || `정하지 않음 (기본 폴더 ${folder}에서 시작)`}\n` : ''}클릭: 접기·펼치기 · 오른쪽 클릭: 메뉴 · +: 세션·항목 더하기 · 끌어다 놓기: 이 묶음에 넣기`;
+    head.title = `${group.hint}\n${group.logical ? `워크스페이스 폴더: ${ownFolder || `정하지 않음 (기본 폴더 ${folder}에서 시작)`}\n` : ''}클릭: 접기·펼치기 · 오른쪽 클릭: 메뉴 · +: 세션·항목 더하기 · 끌어다 놓기: 이 워크스페이스에 넣기`;
     head.dataset.drop = group.logical ? 'logical' : 'folder';
     head.dataset.name = group.name;
     // 밖에서 끌어다 놓은 것을 이 묶음의 항목으로 만들 때 쓴다(drop.js).
@@ -2038,11 +2067,11 @@ function render() {
       return part ? { done: sum.done + part.done, total: sum.total + part.total } : sum;
     }, { done: 0, total: 0 });
     const progress = make('span', todo.total ? `todo-pill${todo.done === todo.total ? ' full' : ''}` : '', todo.total ? `${todo.done}/${todo.total}` : '');
-    if (todo.total) progress.title = `이 묶음의 할 일: ${todo.total}개 가운데 ${todo.done}개 끝냄`;
+    if (todo.total) progress.title = `이 워크스페이스의 할 일: ${todo.total}개 가운데 ${todo.done}개 끝냄`;
     head.append(progress);
     // 묶음 안에서 돌고 있는 서브에이전트 수(접어 두어도 보인다).
     const running = group.list.reduce((sum, s) => sum + s.agents.size, 0);
-    head.append(running ? agentPill(running, `이 묶음에서 서브에이전트 ${running}개 실행 중`) : make('span'));
+    head.append(running ? agentPill(running, `이 워크스페이스에서 서브에이전트 ${running}개 실행 중`) : make('span'));
     // 쉬는 세션이 있는 묶음: 한 번에 재개하는 단추
     const resting = group.list.filter((s) => s.dormant).length;
     const play = make(resting ? 'button' : 'span', resting ? 'close wake' : '', resting ? '▶' : '');
@@ -2052,22 +2081,22 @@ function render() {
     }
     head.append(play);
     const add = make('button', 'close add', '+'); // 세션·항목을 만드는 길이므로 마우스를 올리지 않아도 늘 보인다.
-    add.title = '이 그룹에 세션·항목 더하기';
+    add.title = '이 워크스페이스에 세션·항목 더하기';
     add.onclick = (ev) => { ev.stopPropagation(); showMenu(ev, addItems(group)); };
     head.append(add);
     head.append(make('span', 'count', String(group.list.length)));
-    // 그룹의 폴더 줄: 이름 바로 아래에 그룹 폴더를 그대로 보여 주고 거기서 바로 고른다(접어 두어도 보인다).
+    // 워크스페이스의 폴더 줄: 이름 바로 아래에 워크스페이스 폴더를 그대로 보여 주고 거기서 바로 고른다(접어 두어도 보인다).
     if (group.logical) {
       const row = make('div', ownFolder ? 'group-folder' : 'group-folder unset');
       // 오른쪽 정렬 말줄임에서 글자 순서가 뒤집히지 않도록 방향 표시 문자를 붙인다.
       const path = make('span', 'path', ownFolder ? '‎' + ownFolder : '폴더를 정하지 않음');
       path.title = ownFolder
-        ? `그룹 "${group.name}"의 폴더: ${ownFolder}\n이 그룹에서 여는 세션은 여기서 시작합니다.\n클릭·▾: 바꾸기·풀기`
-        : `그룹 "${group.name}"의 폴더를 정하지 않았습니다. 이 그룹의 세션은 이 그룹에 있는 항목의 폴더나 기본 폴더(${folder})에서 시작합니다.\n클릭·▾: 정하기`;
+        ? `워크스페이스 "${group.name}"의 폴더: ${ownFolder}\n이 워크스페이스에서 여는 세션은 여기서 시작합니다.\n클릭·▾: 바꾸기·풀기`
+        : `워크스페이스 "${group.name}"의 폴더를 정하지 않았습니다. 이 워크스페이스의 세션은 이 워크스페이스에 있는 항목의 폴더나 기본 폴더(${folder})에서 시작합니다.\n클릭·▾: 정하기`;
       const recent = make('button', '', '▾');
-      recent.title = '지금 항목의 폴더·최근 폴더에서 골라 이 그룹의 폴더로 정하기';
+      recent.title = '지금 항목의 폴더·최근 폴더에서 골라 이 워크스페이스의 폴더로 정하기';
       const pick = make('button', '', '폴더…');
-      pick.title = ownFolder ? '이 그룹의 폴더 바꾸기' : '이 그룹의 폴더 정하기';
+      pick.title = ownFolder ? '이 워크스페이스의 폴더 바꾸기' : '이 워크스페이스의 폴더 정하기';
       path.onclick = recent.onclick = (ev) => groupFolderMenu(ev, group.name);
       pick.onclick = () => pickGroupFolder(group.name);
       row.onclick = (ev) => ev.stopPropagation(); // 폴더 줄을 눌러도 묶음이 접히지 않게
@@ -2085,15 +2114,15 @@ function render() {
   }
   if (renaming != null && !sessions.has(renaming)) renaming = null;
   if (filterWaiting && !rows.length) rows.push(make('li', 'group', '대기 중인 세션이 없습니다.'));
-  // 그룹이 하나도 없으면 무엇부터 해야 하는지 알려 준다(세션과 항목은 그룹 안에서만 만든다).
+  // 워크스페이스가 하나도 없으면 무엇부터 해야 하는지 알려 준다(세션과 항목은 워크스페이스 안에서만 만든다).
   if (!filterWaiting && !rows.length) {
-    const hint = make('li', 'group new', '그룹이 없습니다 — 여기를 누르거나 위의 [+ 그룹]으로 그룹을 만드세요');
-    hint.title = '세션과 항목은 그룹 안에서만 만들 수 있습니다';
+    const hint = make('li', 'group new', '워크스페이스가 없습니다 — 여기를 누르거나 위의 [+ 워크스페이스]로 워크스페이스를 만드세요');
+    hint.title = '세션과 항목은 워크스페이스 안에서만 만들 수 있습니다';
     hint.onclick = () => newGroup();
     rows.push(hint);
   }
   if (drag?.active) {
-    const fresh = make('li', 'group new', '+ 새 그룹으로 (여기에 놓기)');
+    const fresh = make('li', 'group new', '+ 새 워크스페이스로 (여기에 놓기)');
     fresh.dataset.drop = 'new';
     rows.push(fresh);
   }
@@ -2106,7 +2135,7 @@ function render() {
       active.agents.size ? `서브에이전트 ${active.agents.size}` : ''].filter(Boolean).join(' · ')
     : '';
 
-  syncSites(); // 그룹이 바뀐 사이트 항목은 새 그룹의 브라우저 프로필로 다시 연다.
+  syncSites(); // 워크스페이스가 바뀐 사이트 항목은 새 워크스페이스의 브라우저 프로필로 다시 연다.
   const waitingCount = [...sessions.values()].filter((s) => s.waiting).length;
   const $waiting = $('waiting');
   $waiting.textContent = `대기 ${waitingCount}`;
@@ -2138,7 +2167,7 @@ function render() {
   syncComposer();
 }
 
-/** 작업영역 맨 위에 지금 보고 있는 항목을 알려 준다: 그룹(또는 폴더 묶음) › 별칭·이름 · 원래 이름 · 폴더. */
+/** 스테이지 맨 위에 지금 보고 있는 항목을 알려 준다: 워크스페이스(또는 폴더 묶음) › 별칭·이름 · 원래 이름 · 폴더. */
 function renderWhere() {
   const $where = $('where');
   const s = active && sessions.has(active.key) ? active : null;
@@ -2156,7 +2185,7 @@ function renderWhere() {
   if (s.name) parts.push(make('span', 'where-origin', baseLabel(s)));
   parts.push(make('span', 'where-path', `‎${s.cwd}`));
   $where.replaceChildren(...parts);
-  $where.title = `${s.group ? `그룹: ${s.group}` : `폴더 묶음: ${s.startCwd}`}\n${s.name ? `별칭: ${s.name}\n` : ''}${baseLabel(s)}\n${s.cwd}`;
+  $where.title = `${s.group ? `워크스페이스: ${s.group}` : `폴더 묶음: ${s.startCwd}`}\n${s.name ? `별칭: ${s.name}\n` : ''}${baseLabel(s)}\n${s.cwd}`;
 }
 
 /**
@@ -2206,11 +2235,11 @@ function showOnly(s) {
   activate(s);
 }
 
-/** 사이드바의 빈 곳을 오른쪽 클릭했을 때의 메뉴: 새 그룹, 보기 방식. 세션과 항목은 그룹 머리의 +(또는 그룹 오른쪽 클릭)로 만든다. */
+/** 사이드바의 빈 곳을 오른쪽 클릭했을 때의 메뉴: 새 워크스페이스, 보기 방식. 세션과 항목은 워크스페이스 머리의 +(또는 워크스페이스 오른쪽 클릭)로 만든다. */
 function sidebarMenu(ev) {
   const items = [
-    { caption: '세션과 항목은 그룹 안에서만 만듭니다 (그룹 머리의 +)' },
-    { label: '새 그룹 만들기…', action: () => newGroup() },
+    { caption: '세션과 항목은 워크스페이스 안에서만 만듭니다 (워크스페이스 머리의 +)' },
+    { label: '새 워크스페이스 만들기…', action: () => newGroup() },
   ];
   items.push({ label: '빠른 이동·명령 찾기…  (Ctrl+Shift+K)', action: showPalette });
   if (closedCount()) items.push({ label: '닫은 항목 다시 열기…  (Ctrl+Shift+R)', action: showClosed });
@@ -2225,7 +2254,7 @@ function sidebarMenu(ev) {
   if (keys.length) {
     const allFolded = keys.every((key) => collapsed.has(key));
     items.push({
-      label: allFolded ? '묶음 모두 펼치기' : '묶음 모두 접기',
+      label: allFolded ? '워크스페이스 모두 펼치기' : '워크스페이스 모두 접기',
       action: () => {
         collapsed = allFolded ? new Set() : new Set(keys);
         localStorage.setItem('cypher.collapsed', JSON.stringify([...collapsed]));
@@ -2255,18 +2284,18 @@ function paletteEntries() {
       };
     });
   const command = (title, action, note = '명령') => ({ icon: '⌘', title, note, action });
-  // 새로 만드는 것은 지금 보고 있는 항목의 그룹에 들어간다(그룹이 하나뿐이면 그 그룹). 어느 그룹인지 설명에 적는다.
+  // 새로 만드는 것은 지금 보고 있는 항목의 워크스페이스에 들어간다(워크스페이스가 하나뿐이면 그 워크스페이스). 어느 워크스페이스인지 설명에 적는다.
   const into = viewedGroup() || (groupList.length === 1 ? groupList[0] : '');
-  const where = into ? `명령 · 그룹 "${into}"에 만듦` : `명령 · ${groupList.length ? '그룹의 항목을 보고 있을 때만(또는 그룹 머리의 +)' : '먼저 그룹을 만들어야 함'}`;
+  const where = into ? `명령 · 워크스페이스 "${into}"에 만듦` : `명령 · ${groupList.length ? '워크스페이스의 항목을 보고 있을 때만(또는 워크스페이스 머리의 +)' : '먼저 워크스페이스를 만들어야 함'}`;
   const commands = [
     ...config.profiles.map((p) => command(`새 ${p.label} 세션`, () => newSession(p.id), into ? `${where} · 폴더: ${groupFolderOf(into) || folder}` : where)),
     ...(offersWorktree() ? [command('새 워크트리 세션…', () => newWorktree('replace'), where)] : []),
     ...Object.entries(KINDS).map(([kind, def]) => command(`새 ${def.label}`, () => createKind(kind), where)),
-    command('새 그룹 만들기…', newGroup),
+    command('새 워크스페이스 만들기…', newGroup),
     command('닫은 항목 다시 열기…', showClosed, '명령 · Ctrl+Shift+R: 가장 나중에 닫은 것'),
     command('알림 기록', showNotices, `명령 · Ctrl+Shift+A${unreadCount() ? ` · 새 알림 ${unreadCount()}개` : ''}`),
-    command('그룹 틀: 저장해 둔 구성 펼치기…', showTemplates),
-    ...(currentGroup() ? [command('지금 묶음을 틀로 저장…', () => saveTemplate(currentGroup()), `명령 · ${currentGroup().name}`)] : []),
+    command('워크스페이스 틀: 저장해 둔 구성 펼치기…', showTemplates),
+    ...(currentGroup() ? [command('지금 워크스페이스를 틀로 저장…', () => saveTemplate(currentGroup()), `명령 · ${currentGroup().name}`)] : []),
     command('다음 대기 세션으로', nextWaiting, '명령 · Ctrl+Shift+N'),
     command(filterWaiting ? '모든 세션 보기' : '대기 중인 세션만 보기', () => { filterWaiting = !filterWaiting; render(); }),
     command('변경 내용 옆 창 열기/닫기', () => toggleDiff(), '명령 · Ctrl+Shift+G'),
@@ -2283,7 +2312,7 @@ function paletteEntries() {
     command('Claude 공통 설정 열기 (settings.json)', () => runMenu('claude-settings'), '설정'),
     command('Claude 공통 지침 열기 (CLAUDE.md)', () => runMenu('claude-memory'), '설정'),
     command('단축키 보기', showHelp, '도움말 · F1'),
-    ...(viewedGroup() ? [command(`그룹 "${viewedGroup()}"의 폴더 정하기…`, () => pickGroupFolder(viewedGroup()), `폴더 · 지금: ${groupFolderOf(viewedGroup()) || '정하지 않음'}`)] : []),
+    ...(viewedGroup() ? [command(`워크스페이스 "${viewedGroup()}"의 폴더 정하기…`, () => pickGroupFolder(viewedGroup()), `폴더 · 지금: ${groupFolderOf(viewedGroup()) || '정하지 않음'}`)] : []),
   ];
   return [...items, ...commands];
 }
@@ -2351,7 +2380,7 @@ function sessionMenu(s, ev) {
     { colors: COLORS, action: (color) => { s.color = color; render(); saveState(); } },
     { caption: s.mark ? `북마크 ${s.mark} · Ctrl+${s.mark}로 바로 가기 (같은 숫자를 다시 누르면 풂)` : '북마크: 숫자를 고르면 Ctrl+숫자로 바로 갑니다' },
     { icons: MARKS.map((digit) => ({ node: make('b', '', digit), title: markTitle(s, digit), on: s.mark === digit, action: () => setMark(s, digit) })) },
-    { label: s.group ? `그룹 바꾸기… (지금: ${s.group})` : '그룹 지정…', action: () => askGroup([s], s.group) },
+    { label: s.group ? `워크스페이스 바꾸기… (지금: ${s.group})` : '워크스페이스 지정…', action: () => askGroup([s], s.group) },
     ...(visible.length > 1 || !visible.includes(s) ? [{ label: '이것만 보기 (나머지는 화면에서 숨기기)', action: () => showOnly(s) }] : []),
     visible.includes(s)
       ? { label: '화면에서 숨기기', action: () => toggleShown(s) }
@@ -2382,13 +2411,13 @@ function openFolder(s) {
 }
 
 // ───────────────────────── 브라우저(사이트 항목)와 Claude 세션 ─────────────────────────
-// 브라우저는 사이드바의 사이트 항목이다. 같은 그룹의 Claude 세션이 Cypher 도구로 그 브라우저를 조작한다.
-// 어느 브라우저를 조작할지: 사용자가 넘겨준 것 → 같은 그룹에서 마지막으로 본 것 → 없으면 새로 만든다.
+// 브라우저는 사이드바의 사이트 항목이다. 같은 워크스페이스의 Claude 세션이 Cypher 도구로 그 브라우저를 조작한다.
+// 어느 브라우저를 조작할지: 사용자가 넘겨준 것 → 같은 워크스페이스에서 마지막으로 본 것 → 없으면 새로 만든다.
 //
 // Claude 세션이 Cypher 도구로 다룰 수 있는 범위:
-// - 그 세션과 같은 "이름 붙인 그룹"에 있는 항목만 다룬다. 다른 그룹의 항목은 번호를 알아도 다룰 수 없다.
-// - 그룹 없이 폴더 묶음에 있는 것끼리는 서로 다룰 수 없다(같은 폴더에서 열었을 뿐 한 업무라는 보장이 없다).
-//   그룹 없는 세션은 자기 묶음에 새 항목을 놓는 것(메모·이미지·문서·마인드맵)만 할 수 있다.
+// - 그 세션과 같은 "이름 붙인 워크스페이스"에 있는 항목만 다룬다. 다른 워크스페이스의 항목은 번호를 알아도 다룰 수 없다.
+// - 워크스페이스 없이 폴더 묶음에 있는 것끼리는 서로 다룰 수 없다(같은 폴더에서 열었을 뿐 한 업무라는 보장이 없다).
+//   워크스페이스 없는 세션은 자기 묶음에 새 항목을 놓는 것(메모·이미지·문서·마인드맵)만 할 수 있다.
 // - 터미널 세션(다른 Claude 세션 포함)은 어떤 경우에도 다룰 수 없다.
 
 const chromeEngine = () => config.browser.engine?.toLowerCase() === 'chrome';
@@ -2400,8 +2429,8 @@ const resumeOf = (s) => (s.profile?.claude && s.resumable && s.claudeSession ? s
 /** 그 항목과 같은 묶음에서 돌고 있는 Claude 세션들(사용자가 직접 글을 넣어 줄 대상을 고를 때 쓴다). */
 const claudesOf = (item) => [...sessions.values()].filter((s) => aliveClaude(s) && groupKey(s) === groupKey(item));
 /**
- * Claude 세션 s가 Cypher 도구로 그 항목을 다룰 수 있는지: 둘이 같은 이름 붙인 그룹에 있고,
- * 대상이 터미널 세션이 아니어야 한다. 그룹이 없는 것끼리는 다룰 수 없다.
+ * Claude 세션 s가 Cypher 도구로 그 항목을 다룰 수 있는지: 둘이 같은 이름 붙인 워크스페이스에 있고,
+ * 대상이 터미널 세션이 아니어야 한다. 워크스페이스가 없는 것끼리는 다룰 수 없다.
  */
 const canControl = (s, target) => !!s?.group && !!target && target !== s && target.group === s.group && !isTerm(target);
 /** 파일을 메모로 연다. 그 파일에 연결된 메모가 이미 있으면 새로 만들지 않고 그 항목으로 간다(둘이 되면 서로 덮어쓴다). */
@@ -2411,17 +2440,17 @@ function openMemo(path) {
   return newItem('memo', { saved: { open: path }, show: 'split' });
 }
 
-/** 그 항목을 넘겨받을 수 있는 Claude 세션들: 같은 이름 붙인 그룹에서 돌고 있는 것. */
+/** 그 항목을 넘겨받을 수 있는 Claude 세션들: 같은 이름 붙인 워크스페이스에서 돌고 있는 것. */
 const controllersOf = (item) => [...sessions.values()].filter((s) => aliveClaude(s) && canControl(s, item));
 /** 그 세션이 다룰 수 있는 사이트 항목들. */
 const sitesOf = (s) => [...sessions.values()].filter((other) => other.kind === 'site' && canControl(s, other));
-/** 그룹에 든 세션만 할 수 있는 일 앞에서 부른다. 그룹이 없으면 까닭을 돌려주며 그만둔다. */
+/** 워크스페이스에 든 세션만 할 수 있는 일 앞에서 부른다. 워크스페이스가 없으면 까닭을 돌려주며 그만둔다. */
 function requireGroup(s) {
   if (!s.group) throw new Error(NO_GROUP);
 }
-/** 그룹이 없는 세션이 항목을 다루려 할 때 Claude에게 돌려주는 말. */
-const NO_GROUP = '이 세션은 이름 붙인 그룹에 속해 있지 않습니다. Cypher 도구는 같은 그룹에 있는 항목만 다룰 수 있고, 그룹 없이 있는 것끼리는 서로 다룰 수 없습니다. 사용자에게 이 세션과 다룰 항목을 한 그룹에 넣어 달라고 하세요(사이드바에서 오른쪽 클릭 → 그룹 지정).';
-/** 그 항목과 같은 묶음에 새 항목을 만들 때 쓸 그룹 이름과 폴더. */
+/** 워크스페이스가 없는 세션이 항목을 다루려 할 때 Claude에게 돌려주는 말. */
+const NO_GROUP = '이 세션은 이름 붙인 워크스페이스에 속해 있지 않습니다. Cypher 도구는 같은 워크스페이스에 있는 항목만 다룰 수 있고, 워크스페이스 없이 있는 것끼리는 서로 다룰 수 없습니다. 사용자에게 이 세션과 다룰 항목을 한 워크스페이스에 넣어 달라고 하세요(사이드바에서 오른쪽 클릭 → 워크스페이스 지정).';
+/** 그 항목과 같은 묶음에 새 항목을 만들 때 쓸 워크스페이스 이름과 폴더. */
 const besideOf = (s) => ({ group: s.group, cwd: s.group ? (s.project || s.startCwd) : s.startCwd });
 
 /** 새로 연 Claude 세션이 입력을 받을 준비가 될 때까지(상태줄이 오면 준비된 것) 기다린다. */
@@ -2437,17 +2466,17 @@ async function untilReady(s) {
  */
 async function handoffSite(item, target) {
   if (!sessions.has(item.key)) return;
-  // 같은 그룹 안에서만 넘길 수 있다. 그룹이 없는 사이트 항목은 어느 세션도 조작할 수 없다.
-  if (!item.group) return notice('브라우저', `"${label(item)}"은(는) 그룹에 속해 있지 않아 Claude 세션에 넘길 수 없습니다. 먼저 그룹에 넣으세요(사이드바에서 오른쪽 클릭 → 그룹 지정).`);
+  // 같은 워크스페이스 안에서만 넘길 수 있다. 워크스페이스가 없는 사이트 항목은 어느 세션도 조작할 수 없다.
+  if (!item.group) return notice('브라우저', `"${label(item)}"은(는) 워크스페이스에 속해 있지 않아 Claude 세션에 넘길 수 없습니다. 먼저 워크스페이스에 넣으세요(사이드바에서 오른쪽 클릭 → 워크스페이스 지정).`);
   if (target && !(aliveClaude(target) && canControl(target, item))) {
-    return notice('브라우저', `"${label(target)}"은(는) 이 브라우저와 같은 그룹의 Claude 세션이 아니라 넘길 수 없습니다.`);
+    return notice('브라우저', `"${label(target)}"은(는) 이 브라우저와 같은 워크스페이스의 Claude 세션이 아니라 넘길 수 없습니다.`);
   }
   if (!target) {
     target = await newSession('claude', { ...besideOf(item), show: 'split' });
     if (target) await untilReady(target);
     if (!target || target.exited || !sessions.has(target.key)) return notice('브라우저', '새 Claude 세션을 열지 못했습니다.');
   }
-  // 기다리는 사이에 사이트 항목이 닫혔거나 어느 한쪽이 다른 그룹으로 옮겨졌으면 넘기지 않는다.
+  // 기다리는 사이에 사이트 항목이 닫혔거나 어느 한쪽이 다른 워크스페이스로 옮겨졌으면 넘기지 않는다.
   if (!sessions.has(item.key) || !canControl(target, item)) return;
   // 한 브라우저는 한 세션이 맡는다(넘겨주면 앞서 맡던 세션에서는 떼어 낸다).
   for (const other of sessions.values()) if (other.browser === item.key) other.browser = null;
@@ -2466,7 +2495,7 @@ async function handoffSite(item, target) {
 /** 그 세션이 지금 조작하는 브라우저: 넘겨받은 것, 없으면 같은 묶음에서 마지막으로 본 것. */
 function browserOf(s) {
   const bound = s.browser != null ? sessions.get(s.browser) : null;
-  // 넘겨받은 뒤에 어느 한쪽이 다른 그룹으로 옮겨졌으면 더는 조작하지 못한다.
+  // 넘겨받은 뒤에 어느 한쪽이 다른 워크스페이스로 옮겨졌으면 더는 조작하지 못한다.
   if (bound?.kind === 'site' && canControl(s, bound)) return bound;
   return sitesOf(s).sort((a, b) => (b.usedAt || 0) - (a.usedAt || 0))[0] || null;
 }
@@ -2479,7 +2508,7 @@ async function browserTarget(s, create) {
   let site = browserOf(s);
   const created = !site;
   if (!site) {
-    if (!create) throw new Error('이 세션의 그룹에 브라우저(사이트 항목)가 없습니다. browser_navigate로 주소를 열면 새 브라우저가 만들어집니다.');
+    if (!create) throw new Error('이 세션의 워크스페이스에 브라우저(사이트 항목)가 없습니다. browser_navigate로 주소를 열면 새 브라우저가 만들어집니다.');
     site = await newItem('site', { ...besideOf(s), saved: {}, show: 'hidden' });
     // 세션이 화면에 보이면 그 옆에 나란히 놓아 Claude가 하는 일을 볼 수 있게 한다(초점은 세션에 그대로 둔다).
     if (visible.includes(s) && visible.length < MAX_PANES) {
@@ -2494,7 +2523,7 @@ async function browserTarget(s, create) {
     syncSites();
   }
   const others = sitesOf(s).filter((other) => other !== site);
-  // 이 브라우저가 써야 하는 프로필을 앱에 지금 알려 둔다(방금 그룹을 옮겼다면 앱은 아직 옛 프로필로 알고 있을 수 있다).
+  // 이 브라우저가 써야 하는 프로필을 앱에 지금 알려 둔다(방금 워크스페이스를 옮겼다면 앱은 아직 옛 프로필로 알고 있을 수 있다).
   const profile = ensureProfile(site);
   await site.view.assign(profile);
   return {
@@ -2502,17 +2531,17 @@ async function browserTarget(s, create) {
     url: site.view.url() || 'about:blank',
     profile,
     // 도구의 답 끝에 덧붙일 말: 새로 만들었거나, 브라우저가 여러 개라 어느 것을 조작했는지 알려야 할 때만.
-    note: created ? `이 그룹에 새 브라우저(사이트 항목 #${site.key})를 만들어 열었습니다.`
-      : others.length ? `조작한 브라우저: 사이트 항목 #${site.key}. 같은 그룹에 다른 브라우저가 ${others.length}개 더 있습니다(browser_tabs로 보고 browser_select로 바꿉니다).` : '',
+    note: created ? `이 워크스페이스에 새 브라우저(사이트 항목 #${site.key})를 만들어 열었습니다.`
+      : others.length ? `조작한 브라우저: 사이트 항목 #${site.key}. 같은 워크스페이스에 다른 브라우저가 ${others.length}개 더 있습니다(browser_tabs로 보고 browser_select로 바꿉니다).` : '',
   };
 }
 
 function browserTabs(s) {
   if (!s.group) return NO_GROUP;
   const sites = sitesOf(s);
-  if (!sites.length) return '이 세션의 그룹에 브라우저(사이트 항목)가 없습니다. browser_navigate로 주소를 열면 새로 만들어집니다.';
+  if (!sites.length) return '이 세션의 워크스페이스에 브라우저(사이트 항목)가 없습니다. browser_navigate로 주소를 열면 새로 만들어집니다.';
   const current = browserOf(s);
-  return `이 세션의 그룹에 있는 브라우저(사이트 항목):\n${sites.map((site) => `${site === current ? '●' : ' '} ${siteLine(site)}${site === current ? '  ← 지금 조작 대상' : ''}`).join('\n')}`;
+  return `이 세션의 워크스페이스에 있는 브라우저(사이트 항목):\n${sites.map((site) => `${site === current ? '●' : ' '} ${siteLine(site)}${site === current ? '  ← 지금 조작 대상' : ''}`).join('\n')}`;
 }
 
 function browserSelect(s, id) {
@@ -2525,9 +2554,9 @@ function browserSelect(s, id) {
 
 /** 같은 묶음의 항목을 Claude 세션이 알 수 있게 글로 적는다: 종류, 이름, 파일 경로나 주소. */
 function groupItemsText(s) {
-  // 그룹이 없는 세션에는 같은 폴더 묶음의 다른 항목을 알려 주지 않는다(다룰 수 없는 것들이다).
+  // 워크스페이스가 없는 세션에는 같은 폴더 묶음의 다른 항목을 알려 주지 않는다(다룰 수 없는 것들이다).
   if (!s.group) {
-    return `${NO_GROUP}\n지금은 폴더 묶음 ${s.startCwd}에 있습니다. 그룹이 없어도 새 항목을 놓는 것은 됩니다: memo_write(새 메모), image_add, doc_show, table_show, mindmap_write(새 마인드맵), erd_write(새 ERD), todo_write(새 할 일). 놓은 항목은 이 세션의 폴더 묶음에 들어갑니다.`;
+    return `${NO_GROUP}\n지금은 폴더 묶음 ${s.startCwd}에 있습니다. 워크스페이스가 없어도 새 항목을 놓는 것은 됩니다: memo_write(새 메모), image_add, doc_show, table_show, mindmap_write(새 마인드맵), erd_write(새 ERD), todo_write(새 할 일). 놓은 항목은 이 세션의 폴더 묶음에 들어갑니다.`;
   }
   const dir = (name) => storeDirs[name] || `%APPDATA%\\cypher\\${name}`;
   const lines = [...sessions.values()].filter((other) => other.group === s.group).map((other) => {
@@ -2557,7 +2586,7 @@ function groupItemsText(s) {
     if (other.kind === 'table') return `- ${head} 표 ${name} — 파일: ${other.view.path() || '(아직 파일 없음)'} (표로 보여 주는 화면. 파일을 고치면 스스로 다시 읽는다)`;
     return `- ${head} ${KINDS[other.kind]?.label || other.kind} ${name}`;
   });
-  return `그룹 "${s.group}"의 Cypher 항목 ${lines.length}개(이 그룹 밖의 항목은 다룰 수 없음):\n${lines.join('\n')}`;
+  return `워크스페이스 "${s.group}"의 Cypher 항목 ${lines.length}개(이 워크스페이스 밖의 항목은 다룰 수 없음):\n${lines.join('\n')}`;
 }
 
 /** 마인드맵 항목을 개요 글로 만들거나 고친다. */
@@ -2566,7 +2595,7 @@ async function mindmapWrite(s, { item, title, text }) {
   if (item != null) {
     let target = itemInGroup(s, item, 'mindmap');
     await target.view.ready;
-    target = itemInGroup(s, item, 'mindmap'); // 기다리는 사이에 닫혔거나 다른 그룹으로 옮겨졌으면 여기서 거절된다.
+    target = itemInGroup(s, item, 'mindmap'); // 기다리는 사이에 닫혔거나 다른 워크스페이스로 옮겨졌으면 여기서 거절된다.
     if (target.view.setText(text) === false) {
       throw new Error(`마인드맵 #${target.key}은(는) 사용자가 코드 화면에서 고치는 중이라 바꾸지 않았습니다(오류가 있어 아직 반영되지 않은 글이 있습니다). 사용자에게 알리고, 사용자가 고친 뒤에 다시 시도하세요.`);
     }
@@ -2593,7 +2622,7 @@ async function erdWrite(s, { item, title, text }) {
   if (item != null) {
     let target = itemInGroup(s, item, 'erd');
     await target.view.ready;
-    target = itemInGroup(s, item, 'erd'); // 기다리는 사이에 닫혔거나 다른 그룹으로 옮겨졌으면 여기서 거절된다.
+    target = itemInGroup(s, item, 'erd'); // 기다리는 사이에 닫혔거나 다른 워크스페이스로 옮겨졌으면 여기서 거절된다.
     target.view.setText(text);
     if (name) target.name = name;
     reveal([target]);
@@ -2628,14 +2657,14 @@ function itemInGroup(s, id, kind) {
   requireGroup(s);
   const target = sessions.get(Number(id));
   if (target?.kind !== kind || !canControl(s, target)) {
-    throw new Error(`#${id}은(는) 이 세션의 그룹("${s.group}")에 있는 ${KINDS[kind].label} 항목이 아닙니다. 같은 그룹의 항목만 다룰 수 있습니다. cypher_items로 번호를 확인하세요.`);
+    throw new Error(`#${id}은(는) 이 세션의 워크스페이스("${s.group}")에 있는 ${KINDS[kind].label} 항목이 아닙니다. 같은 워크스페이스의 항목만 다룰 수 있습니다. cypher_items로 번호를 확인하세요.`);
   }
   return target;
 }
 
 /** 새 항목이 놓인 곳을 Claude에게 알려 주는 말. */
-const placedIn = (s) => (s.group ? '사이드바의 같은 그룹' : '이 세션의 폴더 묶음');
-const LATER_NEEDS_GROUP = '이 세션이 그룹에 속해 있지 않아, 놓은 뒤에는 Cypher 도구로 고칠 수 없습니다(그룹에 넣으면 됩니다).';
+const placedIn = (s) => (s.group ? '사이드바의 같은 워크스페이스' : '이 세션의 폴더 묶음');
+const LATER_NEEDS_GROUP = '이 세션이 워크스페이스에 속해 있지 않아, 놓은 뒤에는 Cypher 도구로 고칠 수 없습니다(워크스페이스에 넣으면 됩니다).';
 
 /** 메모 항목을 만들거나, 있는 메모에 덧붙이거나 통째로 바꾼다. */
 async function memoWrite(s, { item, title, text, replace }) {
@@ -2678,7 +2707,7 @@ async function showFile(s, { path, title }, kind, noun) {
     await doc.view.reload();
     if (title) { doc.name = String(title).slice(0, 120); saveState(); }
   } else {
-    // 그룹 없는 묶음에 이미 있는 항목은 건드리지 않는다(파일이 바뀌면 그 화면이 스스로 다시 그린다).
+    // 워크스페이스 없는 묶음에 이미 있는 항목은 건드리지 않는다(파일이 바뀌면 그 화면이 스스로 다시 그린다).
     return `이 파일을 보여 주는 ${noun} 항목 #${doc.key} "${label(doc)}"이 이미 있습니다. ${LATER_NEEDS_GROUP}`;
   }
   announce(doc, s, fresh ? `${noun}를 놓았습니다` : `${noun}를 새로 읽었습니다`);
@@ -2697,7 +2726,7 @@ async function todoWrite(s, { item, title, text, replace }) {
   if (item != null) {
     let target = itemInGroup(s, item, 'todo');
     await target.view.ready;
-    target = itemInGroup(s, item, 'todo'); // 기다리는 사이에 닫혔거나 다른 그룹으로 옮겨졌으면 여기서 거절된다.
+    target = itemInGroup(s, item, 'todo'); // 기다리는 사이에 닫혔거나 다른 워크스페이스로 옮겨졌으면 여기서 거절된다.
     if (replace) target.view.setText(text); else target.view.append(text);
     if (name) target.name = name;
     saveState();
@@ -2713,7 +2742,7 @@ async function todoWrite(s, { item, title, text, replace }) {
 async function todoCheck(s, { item, items, done }) {
   let target = itemInGroup(s, item, 'todo');
   await target.view.ready;
-  target = itemInGroup(s, item, 'todo'); // 기다리는 사이에 닫혔거나 다른 그룹으로 옮겨졌으면 여기서 거절된다.
+  target = itemInGroup(s, item, 'todo'); // 기다리는 사이에 닫혔거나 다른 워크스페이스로 옮겨졌으면 여기서 거절된다.
   const { changed, already, problems } = target.view.check(items, done !== false);
   const { done: finished, total } = target.view.progress();
   const listing = `지금의 목록(끝낸 일 ${finished}/${total}):\n${target.view.listing()}`;
@@ -2765,8 +2794,8 @@ function claudeNotice(s, { title, message }) {
 }
 
 /**
- * 그 세션이 HTTP 도구(http_list, http_run)로 다룰 수 있는 폴더: 같은 그룹에 있는 HTTP 항목의 요청 폴더와
- * 그 세션을 시작한 폴더. 그룹이 없는 세션은 HTTP 도구를 쓸 수 없다(같은 폴더의 그룹 없는 HTTP 항목이 보는 요청을
+ * 그 세션이 HTTP 도구(http_list, http_run)로 다룰 수 있는 폴더: 같은 워크스페이스에 있는 HTTP 항목의 요청 폴더와
+ * 그 세션을 시작한 폴더. 워크스페이스가 없는 세션은 HTTP 도구를 쓸 수 없다(같은 폴더의 워크스페이스 없는 HTTP 항목이 보는 요청을
  * 실행하고 기록을 남기게 되기 때문이다). 폴더는 Cypher가 정한 시작 폴더만 쓴다(세션이 알려 온 폴더는 믿지 않는다).
  */
 function httpFolders(s) {
@@ -2836,7 +2865,7 @@ async function placeCreated(s, path, kind) {
     return image;
   }
   if (kind === 'table') return newItem('table', { ...besideOf(s), saved: { path }, show: 'hidden' });
-  // 요청 파일은 그 폴더를 보는 HTTP 항목으로 놓는다. 그룹이 없는 세션은 자기 폴더 묶음에만 놓을 수 있으므로,
+  // 요청 파일은 그 폴더를 보는 HTTP 항목으로 놓는다. 워크스페이스가 없는 세션은 자기 폴더 묶음에만 놓을 수 있으므로,
   // 요청 파일이 다른 폴더의 것이면(남의 폴더 묶음에 끼어들게 된다) 문서 항목으로 보여 준다.
   const home = kind === 'http' ? httpHome(path) : '';
   if (kind !== 'http' || !(s.group || samePath(home, s.startCwd))) {
@@ -2850,14 +2879,14 @@ async function placeCreated(s, path, kind) {
     await there.view.reload?.();
     return there;
   }
-  // 그룹 없는 세션은 시작 폴더의 요청만 여기로 온다. 폴더는 세션의 것을 그대로 써야 같은 폴더 묶음에 들어간다
+  // 워크스페이스 없는 세션은 시작 폴더의 요청만 여기로 온다. 폴더는 세션의 것을 그대로 써야 같은 폴더 묶음에 들어간다
   // (파일 경로에 적힌 대/소문자가 달라도 다른 묶음이 생기지 않게).
   return newItem('http', { group: s.group, cwd: s.group ? home : s.startCwd, saved: { file: path }, show: 'hidden' });
 }
 
 /** Claude 세션의 Cypher 도구가 물어 온 것에 답한다. `req.session`은 도구를 부른 세션의 번호. */
 async function mcpAction(req) {
-  // 어느 세션이 불렀는지 모르면 답하지 않는다(지금 보고 있는 세션으로 치면 다른 그룹의 항목을 다루게 될 수 있다).
+  // 어느 세션이 불렀는지 모르면 답하지 않는다(지금 보고 있는 세션으로 치면 다른 워크스페이스의 항목을 다루게 될 수 있다).
   const s = req.session != null ? byId(req.session) : null;
   if (!s || !aliveClaude(s)) throw new Error('이 도구를 부른 Claude 세션을 Cypher에서 찾지 못했습니다.');
   switch (req.action) {
@@ -2876,7 +2905,7 @@ async function mcpAction(req) {
     case 'run_output': return { text: runOutput(s, req) };
     case 'notify': return { text: claudeNotice(s, req) };
     case 'http_scope': return { folders: httpFolders(s) };
-    // "chrome" 엔진의 브라우저는 그룹마다 따로 뜬다. 그룹에 든 세션에만, 그 그룹의 브라우저만 맡긴다.
+    // "chrome" 엔진의 브라우저는 워크스페이스마다 따로 뜬다. 워크스페이스에 든 세션에만, 그 워크스페이스의 브라우저만 맡긴다.
     case 'chrome_scope': requireGroup(s); return { profile: ensureProfile(s) };
     default: throw new Error(`모르는 요청입니다: ${req.action}`);
   }
@@ -2942,7 +2971,7 @@ async function askClaudeCommand() {
     : 'Claude 실행 명령을 비웠습니다. 기본 명령(claude)으로 띄웁니다.');
 }
 
-/** 지금 보고 있는 항목의 그룹이 쓰는 Chrome을 연다. 그룹이 없으면 공용 프로필의 Chrome(Claude 세션은 조작할 수 없다). */
+/** 지금 보고 있는 항목의 워크스페이스가 쓰는 Chrome을 연다. 워크스페이스가 없으면 공용 프로필의 Chrome(Claude 세션은 조작할 수 없다). */
 async function openChrome() {
   const group = viewing()?.group || '';
   try {
@@ -2950,8 +2979,8 @@ async function openChrome() {
     // 처음 띄울 때만 시작 페이지로 연다(이미 떠 있는 브라우저는 보던 페이지를 그대로 둔다).
     const open = await invoke('browser_where', { profile }).catch(() => null);
     await invoke('browser_open', { url: open ? null : (homePage || null), profile });
-    setStatus(group ? `그룹 "${group}"의 Chrome을 열었습니다. 이 그룹의 Claude 세션만 조작할 수 있습니다.`
-      : '그룹 없는 Chrome을 열었습니다. Claude 세션에 맡기려면 그룹에 든 항목을 보고 있을 때 여세요.');
+    setStatus(group ? `워크스페이스 "${group}"의 Chrome을 열었습니다. 이 워크스페이스의 Claude 세션만 조작할 수 있습니다.`
+      : '워크스페이스 없는 Chrome을 열었습니다. Claude 세션에 맡기려면 워크스페이스에 든 항목을 보고 있을 때 여세요.');
   } catch (err) {
     notice('브라우저를 열지 못했습니다', String(err));
   }
@@ -2959,13 +2988,13 @@ async function openChrome() {
 
 /** Chrome에 지금 열려 있는 페이지를 Claude 세션에 넘긴다. `fresh`이면 새 Claude 세션을 연다. */
 async function handoffChrome(fresh) {
-  // 넘기는 것은 지금 보고 있는 항목의 그룹이 쓰는 Chrome이고, 넘겨받는 것은 그 그룹의 Claude 세션이다.
+  // 넘기는 것은 지금 보고 있는 항목의 워크스페이스가 쓰는 Chrome이고, 넘겨받는 것은 그 워크스페이스의 Claude 세션이다.
   const from = viewing();
-  if (!from?.group) return notice('브라우저', 'Chrome은 그룹마다 따로 뜨고 그 그룹의 Claude 세션만 조작합니다. 그룹에 든 항목을 보고 있을 때 넘기세요.');
-  // 프로필이 아직 없는 그룹은 Chrome을 띄운 적이 없다.
+  if (!from?.group) return notice('브라우저', 'Chrome은 워크스페이스마다 따로 뜨고 그 워크스페이스의 Claude 세션만 조작합니다. 워크스페이스에 든 항목을 보고 있을 때 넘기세요.');
+  // 프로필이 아직 없는 워크스페이스는 Chrome을 띄운 적이 없다.
   const profile = profileOf(from);
   const url = profile ? await invoke('browser_where', { profile }).catch(() => null) : null;
-  if (!url) return notice('브라우저', `그룹 "${from.group}"의 Chrome이 열려 있지 않습니다. 먼저 [Chrome]을 눌러 여세요.`);
+  if (!url) return notice('브라우저', `워크스페이스 "${from.group}"의 Chrome이 열려 있지 않습니다. 먼저 [Chrome]을 눌러 여세요.`);
   let target = fresh ? null : (aliveClaude(from) ? from : [...sessions.values()].find((s) => aliveClaude(s) && s.group === from.group));
   if (!target) {
     target = await newSession('claude', { ...besideOf(from), show: 'split' });
@@ -2994,7 +3023,7 @@ async function addImages(list, { near = null, group, cwd, source = '', shot = fa
       continue;
     }
     made.push(await newItem('image', {
-      // 곁에 둘 항목이 있으면 그 항목과 같은 묶음에 넣는다(그룹 없는 항목은 시작 폴더로 묶인다).
+      // 곁에 둘 항목이 있으면 그 항목과 같은 묶음에 넣는다(워크스페이스 없는 항목은 시작 폴더로 묶인다).
       group: group ?? (base ? besideOf(base).group : undefined),
       cwd: cwd ?? (base ? besideOf(base).cwd : undefined),
       saved: { image: stored.id, ext: stored.ext, name: stored.name, source, at: Date.now(), shot, full },
@@ -3020,7 +3049,7 @@ function reveal(items) {
 
 /**
  * 화면을 찍은 그림을 이미지 항목으로 넣는다. `near`(찍은 사이트 항목, 또는 "chrome" 엔진이면 찍기를 누를 때 보고 있던 항목)의
- * 묶음에 넣는다. 찍는 사이에 다른 항목으로 옮겨 가도 찍은 브라우저의 그룹에 들어간다.
+ * 묶음에 넣는다. 찍는 사이에 다른 항목으로 옮겨 가도 찍은 브라우저의 워크스페이스에 들어간다.
  */
 async function onCaptured(captured, near) {
   const [s] = await addImages([captured.image], { near, source: captured.source, shot: true, full: captured.full });
@@ -3029,14 +3058,14 @@ async function onCaptured(captured, near) {
     `${label(s)} — ${whereOf(s)}에 이미지 항목으로 넣었습니다.${captured.cut ? ' 페이지가 너무 길어 아래쪽은 잘렸습니다.' : ''} (누르면 엽니다)`);
 }
 
-/** 그 항목이 놓인 곳을 말로: 그룹 "결제 개편" 또는 "ultron" 묶음. */
-const whereOf = (s) => (s.group ? `그룹 "${s.group}"` : `"${baseName(s.startCwd)}" 묶음`);
+/** 그 항목이 놓인 곳을 말로: 워크스페이스 "결제 개편" 또는 "ultron" 묶음. */
+const whereOf = (s) => (s.group ? `워크스페이스 "${s.group}"` : `"${baseName(s.startCwd)}" 묶음`);
 
 /** 본창에서 브라우저 화면을 찍어, 찍기를 누를 때 보고 있던 항목의 묶음에 이미지 항목으로 넣는다. */
 async function captureBrowser(full) {
-  // 찍는 것은 지금 보고 있는 항목의 그룹이 쓰는 Chrome이다(그룹이 없으면 공용 프로필의 Chrome).
+  // 찍는 것은 지금 보고 있는 항목의 워크스페이스가 쓰는 Chrome이다(워크스페이스가 없으면 공용 프로필의 Chrome).
   const from = viewing();
-  if (from?.group && !profileOf(from)) return notice('캡처하지 못했습니다', `그룹 "${from.group}"의 Chrome이 열려 있지 않습니다.`);
+  if (from?.group && !profileOf(from)) return notice('캡처하지 못했습니다', `워크스페이스 "${from.group}"의 Chrome이 열려 있지 않습니다.`);
   setStatus('브라우저 화면을 찍는 중…');
   try {
     const captured = await invoke('browser_capture', { full, profile: profileOf(from) });
@@ -3050,7 +3079,7 @@ async function captureBrowser(full) {
 
 /**
  * 캡처한 그림의 원본 페이지를 연다: 그 이미지 항목과 같은 묶음에 사이트 항목으로 연다
- * ("chrome" 엔진이면 그 그룹의 Chrome으로). 그래야 그 그룹의 로그인 상태로 열린다.
+ * ("chrome" 엔진이면 그 워크스페이스의 Chrome으로). 그래야 그 워크스페이스의 로그인 상태로 열린다.
  */
 async function openSourcePage(item, url) {
   try {
@@ -3319,7 +3348,7 @@ function writeState() {
 }
 
 /**
- * 항목을 다시 만들 수 있게 적어 둘 내용: 종류, 폴더, 별칭·그룹·색, 그리고 세션이면 프로필과 이어갈 대화 번호,
+ * 항목을 다시 만들 수 있게 적어 둘 내용: 종류, 폴더, 별칭·워크스페이스·색, 그리고 세션이면 프로필과 이어갈 대화 번호,
  * 그 밖의 항목이면 그 화면이 내놓은 상태. 배치 기억(writeState)과 닫은 항목 목록이 함께 쓴다.
  */
 function describe(s) {
@@ -3340,7 +3369,7 @@ function describe(s) {
 
 /** describe()로 적어 둔 내용으로 항목을 다시 만든다. `opts`는 newSession·newItem에 그대로 더해진다(show, restoring 등). */
 function revive(item, opts = {}) {
-  // 그룹 없이 적혀 있던 것(이전 버전에서 그룹 없이 쓰던 것, 그때 닫은 항목)은 `root` 그룹에 넣는다. 그룹 밖에는 아무것도 둘 수 없다.
+  // 워크스페이스 없이 적혀 있던 것(이전 버전에서 워크스페이스 없이 쓰던 것, 그때 닫은 항목)은 `root` 워크스페이스에 넣는다. 워크스페이스 밖에는 아무것도 둘 수 없다.
   const common = { cwd: item.cwd, name: item.name, color: item.color, mark: item.mark, ...opts, group: opts.group || item.group || adoptGroup() };
   // 종류 표시가 없는 예전 기록은 터미널 세션이다.
   const term = !item.kind || item.kind === 'term';
@@ -3393,7 +3422,7 @@ async function restore({ docsOnly = false } = {}) {
   const target = alive[saved.active] || alive.find(Boolean);
   if (target) activate(target); else render();
   const resting = restored.filter((s) => s?.dormant).length;
-  if (resting) setStatus(`지난 세션 ${resting}개는 쉬고 있습니다. 사이드바에서 세션을 누르거나 묶음 머리의 ▶를 누르면 재개합니다.`);
+  if (resting) setStatus(`지난 세션 ${resting}개는 쉬고 있습니다. 사이드바에서 세션을 누르거나 워크스페이스 머리의 ▶를 누르면 재개합니다.`);
 }
 
 // ───────────────────────── 입력 ─────────────────────────

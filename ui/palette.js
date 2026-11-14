@@ -1,6 +1,6 @@
 // 빠른 이동(Ctrl+Shift+K): 사이드바의 항목과 앱의 명령을 글자로 찾아 바로 간다.
 //
-// 항목이 많아지면 사이드바에서 눈으로 찾기 어렵다. 이름·별칭·그룹·폴더의 일부나 초성("ㄱㅈ" → "결제")을 치고
+// 항목이 많아지면 사이드바에서 눈으로 찾기 어렵다. 이름·별칭·워크스페이스·폴더의 일부나 초성("ㄱㅈ" → "결제")을 치고
 // ↑/↓로 고른 뒤 Enter를 누른다. 아무것도 치지 않으면 최근에 본 항목이 위에 오므로, 열자마자 Enter를 누르면
 // 바로 전에 보던 항목으로 돌아간다.
 
@@ -87,7 +87,7 @@ export function showPalette() {
   const { make, openPopup } = api;
   const entries = api.entries();
   const input = make('input', 'palette-input');
-  Object.assign(input, { spellcheck: false, autocomplete: 'off', placeholder: '항목 이름·그룹·폴더, 또는 할 일을 치세요 (초성도 됩니다: ㄱㅈ → 결제)' });
+  Object.assign(input, { spellcheck: false, autocomplete: 'off', placeholder: '항목 이름·워크스페이스·폴더, 또는 할 일을 치세요 (초성도 됩니다: ㄱㅈ → 결제)' });
   const list = make('div', 'palette-list');
   const hint = make('p', 'note palette-hint', '↑/↓: 고르기 · Enter: 가기 · Esc: 닫기');
   let hits = [];

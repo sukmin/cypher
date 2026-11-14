@@ -7,9 +7,9 @@
 //!
 //! - 디버깅 포트를 열지 않는다. 이 프로세스와 브라우저만 아는 파이프로만 통신한다.
 //! - 프로필은 Cypher 전용으로 따로 둔다(사용자의 평소 프로필은 건드리지 않는다. Chrome 136부터는 기본 프로필에서
-//!   원격 조작이 막혀 있기도 하다). 브라우저는 그룹마다 따로 띄우고 프로필도 그룹마다 다르다
-//!   (`%LOCALAPPDATA%\cypher\chrome-profiles\<그룹의 프로필 번호>`). 그래서 한 그룹의 Claude 세션은 다른 그룹의
-//!   브라우저를 조작할 수 없고, 로그인 상태도 그룹끼리 섞이지 않는다. 그룹이 없는 곳에서 사용자가 띄운 브라우저는
+//!   원격 조작이 막혀 있기도 하다). 브라우저는 워크스페이스마다 따로 띄우고 프로필도 워크스페이스마다 다르다
+//!   (`%LOCALAPPDATA%\cypher\chrome-profiles\<워크스페이스의 프로필 번호>`). 그래서 한 워크스페이스의 Claude 세션은 다른 워크스페이스의
+//!   브라우저를 조작할 수 없고, 로그인 상태도 워크스페이스끼리 섞이지 않는다. 워크스페이스가 없는 곳에서 사용자가 띄운 브라우저는
 //!   `chrome-profile`을 쓰며, Claude 세션은 그것을 조작할 수 없다.
 //! - Cypher가 끝나 파이프가 닫히면 이 브라우저들도 함께 끝난다.
 //!
@@ -32,7 +32,7 @@ type Pending = Arc<Mutex<HashMap<u64, Sender<Result<Value, String>>>>>;
 
 /// 띄워 둔 브라우저 하나.
 pub struct Chrome {
-    /// 이 브라우저가 쓰는 프로필의 번호(그룹마다 다르다. 그룹이 없으면 빈 글).
+    /// 이 브라우저가 쓰는 프로필의 번호(워크스페이스마다 다르다. 워크스페이스가 없으면 빈 글).
     key: String,
     child: Mutex<Child>,
     writer: Mutex<File>,
@@ -74,7 +74,7 @@ pub fn find_browser(configured: &str) -> Result<PathBuf, String> {
         .ok_or_else(|| "Chrome·Edge·Chromium·Brave를 찾지 못했습니다. 설치하거나 설정 파일의 [browser] chrome_path에 실행 파일 경로를 적어 주세요.".to_string())
 }
 
-/// 그 프로필 번호의 브라우저가 쓸 폴더. 번호가 비어 있으면(그룹 없음) 예전부터 쓰던 `chrome-profile`.
+/// 그 프로필 번호의 브라우저가 쓸 폴더. 번호가 비어 있으면(워크스페이스 없음) 예전부터 쓰던 `chrome-profile`.
 fn profile_dir(key: &str) -> Result<PathBuf, String> {
     let base = crate::data_dir().ok_or("데이터 폴더를 찾지 못했습니다")?;
     let dir = if key.is_empty() { base.join("chrome-profile") } else { base.join("chrome-profiles").join(crate::site::profile_key(key)?) };
@@ -433,7 +433,7 @@ pub fn open(key: &str, configured_path: &str, home: &str, url: Option<&str>) -> 
     let program = find_browser(configured_path)?;
     let profile = profile_dir(key)?;
     if profile_in_use(&profile) {
-        return Err("이 그룹의 Cypher 전용 프로필로 띄운 브라우저가 이미 떠 있습니다(다른 Cypher 창이 띄운 것일 수 있습니다). \
+        return Err("이 워크스페이스의 Cypher 전용 프로필로 띄운 브라우저가 이미 떠 있습니다(다른 Cypher 창이 띄운 것일 수 있습니다). \
                     그 브라우저 창을 모두 닫은 뒤 다시 해 보세요."
             .into());
     }
@@ -485,7 +485,7 @@ pub fn cdp_on(key: &str, session: &str, method: &str, params: Value) -> Result<V
     running(key).ok_or("브라우저가 열려 있지 않습니다")?.send(method, params, Some(session))
 }
 
-/// 떠 있는 브라우저(어느 그룹의 것이든)의 Chromium 버전(예: 157.0.8103.52). 떠 있는 것이 없으면 None.
+/// 떠 있는 브라우저(어느 워크스페이스의 것이든)의 Chromium 버전(예: 157.0.8103.52). 떠 있는 것이 없으면 None.
 pub fn running_version() -> Option<String> {
     let any = CHROMES.lock().unwrap().values().next().cloned()?;
     let reply = any.send_within("Browser.getVersion", json!({}), None, PROBE_TIMEOUT).ok()?;

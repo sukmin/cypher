@@ -1,14 +1,14 @@
-// 사이트 항목(사이드바의 브라우저): 웹 페이지를 그 항목의 창 안에서 본다. 같은 그룹의 Claude 세션이 조작할 수 있다.
+// 사이트 항목(사이드바의 브라우저): 웹 페이지를 그 항목의 창 안에서 본다. 같은 워크스페이스의 Claude 세션이 조작할 수 있다.
 //
 // 페이지는 화면 요소가 아니라 본창에 덧붙인 웹뷰다(많은 사이트가 iframe으로 끼워 넣는 것을 막기 때문).
 // 여기서는 그 웹뷰가 놓일 자리(빈 칸)만 만들고, 자리의 위치·크기를 앱에 알려 웹뷰를 그 위에 겹쳐 놓게 한다.
 // 웹뷰는 화면 요소보다 항상 위에 그려지므로, 메뉴·대화상자가 열리거나 무언가를 끄는 동안에는 잠시 숨긴다.
 
 // { invoke, listen, make, setStatus, showMenu, captured(찍은 그림, 이 항목), zoom(), claudes(항목), controller(항목), handoff(항목, 세션),
-//   profile(항목) → 그 항목의 그룹이 쓰는 브라우저 프로필의 번호(그룹이 없으면 빈 글) }
+//   profile(항목) → 그 항목의 워크스페이스가 쓰는 브라우저 프로필의 번호(워크스페이스가 없으면 빈 글) }
 //
-// 로그인 상태는 같은 그룹의 사이트 항목끼리만 함께 쓴다(그룹마다 브라우저 프로필이 따로다).
-// 항목이 다른 그룹으로 옮겨지면 웹뷰를 닫고 새 그룹의 프로필로 다시 연다(보던 주소는 그대로, 로그인 상태는 새 그룹의 것).
+// 로그인 상태는 같은 워크스페이스의 사이트 항목끼리만 함께 쓴다(워크스페이스마다 브라우저 프로필이 따로다).
+// 항목이 다른 워크스페이스로 옮겨지면 웹뷰를 닫고 새 워크스페이스의 프로필로 다시 연다(보던 주소는 그대로, 로그인 상태는 새 워크스페이스의 것).
 let api = null;
 const BOOKMARKS_KEY = 'cypher.bookmarks';
 const views = new Map(); // 항목 번호 → { sync, changed }
@@ -72,8 +72,8 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
 
   /**
    * 이 항목이 써야 하는 프로필을 앱에 알린다. 앱은 다른 프로필로 뜬 웹뷰를 닫고, 그 뒤로는 이 프로필로만 만든다
-   * (Claude의 도구 호출이 옛 그룹의 프로필을 들고 뒤늦게 와도 받지 않는다).
-   * 알리는 일은 앞의 것이 끝난 뒤에 보낸다: 그룹을 연달아 옮겼을 때 늦게 보낸 것이 먼저 처리되면 앱이 옛 프로필로 알게 된다.
+   * (Claude의 도구 호출이 옛 워크스페이스의 프로필을 들고 뒤늦게 와도 받지 않는다).
+   * 알리는 일은 앞의 것이 끝난 뒤에 보낸다: 워크스페이스를 연달아 옮겼을 때 늦게 보낸 것이 먼저 처리되면 앱이 옛 프로필로 알게 된다.
    * 돌려주는 약속은 앱이 여기까지 알게 된 때 끝난다.
    */
   function tell(profile) {
@@ -133,12 +133,12 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
     const by = api.controller(item);
     $claude.textContent = by ? `Claude: ${by}` : 'Claude에게';
     $claude.classList.toggle('on', !!by);
-    $claude.title = `${by ? `"${by}" 세션이 조작 중 · ` : ''}같은 그룹의 Claude 세션에 넘기기`
+    $claude.title = `${by ? `"${by}" 세션이 조작 중 · ` : ''}같은 워크스페이스의 Claude 세션에 넘기기`
       + ' · 오른쪽 클릭: 세션 고르기·새 세션';
     $home.title = home ? `처음 간 주소로: ${home}` : '처음 간 주소로';
   }
 
-  /** 이 브라우저를 Claude 세션에 넘긴다. 같은 그룹에 세션이 하나면 바로, 여러 개면(또는 `choose`) 골라서 넘긴다. */
+  /** 이 브라우저를 Claude 세션에 넘긴다. 같은 워크스페이스에 세션이 하나면 바로, 여러 개면(또는 `choose`) 골라서 넘긴다. */
   function handoff(ev, choose) {
     const pool = api.claudes(item);
     if (!pool.length && !choose) return api.handoff(item, null);
@@ -231,7 +231,7 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
     const now = visible ? `${bounds.x},${bounds.y},${bounds.width},${bounds.height}` : 'hidden';
     const profile = api.profile(item);
     tell(profile);
-    // 그룹이 바뀌어 프로필이 달라졌으면 다시 연다(보이는 중이면 아래에서 바로, 아니면 다시 보일 때).
+    // 워크스페이스가 바뀌어 프로필이 달라졌으면 다시 연다(보이는 중이면 아래에서 바로, 아니면 다시 보일 때).
     if (opened && profile !== openedProfile) {
       opened = false;
       last = '';
@@ -239,7 +239,7 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
     if (!opened) {
       if (!visible || opening) return;
       // 같은 프로필·주소로 열다가 실패했으면 다시 열지 않고 오류 글을 그대로 둔다(해석할 수 없는 주소처럼 되지 않을 일을
-      // 화면을 그릴 때마다 되풀이하게 된다). 주소를 다시 치거나 그룹(프로필)이 바뀌면 다시 해 본다.
+      // 화면을 그릴 때마다 되풀이하게 된다). 주소를 다시 치거나 워크스페이스(프로필)이 바뀌면 다시 해 본다.
       const sent = (wanted ?? url) || 'about:blank';
       const attempt = `${profile}\n${sent}`;
       if (failed) {
@@ -252,10 +252,10 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
       let typed = null;
       try {
         await told; // 앞서 알린 프로필이 앱에 닿은 뒤에 연다.
-        // 기다리는 사이에 그룹이 또 바뀌었으면 이번에는 열지 않는다(아래의 syncSites가 새 프로필로 다시 온다).
+        // 기다리는 사이에 워크스페이스가 또 바뀌었으면 이번에는 열지 않는다(아래의 syncSites가 새 프로필로 다시 온다).
         if (!disposed && !retold) {
           const at = await invoke('site_open', { id, url: sent, ...bounds, profile });
-          // 여는 사이에 다른 프로필을 알렸다면(그룹을 연달아 옮김) 앱이 이 웹뷰를 닫았을 수 있다.
+          // 여는 사이에 다른 프로필을 알렸다면(워크스페이스를 연달아 옮김) 앱이 이 웹뷰를 닫았을 수 있다.
           // 열린 것으로 치지 않고 지금의 프로필로 다시 연다(같은 프로필의 웹뷰가 남아 있으면 앱은 그것을 그대로 쓴다).
           if (!retold) {
             setUrl(at);
@@ -268,7 +268,7 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
           }
         }
       } catch (err) {
-        // 여는 사이에 다른 프로필을 알렸다면 그 때문에 거절된 것일 수 있다(그룹이 옮겨졌다). 기억하지 않고 지금의 프로필로 다시 연다.
+        // 여는 사이에 다른 프로필을 알렸다면 그 때문에 거절된 것일 수 있다(워크스페이스가 옮겨졌다). 기억하지 않고 지금의 프로필로 다시 연다.
         if (!retold) {
           failed = { attempt, note: `페이지를 열지 못했습니다: ${err} (주소 칸에서 Enter를 누르면 다시 시도합니다)` };
           $note.textContent = failed.note;
@@ -279,7 +279,7 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
       if (disposed) invoke('site_close', { id });
       else {
         if (typed != null) go(typed);
-        syncSites(); // 여는 사이에 자리나 그룹이 바뀌었을 수 있다.
+        syncSites(); // 여는 사이에 자리나 워크스페이스가 바뀌었을 수 있다.
       }
       return;
     }

@@ -1,10 +1,10 @@
-//! Claude 세션에 Cypher 도구(브라우저 조작, HTTP 요청, 같은 그룹의 항목 보기, 마인드맵·메모·할 일 쓰기,
+//! Claude 세션에 Cypher 도구(브라우저 조작, HTTP 요청, 같은 워크스페이스의 항목 보기, 마인드맵·메모·할 일 쓰기,
 //! 이미지·문서·표 항목 놓기, 명령 항목의 출력 읽기, 사용자에게 알리기)를 내주는 MCP 서버.
 //!
 //! Claude Code는 전달 프로그램(`cypher-bridge mcp`)을 MCP 서버로 띄우고, 전달 프로그램은
 //! 받은 줄을 그대로 이 앱으로 넘긴다. 여기서는 한 줄에 하나씩 오는 JSON-RPC 요청에 답한다.
 //!
-//! 사이드바의 항목과 그룹은 화면 쪽이 알고 있으므로, 그것이 필요한 도구는 화면에 물어서 답한다(`ask_ui`).
+//! 사이드바의 항목과 워크스페이스는 화면 쪽이 알고 있으므로, 그것이 필요한 도구는 화면에 물어서 답한다(`ask_ui`).
 
 use crate::browser;
 use serde_json::{json, Value};
@@ -16,11 +16,11 @@ use std::sync::{mpsc, LazyLock, Mutex};
 use std::time::Duration;
 use tauri::{AppHandle, Emitter, Manager};
 
-const INSTRUCTIONS: &str = "Cypher는 한 업무를 그룹으로 묶어 Claude 세션, 메모, HTTP 요청, 브라우저(사이트), 이미지, \
+const INSTRUCTIONS: &str = "Cypher는 한 업무를 워크스페이스로 묶어 Claude 세션, 메모, HTTP 요청, 브라우저(사이트), 이미지, \
 마인드맵, 문서 항목을 함께 다루는 작업 도구입니다. 이 도구들이 다룰 수 있는 것은 이 세션과 같은 \
-이름 붙인 그룹에 있는 항목뿐입니다: 다른 그룹의 항목, 그룹 없이 있는 항목, 다른 세션(다른 Claude 세션 포함)은 \
-다룰 수 없습니다. 이 세션이 그룹에 속해 있지 않으면 새 항목을 놓는 것만 됩니다. cypher_items로 이 세션과 같은 \
-그룹에 있는 항목과 그 파일 경로·주소를 볼 수 있습니다. browser_* 도구는 같은 그룹의 브라우저(사이트 항목)를 조작하며, 사용자가 \
+이름 붙인 워크스페이스에 있는 항목뿐입니다: 다른 워크스페이스의 항목, 워크스페이스 없이 있는 항목, 다른 세션(다른 Claude 세션 포함)은 \
+다룰 수 없습니다. 이 세션이 워크스페이스에 속해 있지 않으면 새 항목을 놓는 것만 됩니다. cypher_items로 이 세션과 같은 \
+워크스페이스에 있는 항목과 그 파일 경로·주소를 볼 수 있습니다. browser_* 도구는 같은 워크스페이스의 브라우저(사이트 항목)를 조작하며, 사용자가 \
 그 브라우저에서 로그인하고 작업하던 상태를 그대로 이어받습니다. 먼저 browser_read로 지금 페이지를 확인하세요. \
 글자로 파악하기 어려우면 browser_screenshot으로 화면을 보고 browser_click_at으로 좌표를 누를 수 있습니다. \
 조작 중에 페이지가 띄운 확인 창(alert·confirm·prompt)은 Cypher가 바로 닫고(alert는 확인, confirm·prompt는 취소) 그 사실을 \
@@ -36,7 +36,7 @@ doc_show(Markdown·글자 파일을 문서 항목으로 보여 주기), table_sh
 notify_user로 알릴 수 있습니다(응답이 끝날 때의 알림은 Cypher가 알아서 띄우므로, 그때는 쓰지 않습니다).";
 
 /// Write 도구로 만든 파일을 Cypher가 알아서 놓는 설정일 때 덧붙이는 안내.
-const CREATED_NOTE: &str = " Write 도구로 새로 만든 문서(.md, .txt)·SVG 그림·요청 파일(.http)·표 파일(.csv, .tsv)은 Cypher가 알아서 이 세션의 묶음에 \
+const CREATED_NOTE: &str = " Write 도구로 새로 만든 문서(.md, .txt)·SVG 그림·요청 파일(.http)·표 파일(.csv, .tsv)은 Cypher가 알아서 이 세션의 워크스페이스에 \
 항목으로 놓으므로 doc_show나 image_add, table_show를 다시 부를 필요가 없습니다. 다만 숨김 폴더(.git 등)나 빌드 폴더 안의 파일, \
 한 요청에서 8개를 넘는 파일, 명령(Bash 등)으로 만든 파일은 놓이지 않으니, 사용자에게 보여 줄 것이면 doc_show·image_add로 놓으세요.";
 
@@ -66,7 +66,7 @@ type Reply = Result<Value, String>;
 static WAITING: LazyLock<Mutex<HashMap<u64, mpsc::Sender<Reply>>>> = LazyLock::new(Default::default);
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
-/// 화면(본창)에 물어서 답을 받는다: 조작할 사이트 고르기, 같은 그룹의 항목 목록, 마인드맵 쓰기.
+/// 화면(본창)에 물어서 답을 받는다: 조작할 사이트 고르기, 같은 워크스페이스의 항목 목록, 마인드맵 쓰기.
 /// 작업 스레드 전용(창 스레드에서 부르면 답을 받을 수 없다).
 pub fn ask_ui(app: &AppHandle, action: &str, mut payload: Value) -> Reply {
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
@@ -96,9 +96,9 @@ pub fn mcp_reply(id: u64, ok: bool, value: Value) {
 fn workspace_tools() -> Value {
     json!([
         { "name": "cypher_items", "inputSchema": { "type": "object", "properties": {} },
-          "description": "이 Claude 세션과 같은 이름 붙인 그룹(업무 묶음)에 있는 Cypher 항목의 목록: 다른 세션, 메모, HTTP 요청, 브라우저(사이트), 이미지, 마인드맵, ERD, 문서, 할 일, 명령, 표. 이 그룹의 항목만 다룰 수 있고, 다른 세션은 목록에 보이기만 할 뿐 다룰 수 없다. 세션이 그룹에 속해 있지 않으면 목록 대신 그 사실을 알려 준다. 항목마다 이름과 파일 경로(또는 주소)를 돌려준다. 메모·이미지·마인드맵·ERD·할 일·표 파일은 Read 도구로 읽을 수 있고, 브라우저는 browser_* 도구로, HTTP 요청은 http_* 도구로, 명령 항목의 출력은 run_output으로 다룬다. 사용자가 '메모에 적어 둔 것', '캡처한 화면', '할 일 목록', '돌려 둔 시험' 같은 것을 가리키면 먼저 이 도구로 찾는다." },
+          "description": "이 Claude 세션과 같은 이름 붙인 워크스페이스(업무 묶음)에 있는 Cypher 항목의 목록: 다른 세션, 메모, HTTP 요청, 브라우저(사이트), 이미지, 마인드맵, ERD, 문서, 할 일, 명령, 표. 이 워크스페이스의 항목만 다룰 수 있고, 다른 세션은 목록에 보이기만 할 뿐 다룰 수 없다. 세션이 워크스페이스에 속해 있지 않으면 목록 대신 그 사실을 알려 준다. 항목마다 이름과 파일 경로(또는 주소)를 돌려준다. 메모·이미지·마인드맵·ERD·할 일·표 파일은 Read 도구로 읽을 수 있고, 브라우저는 browser_* 도구로, HTTP 요청은 http_* 도구로, 명령 항목의 출력은 run_output으로 다룬다. 사용자가 '메모에 적어 둔 것', '캡처한 화면', '할 일 목록', '돌려 둔 시험' 같은 것을 가리키면 먼저 이 도구로 찾는다." },
         { "name": "todo_write",
-          "description": "할 일 항목(체크 목록)을 만들거나 고친다. id를 생략하면 이 세션의 그룹에 새 할 일 항목을 만들고, id를 주면(cypher_items가 준 번호) 그 목록의 끝에 덧붙이며, mode가 \"replace\"이면 내용을 통째로 바꾼다. text는 Markdown 체크 목록이다: 할 일은 '- [ ] 할 일', 끝낸 일은 '- [x] 끝낸 일', 하위 일은 두 칸씩 들여쓴다. 첫 줄에 '# 제목'을, 사이에 '## 구역'을 둘 수 있고, 그 밖의 줄은 설명으로 보인다. 답으로 할 일마다 번호를 붙인 목록을 돌려준다. 일을 끝냈을 때는 이 도구로 다시 쓰지 말고 todo_check로 체크한다.",
+          "description": "할 일 항목(체크 목록)을 만들거나 고친다. id를 생략하면 이 세션의 워크스페이스에 새 할 일 항목을 만들고, id를 주면(cypher_items가 준 번호) 그 목록의 끝에 덧붙이며, mode가 \"replace\"이면 내용을 통째로 바꾼다. text는 Markdown 체크 목록이다: 할 일은 '- [ ] 할 일', 끝낸 일은 '- [x] 끝낸 일', 하위 일은 두 칸씩 들여쓴다. 첫 줄에 '# 제목'을, 사이에 '## 구역'을 둘 수 있고, 그 밖의 줄은 설명으로 보인다. 답으로 할 일마다 번호를 붙인 목록을 돌려준다. 일을 끝냈을 때는 이 도구로 다시 쓰지 말고 todo_check로 체크한다.",
           "inputSchema": { "type": "object", "properties": {
               "id": { "type": "integer", "description": "고칠 할 일 항목의 번호. 생략하면 새로 만든다." },
               "title": { "type": "string", "description": "사이드바에 보일 이름(별칭). 생략하면 글의 '# 제목'(없으면 '할 일')이 이름이 된다." },
@@ -119,21 +119,21 @@ fn workspace_tools() -> Value {
               "lines": { "type": "integer", "description": "읽을 줄 수(끝에서부터). 기본 80, 400까지." } },
             "required": ["id"] } },
         { "name": "mindmap_write",
-          "description": "마인드맵 항목을 만들거나 고친다. id를 주면(cypher_items가 준 번호) 그 항목의 내용을 바꾸고, 생략하면 이 세션의 그룹에 새로 만든다. text는 개요 글이다: 첫 줄은 '# 중심 주제', 그 아래 가지는 '- 가지', 하위 가지는 두 칸씩 들여쓴 '- 하위 가지'. 글 없는 가지는 '-'만 적는다. 줄 끝에 {#e06c75}처럼 색을, {fold}로 접힘을, {flag-red p1 ✅}처럼 표식을 붙일 수 있다. 표식: flag-·star- 뒤에 red/orange/yellow/green/blue/purple/gray(깃발·별), p1~p7(순위), task-0/25/50/75/100(진행), 이모지 ✅ ❌ ❗ ❓ ⚠️ 💡 🔥 📌 👍 👎 ❤️ 🎯 ⏰ 🤝 🔒 🐞 🚀 💰 👀 🙂 😟.",
+          "description": "마인드맵 항목을 만들거나 고친다. id를 주면(cypher_items가 준 번호) 그 항목의 내용을 바꾸고, 생략하면 이 세션의 워크스페이스에 새로 만든다. text는 개요 글이다: 첫 줄은 '# 중심 주제', 그 아래 가지는 '- 가지', 하위 가지는 두 칸씩 들여쓴 '- 하위 가지'. 글 없는 가지는 '-'만 적는다. 줄 끝에 {#e06c75}처럼 색을, {fold}로 접힘을, {flag-red p1 ✅}처럼 표식을 붙일 수 있다. 표식: flag-·star- 뒤에 red/orange/yellow/green/blue/purple/gray(깃발·별), p1~p7(순위), task-0/25/50/75/100(진행), 이모지 ✅ ❌ ❗ ❓ ⚠️ 💡 🔥 📌 👍 👎 ❤️ 🎯 ⏰ 🤝 🔒 🐞 🚀 💰 👀 🙂 😟.",
           "inputSchema": { "type": "object", "properties": {
               "id": { "type": "integer", "description": "고칠 마인드맵 항목의 번호. 생략하면 새로 만든다." },
               "title": { "type": "string", "description": "사이드바에 보일 이름(별칭). 생략하면 중심 주제가 이름이 된다." },
               "text": { "type": "string", "description": "개요 형식의 내용" } },
             "required": ["text"] } },
         { "name": "erd_write",
-          "description": "ERD(개체 관계도) 항목을 만들거나 고친다. id를 주면(cypher_items가 준 번호) 그 항목의 내용을 통째로 바꾸고, 생략하면 이 세션의 그룹에 새로 만든다. text는 Mermaid의 erDiagram 표기다: 첫 줄 'erDiagram', 관계는 'CUSTOMER ||--o{ ORDER : \"주문한다\"'(왼쪽 끝 || |o }o }| , 오른쪽 끝 || o| o{ |{ , 선은 --(식별) 또는 ..(비식별)), 개체는 'CUSTOMER {' 다음 줄부터 '자료형 이름 PK,FK,UK \"설명\"' 한 줄씩, '}'로 닫는다. 개체 이름에 보일 이름을 따로 주려면 'CUSTOMER[\"고객\"] {'. 맨 위에 '---' / 'title: 제목' / '---'로 제목을, 'direction LR'로 방향(TB·LR)을 줄 수 있다. %%로 시작하는 줄은 주석이다. Cypher가 직접 읽어 그리므로 이 밖의 Mermaid 문법(다른 그림 종류, 스타일 지정 등)은 쓰지 않는다.",
+          "description": "ERD(개체 관계도) 항목을 만들거나 고친다. id를 주면(cypher_items가 준 번호) 그 항목의 내용을 통째로 바꾸고, 생략하면 이 세션의 워크스페이스에 새로 만든다. text는 Mermaid의 erDiagram 표기다: 첫 줄 'erDiagram', 관계는 'CUSTOMER ||--o{ ORDER : \"주문한다\"'(왼쪽 끝 || |o }o }| , 오른쪽 끝 || o| o{ |{ , 선은 --(식별) 또는 ..(비식별)), 개체는 'CUSTOMER {' 다음 줄부터 '자료형 이름 PK,FK,UK \"설명\"' 한 줄씩, '}'로 닫는다. 개체 이름에 보일 이름을 따로 주려면 'CUSTOMER[\"고객\"] {'. 맨 위에 '---' / 'title: 제목' / '---'로 제목을, 'direction LR'로 방향(TB·LR)을 줄 수 있다. %%로 시작하는 줄은 주석이다. Cypher가 직접 읽어 그리므로 이 밖의 Mermaid 문법(다른 그림 종류, 스타일 지정 등)은 쓰지 않는다.",
           "inputSchema": { "type": "object", "properties": {
               "id": { "type": "integer", "description": "고칠 ERD 항목의 번호. 생략하면 새로 만든다." },
               "title": { "type": "string", "description": "사이드바에 보일 이름(별칭). 생략하면 글의 title(없으면 'ERD')이 이름이 된다." },
               "text": { "type": "string", "description": "erDiagram 표기의 내용" } },
             "required": ["text"] } },
         { "name": "memo_write",
-          "description": "메모 항목을 만들거나 고친다. id를 생략하면 이 세션의 그룹에 새 메모를 만들어 사이드바에 놓는다(사용자에게 남길 정리·할 일·결과 요약에 쓴다). id를 주면(cypher_items가 준 번호) 그 메모의 끝에 덧붙이고, mode가 \"replace\"이면 내용을 통째로 바꾼다(바꾸기 전 글은 Cypher가 30일 동안 보관한다). 메모는 서식 없는 글자 편집기다.",
+          "description": "메모 항목을 만들거나 고친다. id를 생략하면 이 세션의 워크스페이스에 새 메모를 만들어 사이드바에 놓는다(사용자에게 남길 정리·할 일·결과 요약에 쓴다). id를 주면(cypher_items가 준 번호) 그 메모의 끝에 덧붙이고, mode가 \"replace\"이면 내용을 통째로 바꾼다(바꾸기 전 글은 Cypher가 30일 동안 보관한다). 메모는 서식 없는 글자 편집기다.",
           "inputSchema": { "type": "object", "properties": {
               "id": { "type": "integer", "description": "고칠 메모 항목의 번호. 생략하면 새로 만든다." },
               "title": { "type": "string", "description": "사이드바에 보일 이름(별칭). 생략하면 첫 줄이 이름이 된다." },
@@ -141,19 +141,19 @@ fn workspace_tools() -> Value {
               "mode": { "type": "string", "enum": ["append", "replace"], "description": "id를 줬을 때만: append(끝에 덧붙이기, 기본) 또는 replace(통째로 바꾸기)" } },
             "required": ["text"] } },
         { "name": "image_add",
-          "description": "이 컴퓨터의 그림 파일을 이 세션의 그룹에 이미지 항목으로 넣어 사용자가 사이드바에서 볼 수 있게 한다(만든 도표, 찍은 화면, 비교 그림 등). 그림은 Cypher 저장소로 복사되므로 원본을 지워도 남는다. 형식: PNG, JPEG, GIF, WebP, BMP, SVG, AVIF, ICO.",
+          "description": "이 컴퓨터의 그림 파일을 이 세션의 워크스페이스에 이미지 항목으로 넣어 사용자가 사이드바에서 볼 수 있게 한다(만든 도표, 찍은 화면, 비교 그림 등). 그림은 Cypher 저장소로 복사되므로 원본을 지워도 남는다. 형식: PNG, JPEG, GIF, WebP, BMP, SVG, AVIF, ICO.",
           "inputSchema": { "type": "object", "properties": {
               "path": { "type": "string", "description": "그림 파일의 절대 경로" },
               "title": { "type": "string", "description": "사이드바에 보일 이름. 생략하면 파일 이름." } },
             "required": ["path"] } },
         { "name": "doc_show",
-          "description": "이 컴퓨터의 Markdown·글자 파일을 이 세션의 그룹에 문서 항목으로 놓아 사용자가 서식 있는 모습으로 읽을 수 있게 한다(계획서, 보고서, 검토 결과 등). 파일이 바뀌면 문서 화면이 스스로 다시 그리므로, 같은 파일을 고칠 때마다 다시 부를 필요는 없다. 이미 그 파일을 보여 주는 문서 항목이 있으면 새로 만들지 않고 그 항목을 가리킨다.",
+          "description": "이 컴퓨터의 Markdown·글자 파일을 이 세션의 워크스페이스에 문서 항목으로 놓아 사용자가 서식 있는 모습으로 읽을 수 있게 한다(계획서, 보고서, 검토 결과 등). 파일이 바뀌면 문서 화면이 스스로 다시 그리므로, 같은 파일을 고칠 때마다 다시 부를 필요는 없다. 이미 그 파일을 보여 주는 문서 항목이 있으면 새로 만들지 않고 그 항목을 가리킨다.",
           "inputSchema": { "type": "object", "properties": {
               "path": { "type": "string", "description": "보여 줄 파일의 절대 경로" },
               "title": { "type": "string", "description": "사이드바에 보일 이름. 생략하면 파일 이름." } },
             "required": ["path"] } },
         { "name": "table_show",
-          "description": "이 컴퓨터의 CSV·TSV·JSON(배열, 또는 한 줄에 하나씩인 .jsonl) 파일을 이 세션의 그룹에 표 항목으로 놓아 사용자가 표로 보고 정렬하고 거를 수 있게 한다(질의 결과, 집계, 비교표 등). 파일이 바뀌면 표 화면이 스스로 다시 읽으므로, 같은 파일을 고칠 때마다 다시 부를 필요는 없다. 이미 그 파일을 보여 주는 표 항목이 있으면 새로 만들지 않고 그 항목을 가리킨다. 8MB까지.",
+          "description": "이 컴퓨터의 CSV·TSV·JSON(배열, 또는 한 줄에 하나씩인 .jsonl) 파일을 이 세션의 워크스페이스에 표 항목으로 놓아 사용자가 표로 보고 정렬하고 거를 수 있게 한다(질의 결과, 집계, 비교표 등). 파일이 바뀌면 표 화면이 스스로 다시 읽으므로, 같은 파일을 고칠 때마다 다시 부를 필요는 없다. 이미 그 파일을 보여 주는 표 항목이 있으면 새로 만들지 않고 그 항목을 가리킨다. 8MB까지.",
           "inputSchema": { "type": "object", "properties": {
               "path": { "type": "string", "description": "보여 줄 파일의 절대 경로(.csv, .tsv, .json, .jsonl, .ndjson)" },
               "title": { "type": "string", "description": "사이드바에 보일 이름. 생략하면 파일 이름." } },
@@ -190,8 +190,8 @@ fn local_file(given: Option<&str>) -> Result<std::path::PathBuf, String> {
 }
 
 /// HTTP 도구가 가리키는 폴더·파일이 그 세션이 다룰 수 있는 곳인지 확인한다. 다룰 수 있는 것은
-/// 같은 그룹에 있는 HTTP 항목의 요청 폴더와 (그룹에 든 세션이라면) 그 세션을 시작한 폴더의 요청 파일이다.
-/// 그룹이 없는 세션은 HTTP 도구를 쓸 수 없다(화면이 까닭을 돌려준다).
+/// 같은 워크스페이스에 있는 HTTP 항목의 요청 폴더와 (워크스페이스에 든 세션이라면) 그 세션을 시작한 폴더의 요청 파일이다.
+/// 워크스페이스가 없는 세션은 HTTP 도구를 쓸 수 없다(화면이 까닭을 돌려준다).
 fn http_in_scope(app: &AppHandle, session: Option<u32>, name: &str, args: &Value) -> Result<(), String> {
     let reply = ask_ui(app, "http_scope", json!({ "session": session }))?;
     let roots: Vec<String> = reply["folders"].as_array().into_iter().flatten().filter_map(|f| f.as_str().map(str::to_string)).collect();
@@ -206,7 +206,7 @@ fn http_in_scope(app: &AppHandle, session: Option<u32>, name: &str, args: &Value
         return Ok(());
     }
     Err(format!(
-        "이 세션이 다룰 수 있는 요청이 아닙니다: {target}. HTTP 도구는 이 세션을 시작한 폴더와 같은 그룹에 있는 HTTP 항목의 요청 폴더에서만 씁니다(http_list의 folder는 다음 가운데 하나: {}). 요청 파일은 그 폴더 바로 아래나 그 아래의 http, .cypher\\http 폴더에 둡니다.",
+        "이 세션이 다룰 수 있는 요청이 아닙니다: {target}. HTTP 도구는 이 세션을 시작한 폴더와 같은 워크스페이스에 있는 HTTP 항목의 요청 폴더에서만 씁니다(http_list의 folder는 다음 가운데 하나: {}). 요청 파일은 그 폴더 바로 아래나 그 아래의 http, .cypher\\http 폴더에 둡니다.",
         roots.join(", ")
     ))
 }
@@ -382,10 +382,10 @@ mod tests {
 
     #[test]
     fn 만든_파일_안내는_설정이_켜져_있을_때만() {
-        assert!(instructions("known").contains("알아서 이 세션의 묶음에"));
+        assert!(instructions("known").contains("알아서 이 세션의 워크스페이스에"));
         assert!(instructions("all").contains("doc_show·image_add로 놓으세요"));
-        assert!(!instructions("off").contains("알아서 이 세션의 묶음에"));
-        assert!(instructions("off").contains("이름 붙인 그룹"));
+        assert!(!instructions("off").contains("알아서 이 세션의 워크스페이스에"));
+        assert!(instructions("off").contains("이름 붙인 워크스페이스"));
     }
 
     #[test]
