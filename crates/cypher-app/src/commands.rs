@@ -121,6 +121,24 @@ pub async fn pick_folder(start: Option<String>, title: Option<String>) -> Option
     .flatten()
 }
 
+/// 명령 항목에서 실행할 파일(스크립트·실행 파일)을 고른다. 취소하면 None. 고른 파일은 화면이 명령 칸에 채울 뿐 여기서 실행하지 않는다.
+#[tauri::command]
+pub async fn run_pick(start: Option<String>) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("실행할 파일")
+            .add_filter("스크립트·실행 파일", &["ps1", "bat", "cmd", "exe", "py", "js", "ts", "sh"])
+            .add_filter("모든 파일", &["*"]);
+        if let Some(dir) = start.filter(|d| Path::new(d).is_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog.pick_file().map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Claude 세션 ID(UUID) 모양인지. 명령 인자로 넘기기 전에 확인한다.
 fn is_session_id(s: &str) -> bool {
     s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')

@@ -2,6 +2,7 @@
 //
 // - 터미널 창에 놓으면: 파일은 경로를, 글자·링크는 그 글자를 입력한다.
 // - 메모 창에 놓으면: 글자 파일은 그 메모로 연다(글자는 편집기가 직접 받는다).
+// - 대상을 아직 정하지 않은 빈 항목(표·문서·명령·할 일)의 창에 놓으면: 그 파일로 그 항목을 채운다.
 // - 그 밖의 곳(사이드바, 다른 종류의 창, 빈 화면)에 놓으면 항목으로 만든다:
 //   이미지 → 이미지 항목 · 글자 파일·글자 → 메모 · .csv·.tsv → 표 · .http → HTTP · 링크·바로 가기 → 사이트.
 //   사이드바의 묶음(머리나 그 안의 줄)에 놓으면 그 묶음에, 창에 놓으면 그 창 항목의 묶음에 만든다.
@@ -63,6 +64,8 @@ function placeOf(ev) {
   const item = api.itemOfPane(el.closest('.pane'));
   if (item?.kind === 'term') return { zone: 'term', item };
   if (item?.kind === 'memo') return { zone: 'memo', item };
+  // 대상을 아직 정하지 않은 빈 항목(표·문서·명령·할 일)의 창에 놓은 파일은 그 항목이 받는다.
+  if (files && item?.view?.wantsFile?.()) return { zone: 'fill', item };
   if (item) return { zone: 'items', near: item };
   return { zone: 'items' };
 }
@@ -110,6 +113,7 @@ async function onDrop(ev) {
   try {
     if (place.zone === 'term' || place.zone === 'composer') await intoInput(place, data);
     else if (place.zone === 'memo') await intoMemo(place.item, data);
+    else if (place.zone === 'fill') await intoEmpty(place.item, data);
     else await intoItems(data, contextOf(place));
   } catch (err) {
     api.setStatus(`끌어다 놓기 실패: ${err}`);
@@ -166,6 +170,19 @@ async function intoMemo(memo, data) {
     else rest.files.push(file);
   }
   if (rest.files.length) await intoItems(rest, { near: memo });
+}
+
+/**
+ * 대상을 아직 정하지 않은 빈 항목(표·문서·명령·할 일)의 창에 놓음: 첫 파일로 그 항목을 채우고(view.takeFile),
+ * 함께 놓은 나머지 파일은 같은 묶음의 항목으로 만든다. 채우지 못하면(읽을 수 없는 파일 등) 그 항목이 까닭을 알린다.
+ */
+async function intoEmpty(item, data) {
+  const paths = await pathsOf(data.files);
+  const at = paths.findIndex(Boolean);
+  if (at < 0) return api.setStatus('경로가 없는 파일이라 이 항목에 넣을 수 없습니다. 사이드바에 놓으면 항목으로 만들 수 있습니다.');
+  if (!(await item.view.takeFile(paths[at]))) return;
+  const rest = { ...data, files: data.files.filter((_, index) => index !== at) };
+  if (rest.files.length) await intoItems(rest, { near: item });
 }
 
 /** 놓은 자리에서 새 항목이 들어갈 묶음과 폴더. */

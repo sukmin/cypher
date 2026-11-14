@@ -63,52 +63,23 @@ const KINDS = {
   image: { label: '이미지', icon: '▣', hint: '그림 보기(파일·붙여넣기·화면 캡처)', create: createImage },
   mindmap: { label: '마인드맵', icon: '✺', hint: '생각을 가지로 정리 · 그림이나 코드로 작성', create: createMindmap },
   erd: { label: 'ERD', icon: '⊞', hint: '개체 관계도 · erDiagram 글을 그림으로', create: createErd },
-  reader: {
-    label: '문서', icon: '❏', hint: 'Markdown·글자 파일 읽기 · 바뀌면 자동 갱신',
-    create: createReader,
-    // 파일을 먼저 고른다. 고르지 않으면 항목을 만들지 않는다.
-    prepare: async () => {
-      const start = active && sessions.has(active.key) ? active.cwd : folder;
-      const path = await invoke('reader_pick', { start });
-      return path ? { path } : null;
-    },
-  },
+  // 문서·명령·표는 볼 파일이나 실행할 명령을 먼저 묻지 않는다. 빈 항목으로 만들고, 대상은 그 항목의 빈 영역에서 정한다
+  // (파일을 끌어다 놓기, 고르기, 경로 적기 — empty.js).
+  reader: { label: '문서', icon: '❏', hint: 'Markdown·글자 파일 읽기 · 바뀌면 자동 갱신', create: createReader },
   todo: { label: '할 일', icon: '☑', hint: '업무의 체크 목록 · 같은 그룹의 Claude가 채우고 체크', create: createTodo },
-  run: {
-    label: '명령', icon: '▷', hint: '자주 돌리는 명령(시험·빌드·개발 서버)을 단추로 두고 실행 · 성공·실패 표시',
-    create: createRun,
-    // 명령을 먼저 묻는다. 적지 않으면 항목을 만들지 않는다. 사용자가 방금 적은 명령이므로 만들자마자 실행한다.
-    prepare: async (opts) => {
-      const where = opts.cwd || (active && sessions.has(active.key) ? (active.project || active.startCwd) : folder);
-      const command = await ask(`실행할 명령 (PowerShell에서 실행 · 폴더: ${where})`, '예: cargo test');
-      return command ? { command, start: true } : null;
-    },
-  },
-  table: {
-    label: '표', icon: '▤', hint: 'CSV·TSV·JSON 파일을 표로 보기 · 정렬·거르기 · 바뀌면 자동 갱신',
-    create: createTable,
-    // 파일을 먼저 고른다. 고르지 않으면 항목을 만들지 않는다.
-    prepare: async (opts) => {
-      const start = opts.cwd || (active && sessions.has(active.key) ? active.cwd : folder);
-      const path = await invoke('table_pick', { start });
-      return path ? { path } : null;
-    },
-  },
+  run: { label: '명령', icon: '▷', hint: '자주 돌리는 명령(시험·빌드·개발 서버)을 단추로 두고 실행 · 성공·실패 표시', create: createRun },
+  table: { label: '표', icon: '▤', hint: 'CSV·TSV·JSON 파일을 표로 보기 · 정렬·거르기 · 바뀌면 자동 갱신', create: createTable },
 };
 
-/** 그 종류의 항목을 새로 만든다. 종류에 따라 먼저 물어볼 것(볼 파일, 실행할 명령)을 묻는다. */
+/**
+ * 그 종류의 항목을 새로 만든다. 아무것도 묻지 않고 바로 만든다: 볼 파일이나 실행할 명령이 필요한 종류(문서·명령·표)는
+ * 빈 영역으로 뜨고, 사용자가 거기서 파일을 끌어다 놓거나 골라 정한다.
+ */
 async function createKind(kind, opts = {}) {
-  const def = KINDS[kind];
-  if (!def) return null;
-  // 들어갈 그룹을 먼저 정한다(물어본 뒤에 "그룹이 없다"고 하지 않게, 묻는 사이 다른 항목으로 옮겨 가도 그 그룹에 들어가게).
+  if (!KINDS[kind]) return null;
   const group = groupFor(opts);
   if (!group) return null;
-  let { saved } = opts;
-  if (!saved && def.prepare) {
-    saved = await def.prepare(opts);
-    if (!saved) return null;
-  }
-  return newItem(kind, { ...opts, group, saved });
+  return newItem(kind, { ...opts, group });
 }
 
 /** @type {Map<number, object>} 화면용 번호(key) → 항목(터미널 세션, 메모, HTTP …) */
@@ -414,7 +385,7 @@ function setGroupFolder(name, path) {
   if (!name) return;
   if (path) groupFolders[name] = path; else delete groupFolders[name];
   localStorage.setItem('cypher.groupFolders', JSON.stringify(groupFolders));
-  render(); // 묶음 머리의 풍선말을 맞춘다.
+  render(); // 묶음 머리의 폴더 줄과 풍선말을 맞춘다.
   setStatus(path
     ? `그룹 "${name}"의 폴더: ${path} (이 그룹에서 여는 세션은 여기서 시작합니다)`
     : `그룹 "${name}"의 폴더를 풀었습니다. 이 그룹의 세션은 기본 폴더(${folder})에서 시작합니다.`);
@@ -423,6 +394,25 @@ function setGroupFolder(name, path) {
 async function pickGroupFolder(name) {
   const picked = await invoke('pick_folder', { start: groupFolderOf(name) || startFolderHint(), title: `그룹 "${name}"의 세션을 시작할 폴더` });
   if (picked) setGroupFolder(name, picked);
+}
+
+/** 그룹의 폴더 줄의 ▾(또는 경로): 지금 보는 항목의 폴더와 최근에 세션을 시작한 폴더에서 골라 그 그룹의 폴더로 정하거나 푼다. */
+function groupFolderMenu(ev, name) {
+  const own = groupFolderOf(name);
+  const here = active && sessions.has(active.key) ? (active.project || active.startCwd) : '';
+  const seen = new Set([own.toLowerCase()]);
+  const choices = [];
+  for (const [path, note] of [[here, '  (지금 항목)'], ...recentFolders.map((path) => [path, ''])]) {
+    if (!path || seen.has(path.toLowerCase())) continue;
+    seen.add(path.toLowerCase());
+    choices.push({ label: `${baseName(path)}  —  ${path}${note}`, action: () => setGroupFolder(name, path) });
+  }
+  showMenu(ev, [
+    { caption: own ? `그룹 "${name}"의 폴더: ${own}` : `그룹 "${name}"의 폴더: 정하지 않음` },
+    ...choices,
+    { label: '다른 폴더 고르기…', action: () => pickGroupFolder(name) },
+    ...(own ? [{ label: '그룹 폴더 풀기 (기본 폴더에서 시작)', action: () => setGroupFolder(name, '') }] : []),
+  ]);
 }
 
 /** 세션을 시작한 폴더를 최근 폴더 목록 맨 앞에 올린다. */
@@ -1637,7 +1627,7 @@ async function newGroup() {
   if (!fresh) { setStatus(`그룹 "${name}"은(는) 이미 있습니다. 그룹 머리의 +로 세션·항목을 더하세요.`); return name; }
   const picked = await invoke('pick_folder', { start: startFolderHint(), title: `그룹 "${name}"의 세션을 시작할 폴더 (취소: 나중에 정하기)` }).catch(() => null);
   if (picked && groupList.includes(name)) setGroupFolder(name, picked);
-  setStatus(`그룹 "${name}"을(를) 만들었습니다${picked ? ` (폴더: ${picked})` : ' (폴더는 그룹 오른쪽 클릭 → 그룹 폴더 정하기에서 정합니다)'}. 그룹 머리의 +로 세션·항목을 더하세요.`);
+  setStatus(`그룹 "${name}"을(를) 만들었습니다${picked ? ` (폴더: ${picked})` : ' (폴더는 그룹 이름 아래의 폴더 줄에서 정합니다)'}. 그룹 머리의 +로 세션·항목을 더하세요.`);
   return name;
 }
 
@@ -1683,21 +1673,30 @@ async function renameGroup(group) {
 }
 
 /**
- * 그룹을 없앤다. 빈 그룹만 없앨 수 있다: 항목은 그룹 밖에 둘 수 없으므로, 항목이 남아 있으면 먼저 닫거나 다른 그룹으로 옮겨야 한다.
- * 없앴으면 참.
+ * 그룹을 없앤다. 항목은 그룹 밖에 둘 수 없으므로, 세션·항목이 남아 있으면 물어보고 모두 닫은 뒤에 없앤다.
+ * 닫기를 취소한 항목(저장하지 않은 메모 등)이 남으면 그룹을 그대로 둔다. 없앴으면 참.
  */
-function deleteGroup(group) {
-  const left = membersOf(group.name).length;
-  if (left) {
-    notice('그룹을 지울 수 없습니다', `그룹 "${group.name}"에 항목이 ${left}개 있습니다. 항목은 그룹 밖에 둘 수 없으니, 먼저 닫거나(그룹 오른쪽 클릭 → 모두 닫기) 다른 그룹으로 옮긴 뒤에 지우세요.`);
-    return false;
+async function deleteGroup(group) {
+  const members = membersOf(group.name);
+  if (members.length) {
+    const running = members.filter((s) => isTerm(s) && !s.dormant && !s.exited).length;
+    if (!confirm(`그룹 "${group.name}"에 세션·항목이 ${members.length}개 있습니다${running ? ` (실행 중인 세션 ${running}개)` : ''}.\n모두 닫고 그룹을 삭제할까요?`)) return false;
+    for (const s of members) await closeSession(s);
+    // 닫는 사이 취소한 항목이나 새로 생긴 항목이 있으면 그룹을 남긴다.
+    const left = membersOf(group.name).length;
+    if (left) {
+      notice('그룹을 지우지 않았습니다', `그룹 "${group.name}"에 닫지 않은 항목이 ${left}개 남아 있습니다. 그 항목을 닫거나 다른 그룹으로 옮긴 뒤에 다시 지우세요.`);
+      return false;
+    }
   }
   groupList = groupList.filter((g) => g !== group.name);
   saveGroups();
   delete groupFolders[group.name];
   localStorage.setItem('cypher.groupFolders', JSON.stringify(groupFolders));
   render();
-  setStatus(`그룹 "${group.name}"을(를) 지웠습니다.`);
+  setStatus(members.length
+    ? `그룹 "${group.name}"을(를) 지웠습니다 (세션·항목 ${members.length}개를 닫음 · 다시 열기: Ctrl+Shift+R).`
+    : `그룹 "${group.name}"을(를) 지웠습니다.`);
   return true;
 }
 
@@ -1856,9 +1855,8 @@ function groupMenu(group, ev) {
     // 그룹 폴더: 이 그룹에서 여는 세션이 시작될 폴더. 정해 두지 않으면 기본 폴더(사용자 폴더)에서 시작한다.
     const own = groupFolderOf(group.name);
     items.push({ label: own ? '그룹 폴더 바꾸기…' : '그룹 폴더 정하기… (이 그룹의 세션이 시작될 폴더)', action: () => pickGroupFolder(group.name) });
-    if (own) items.push({ label: '그룹 폴더 풀기 (기본 폴더에서 시작)', action: () => setGroupFolder(group.name, '') });
     items.push({ label: '그룹 이름 바꾸기', action: () => renameGroup(group) });
-    items.push({ label: all.length ? `그룹 삭제 (항목 ${all.length}개를 먼저 닫거나 옮겨야 함)` : '그룹 삭제', action: () => deleteGroup(whole) });
+    items.push({ label: '그룹 삭제', action: () => deleteGroup(whole) }); // 항목이 남아 있으면 물어보고 모두 닫은 뒤 지운다.
   } else {
     items.push({ label: '이 묶음을 그룹으로 만들기…', action: () => askGroup(all) });
   }
@@ -2023,7 +2021,7 @@ function render() {
       'group', group.logical && 'logical', group.list.some((s) => s.attention || s.waiting) && 'attention',
     ].filter(Boolean).join(' '));
     const ownFolder = group.logical ? groupFolderOf(group.name) : '';
-    head.title = `${group.hint}\n${group.logical ? `그룹 폴더: ${ownFolder || `정하지 않음 (기본 폴더 ${folder}에서 시작)`}\n` : ''}클릭: 접기·펼치기 · 오른쪽 클릭: 메뉴(폴더 정하기 포함) · +: 세션·항목 더하기 · 끌어다 놓기: 이 묶음에 넣기`;
+    head.title = `${group.hint}\n${group.logical ? `그룹 폴더: ${ownFolder || `정하지 않음 (기본 폴더 ${folder}에서 시작)`}\n` : ''}클릭: 접기·펼치기 · 오른쪽 클릭: 메뉴 · +: 세션·항목 더하기 · 끌어다 놓기: 이 묶음에 넣기`;
     head.dataset.drop = group.logical ? 'logical' : 'folder';
     head.dataset.name = group.name;
     // 밖에서 끌어다 놓은 것을 이 묶음의 항목으로 만들 때 쓴다(drop.js).
@@ -2058,7 +2056,24 @@ function render() {
     add.onclick = (ev) => { ev.stopPropagation(); showMenu(ev, addItems(group)); };
     head.append(add);
     head.append(make('span', 'count', String(group.list.length)));
-    // 그룹의 폴더를 고르는 줄은 사이드바에 두지 않는다. 그룹의 폴더는 풍선말에 보이고, 그룹 오른쪽 클릭 메뉴에서 정한다.
+    // 그룹의 폴더 줄: 이름 바로 아래에 그룹 폴더를 그대로 보여 주고 거기서 바로 고른다(접어 두어도 보인다).
+    if (group.logical) {
+      const row = make('div', ownFolder ? 'group-folder' : 'group-folder unset');
+      // 오른쪽 정렬 말줄임에서 글자 순서가 뒤집히지 않도록 방향 표시 문자를 붙인다.
+      const path = make('span', 'path', ownFolder ? '‎' + ownFolder : '폴더를 정하지 않음');
+      path.title = ownFolder
+        ? `그룹 "${group.name}"의 폴더: ${ownFolder}\n이 그룹에서 여는 세션은 여기서 시작합니다.\n클릭·▾: 바꾸기·풀기`
+        : `그룹 "${group.name}"의 폴더를 정하지 않았습니다. 이 그룹의 세션은 이 그룹에 있는 항목의 폴더나 기본 폴더(${folder})에서 시작합니다.\n클릭·▾: 정하기`;
+      const recent = make('button', '', '▾');
+      recent.title = '지금 항목의 폴더·최근 폴더에서 골라 이 그룹의 폴더로 정하기';
+      const pick = make('button', '', '폴더…');
+      pick.title = ownFolder ? '이 그룹의 폴더 바꾸기' : '이 그룹의 폴더 정하기';
+      path.onclick = recent.onclick = (ev) => groupFolderMenu(ev, group.name);
+      pick.onclick = () => pickGroupFolder(group.name);
+      row.onclick = (ev) => ev.stopPropagation(); // 폴더 줄을 눌러도 묶음이 접히지 않게
+      row.append(path, recent, pick);
+      head.append(row);
+    }
     head.onclick = () => {
       if (folded) collapsed.delete(group.key); else collapsed.add(group.key);
       localStorage.setItem('cypher.collapsed', JSON.stringify([...collapsed]));

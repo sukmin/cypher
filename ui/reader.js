@@ -4,6 +4,8 @@
 // 파일 내용은 신뢰할 수 없는 입력으로 다룬다: 글자는 모두 이스케이프하고, 링크는 주소를 속성(data-href)에만
 // 적어 두었다가 눌렀을 때 앱의 링크 열기(link_open)로 넘긴다. 본창이 다른 곳으로 이동하는 일은 없다.
 
+import { emptyZone } from './empty.js';
+
 let api = null; // { invoke, make, setStatus, showMenu, baseName, openMemo(path), toClaude(item, path, ev) }
 
 export function initReader(given) {
@@ -604,11 +606,16 @@ export function createReader(item, host, saved = {}, onChange = () => {}) {
   $find.append(findRow);
 
   const $body = make('div', 'reader-body');
-  const $empty = make('div', 'reader-empty',
-    '[파일 열기]로 Markdown(.md)이나 글자 파일을 고르면 서식 있는 모습으로 보여 줍니다. 파일이 바뀌면 화면도 따라 바뀝니다.');
+  // 볼 파일을 아직 정하지 않은 동안의 빈 영역: 파일을 끌어다 놓거나, 고르거나, 경로를 적는다.
+  const zone = emptyZone(make, {
+    title: '문서로 볼 파일을 여기에 끌어다 놓으세요',
+    hint: 'Markdown(.md)이나 글자 파일을 서식 있는 모습으로 보여 줍니다. 파일이 바뀌면 화면도 따라 바뀝니다.',
+    pick: { label: '파일 고르기…', tip: 'Markdown·글자 파일 고르기 (Ctrl+O)', action: () => pick() },
+    path: { placeholder: '또는 파일 경로를 적고 Enter', action: (given) => open(given) },
+  });
   const $scroll = make('div', 'reader-scroll');
   $scroll.tabIndex = 0;
-  $scroll.append($empty, $body);
+  $scroll.append(zone.node, $body);
   const root = make('div', 'doc reader');
   root.append(bar, $find, $scroll);
   host.append(root);
@@ -626,7 +633,7 @@ export function createReader(item, host, saved = {}, onChange = () => {}) {
     $title.title = path || '문서';
     for (const tool of tools) tool.hidden = !path;
     $back.hidden = !trail.length;
-    $empty.hidden = !!path;
+    zone.node.hidden = !!path;
     $zoom.textContent = `${currentZoom()}%`;
   }
 
@@ -989,13 +996,16 @@ export function createReader(item, host, saved = {}, onChange = () => {}) {
   const timer = setInterval(() => { if (shown && !document.hidden) check(); }, 1500);
 
   function focus() {
-    $scroll.focus({ preventScroll: true });
+    if (path) $scroll.focus({ preventScroll: true }); else zone.focus();
   }
 
   const view = {
     ready: null,
     focus,
     title,
+    /** 볼 파일을 아직 정하지 않았는지(이 창에 끌어다 놓은 파일을 받는다). */
+    wantsFile: () => !path,
+    takeFile: (target) => open(target),
     state: () => ({ path, scroll: Math.round(lastScroll) }),
     close: () => Promise.resolve(true),
     dispose() {

@@ -7,6 +7,8 @@
 // - JSON: 객체의 배열(열 = 키), 배열의 배열, 값의 배열. 객체 하나면 그 안의 첫 배열을 쓰고, 없으면 키·값 두 열로 보인다.
 // - .jsonl·.ndjson: 한 줄에 JSON 하나.
 
+import { emptyZone } from './empty.js';
+
 let api = null; // { invoke, make, setStatus, showMenu, baseName, toClaude(item, path, ev), openMemo(path) }
 
 export function initTable(given) {
@@ -220,11 +222,16 @@ export function createTable(item, host, saved = {}, onChange = () => {}) {
   const $body = make('tbody');
   const $table = make('table', 'tbl');
   $table.append($head, $body);
-  const $empty = make('div', 'reader-empty',
-    '[파일 열기]로 CSV·TSV·JSON 파일을 고르면 표로 보여 줍니다. 열 이름을 누르면 정렬하고, 거르기 칸에 낱말을 적으면 그 낱말이 든 줄만 남깁니다. 파일이 바뀌면 표도 따라 바뀝니다.');
+  // 볼 파일을 아직 정하지 않은 동안의 빈 영역: 파일을 끌어다 놓거나, 고르거나, 경로를 적는다.
+  const zone = emptyZone(make, {
+    title: '표로 볼 파일을 여기에 끌어다 놓으세요',
+    hint: 'CSV·TSV·JSON 파일을 표로 보여 줍니다. 열 이름을 누르면 정렬하고, 거르기 칸에 낱말을 적으면 그 낱말이 든 줄만 남깁니다. 파일이 바뀌면 표도 따라 바뀝니다.',
+    pick: { label: '파일 고르기…', tip: 'CSV·TSV·JSON 파일 고르기 (Ctrl+O)', action: () => pick() },
+    path: { placeholder: '또는 파일 경로를 적고 Enter', action: (given) => takeFile(given) },
+  });
   const $scroll = make('div', 'tbl-scroll');
   $scroll.tabIndex = 0;
-  $scroll.append($empty, $table);
+  $scroll.append(zone.node, $table);
   const $detail = make('div', 'tbl-detail');
   $detail.hidden = true;
   const root = make('div', 'doc tabular');
@@ -245,7 +252,7 @@ export function createTable(item, host, saved = {}, onChange = () => {}) {
     for (const tool of tools) tool.hidden = !path;
     $header.hidden = !path || !table.hasHeaderChoice;
     $header.classList.toggle('on', header);
-    $empty.hidden = !!path;
+    zone.node.hidden = !!path;
     $table.hidden = !path;
     const all = table.rows.length;
     $info.textContent = !loaded ? '' : order.length === all ? `${count(all)}줄 · ${table.columns.length}열` : `${count(order.length)} / ${count(all)}줄 · ${table.columns.length}열`;
@@ -439,7 +446,14 @@ export function createTable(item, host, saved = {}, onChange = () => {}) {
   async function pick() {
     const start = path ? path.replace(/[\\/][^\\/]*$/, '') : item.cwd || null;
     const chosen = await invoke('table_pick', { start });
-    if (chosen && await load(chosen)) focus();
+    if (chosen) await takeFile(chosen);
+  }
+
+  /** 그 파일을 이 항목에서 연다(고른 파일, 적은 경로, 빈 영역에 끌어다 놓은 파일). 열었으면 참. */
+  async function takeFile(target) {
+    const ok = await load(target);
+    if (ok) focus();
+    return ok;
   }
 
   // ── 마우스·키보드 ──
@@ -520,7 +534,7 @@ export function createTable(item, host, saved = {}, onChange = () => {}) {
   const timer = setInterval(() => { if (shown && !document.hidden) check(); }, CHECK_MS);
 
   function focus() {
-    $scroll.focus({ preventScroll: true });
+    if (path) $scroll.focus({ preventScroll: true }); else zone.focus();
   }
 
   refreshBar();
@@ -528,6 +542,9 @@ export function createTable(item, host, saved = {}, onChange = () => {}) {
     ready: path ? load(path).then(() => {}, () => {}) : Promise.resolve(),
     focus,
     title,
+    /** 볼 파일을 아직 정하지 않았는지(이 창에 끌어다 놓은 파일을 받는다). */
+    wantsFile: () => !path,
+    takeFile,
     state: () => ({ path, header, filter, sort }),
     close: () => Promise.resolve(true),
     dispose() {

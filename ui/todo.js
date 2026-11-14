@@ -13,6 +13,8 @@
 //
 // 내용은 글 그대로 자동 저장된다(todo.rs).
 
+import { emptyZone } from './empty.js';
+
 let api = null; // { invoke, make, setStatus, showMenu, toClaude(item, text, ev) }
 
 export function initTodo(given) {
@@ -192,7 +194,14 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
   );
   const $list = make('div', 'todo-list');
   $list.tabIndex = 0;
-  const $empty = make('div', 'reader-empty', '아래 칸에 할 일을 적고 Enter를 누르면 목록에 들어갑니다. 같은 그룹의 Claude 세션에게 "할 일 목록을 만들어 줘"라고 해도 됩니다.');
+  // 할 일이 하나도 없는 동안의 빈 영역: 아래 칸에 적거나, 체크 목록이 든 파일을 끌어다 놓거나 골라 그 내용으로 채운다.
+  const zone = emptyZone(make, {
+    title: '할 일이 없습니다',
+    hint: '아래 칸에 할 일을 적고 Enter를 누르면 목록에 들어갑니다. 같은 그룹의 Claude 세션에게 "할 일 목록을 만들어 줘"라고 해도 됩니다. 체크 목록이 든 Markdown·글자 파일을 여기에 끌어다 놓거나 고르면 그 내용으로 채웁니다(원본 파일은 바뀌지 않습니다).',
+    pick: { label: '파일에서 가져오기…', tip: '체크 목록이 든 Markdown·글자 파일 고르기', action: () => pickFile() },
+    path: { placeholder: '또는 파일 경로를 적고 Enter', action: (given) => takeFile(given) },
+  });
+  const $empty = zone.node;
   const $add = make('input', 'todo-add');
   Object.assign($add, { placeholder: '할 일을 적고 Enter (목록 끝에 더하기)', spellcheck: false, autocomplete: 'off' });
   const $listView = make('div', 'todo-view');
@@ -617,6 +626,40 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
     unread = false;
   }
 
+  /** 비어 있어 파일의 내용으로 채울 수 있는지(저장소를 읽지 못한 동안에는 받지 않는다). */
+  const wantsFile = () => !unread && !text.trim();
+
+  /**
+   * 파일의 글로 목록을 채운다(고른 파일, 적은 경로, 빈 영역에 끌어다 놓은 파일). 원본 파일은 건드리지 않는다.
+   * 체크 목록(- [ ] …)이 든 글은 그대로, 하나도 없는 글은 줄마다 할 일 하나로 읽는다. 채웠으면 참.
+   */
+  async function takeFile(target) {
+    if (!wantsFile()) { setStatus('할 일이 이미 있어 파일에서 가져오지 않았습니다.'); return false; }
+    let file;
+    try {
+      file = await invoke('reader_read', { path: target });
+    } catch (err) {
+      setStatus(`할 일로 가져오지 못했습니다: ${err}`);
+      return false;
+    }
+    if (disposed || !wantsFile()) return false;
+    const source = file.text.replace(/\r\n?/g, '\n').replace(/\n+$/, '');
+    if (!source.trim()) { setStatus('빈 파일이라 가져올 할 일이 없습니다.'); return false; }
+    const body = parseTodo(source).total ? source
+      : source.split('\n').map((line) => (!line.trim() || HEAD.test(line) ? line : `- [ ] ${line.trim()}`)).join('\n');
+    settle();
+    selected = -1;
+    commit(`${body}\n`);
+    setStatus(`"${file.path.split(/[\\/]/).pop()}"에서 할 일 ${model.total}개를 가져왔습니다(원본 파일은 바뀌지 않습니다).`);
+    focus();
+    return true;
+  }
+
+  async function pickFile() {
+    const chosen = await invoke('reader_pick', { start: item.cwd || null }).catch((err) => { setStatus(String(err)); return null; });
+    if (chosen && !disposed) await takeFile(chosen);
+  }
+
   /** Claude에게 돌려줄 지금의 목록: 할 일마다 번호를 붙인다. */
   function listing() {
     if (!model.total) return '(할 일이 없습니다)';
@@ -650,6 +693,8 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
     ready,
     focus: () => { focus(); reload(); },
     title,
+    wantsFile,
+    takeFile,
     state: () => ({ todo: id, code: codeShown, hide: hideDone }),
     /** 저장할 것을 바로 저장한다(앱이 꺼지기 직전). */
     flush: () => { finishEdit(); return flush(); },

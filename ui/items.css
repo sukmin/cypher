@@ -480,6 +480,43 @@ li.attention .dot.kind { background: none; box-shadow: none; color: var(--text);
 .reader-empty { margin: 40px 34px; max-width: 520px; color: var(--dim); line-height: 1.7; }
 .reader-empty[hidden] { display: none; }
 
+/* 빈 항목의 작업 영역(empty.js): 볼 파일이나 실행할 명령을 아직 정하지 않은 항목. 파일을 끌어다 놓거나 고르거나 경로를 적는다. */
+.empty-zone {
+  flex: 1;
+  min-height: 100%;
+  box-sizing: border-box;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  background: var(--bg);
+}
+.empty-zone[hidden] { display: none; }
+.empty-box {
+  width: min(540px, 100%);
+  box-sizing: border-box;
+  padding: 28px 24px;
+  text-align: center;
+  color: var(--dim);
+  line-height: 1.7;
+  border: 2px dashed var(--line);
+  border-radius: 10px;
+}
+/* 파일을 끌고 이 창 위에 올라와 있는 동안 */
+.pane.dropping .empty-box { color: var(--text); border-color: var(--accent); background: var(--select); }
+.empty-title { margin-bottom: 6px; font-size: 14px; font-weight: bold; color: var(--text); }
+.empty-hint { font-size: 12px; }
+.empty-actions { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px; margin-top: 12px; }
+.empty-path { flex: 1; min-width: 160px; height: 24px; padding: 0 6px; font: 12px var(--mono-font); }
+/* 빈 영역이 보이는 동안에는 그 아래의 본문(문서 글, 할 일 목록)이 자리를 차지하지 않는다. */
+.reader-scroll > .empty-zone:not([hidden]) + .reader-body,
+.todo-view > .empty-zone:not([hidden]) + .todo-list { display: none; }
+.todo-view > .empty-zone { min-height: 0; overflow: auto; }
+/* 명령 항목: 출력 화면과 그 위를 덮는 빈 영역 */
+.run-stage { flex: 1; min-height: 0; min-width: 0; position: relative; display: flex; }
+.run-stage > .run-term { min-width: 0; }
+.run-stage > .empty-zone { position: absolute; inset: 0; min-height: 0; overflow: auto; }
+
 /* 글: 읽기 좋은 폭으로 왼쪽에 붙이고 여백을 넉넉히 둔다. 크기는 --reader-size 하나로 함께 커지고 작아진다. */
 .reader-body {
   max-width: 860px;
@@ -569,6 +606,35 @@ li.approval .sub .tool { color: inherit; }
 .sub .repeat { margin-right: 5px; padding: 0 4px; font-weight: normal; color: var(--on-accent); background: var(--busy); border-radius: 6px; }
 :root[data-theme="win32"] #sessions li.active .sub .tool { color: inherit; }
 
+
+/* 그룹의 폴더 줄: 그룹 이름 바로 아래 한 줄을 통째로 써서 그룹 폴더와 고르는 단추(▾, 폴더…)를 둔다. */
+#sessions li.group .group-folder {
+  flex: 0 0 100%; /* 머리의 다른 것들 아래로 내려가 한 줄을 다 쓴다 */
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+  padding-left: 16px; /* 접힘 표시만큼 들여 이름과 줄을 맞춘다 */
+  box-sizing: border-box;
+  font-weight: normal;
+  cursor: default;
+}
+/* 경로는 머리의 글자색을 그대로 써서 또렷하게 보인다. */
+#sessions li.group .group-folder .path {
+  flex: 1;
+  min-width: 0;
+  font: normal 11px/18px var(--mono-font);
+  color: inherit;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  direction: rtl; /* 긴 경로는 끝부분이 보이게 */
+  text-align: left;
+  cursor: pointer;
+}
+#sessions li.group .group-folder .path:hover { text-decoration: underline; }
+#sessions li.group .group-folder.unset .path { direction: ltr; font-family: inherit; opacity: 0.65; }
+#sessions li.group .group-folder button { flex: none; padding: 0 6px; font-size: 11px; line-height: 16px; }
 
 /* ───────── ERD 항목: 왼쪽은 코드(erDiagram 글), 오른쪽은 그림 ───────── */
 

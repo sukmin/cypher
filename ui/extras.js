@@ -448,20 +448,31 @@ function initDiff() {
     else if (ev.key === 'Escape') { ev.preventDefault(); clearPicked(); }
   });
 
-  // 줄 고르기: 누르면 고르고(다시 누르면 풂), Shift+클릭은 기준 줄부터 그 줄까지, 끌면 지나간 줄 모두.
+  // 줄 고르기: Windows의 여러 개 고르기와 같다.
+  //   누르기: 그 줄만 고른다(다른 줄은 풀린다) · Ctrl+누르기: 그 줄을 넣거나 뺀다 · Shift+누르기: 기준 줄부터 그 줄까지만 고른다
+  //   Ctrl+Shift+누르기: 그 범위를 고른 것에 더한다 · 끌기: 지나간 줄만 고른다(Ctrl을 누른 채 끌면 고른 것에 더한다)
+  //   고를 수 없는 곳(파일·구간 머리, 빈 곳)을 누르면 모두 풀린다.
   // 한 줄 안에서 글자를 긁는 것은 글자 선택으로 둔다(복사할 수 있게).
   $view.tabIndex = -1;
   $view.addEventListener('mousedown', (ev) => {
     if (ev.button !== 0) return;
     const index = lineAt(ev.target);
-    if (index == null || !pickable(index)) return;
+    if (index == null || !pickable(index)) {
+      // 스크롤 막대를 누른 것은 빈 곳을 누른 것이 아니다(고른 줄을 둔 채 스크롤할 수 있게).
+      const box = $view.getBoundingClientRect();
+      const onBar = ev.target === $view
+        && (ev.clientX - box.left - $view.clientLeft >= $view.clientWidth || ev.clientY - box.top - $view.clientTop >= $view.clientHeight);
+      if (!onBar && !ev.ctrlKey && !ev.shiftKey && picked.size) clearPicked(false);
+      return;
+    }
     if (ev.shiftKey) {
       ev.preventDefault(); // 글자 선택이 번지지 않게 한다.
       if (pickAnchor == null || !pickable(pickAnchor)) pickAnchor = index;
-      setPicked(withRange(picked, pickAnchor, index));
+      setPicked(withRange(ev.ctrlKey ? picked : new Set(), pickAnchor, index));
       return;
     }
-    pickDrag = { from: index, base: new Set(picked), moved: false };
+    // Ctrl을 누른 채면 이미 고른 줄을 그대로 두고 더한다. 아니면 새로 고른다.
+    pickDrag = { from: index, add: ev.ctrlKey, base: ev.ctrlKey ? new Set(picked) : new Set(), moved: false };
   });
   document.addEventListener('mousemove', (ev) => {
     if (!pickDrag) return;
@@ -661,15 +672,19 @@ function clearPicked(refocus = true) {
   if (refocus && had) $('diff-view').focus();
 }
 
-/** 끌기를 마친다. 움직이지 않았으면 그냥 누른 것이다: 그 줄을 고르거나 푼다. */
+/**
+ * 끌기를 마친다. 움직이지 않았으면 그냥 누른 것이다: 그 줄만 고른다(다른 줄은 풀린다).
+ * Ctrl을 누른 채 눌렀으면 다른 줄은 그대로 두고 그 줄을 넣거나 뺀다.
+ */
 function endPickDrag() {
   if (!pickDrag) return;
-  const { from, moved } = pickDrag;
+  const { from, add, moved } = pickDrag;
   pickDrag = null;
   $('diff-view').classList.remove('picking');
   pickAnchor = from;
   if (moved) return;
   if (!getSelection()?.isCollapsed) return; // 한 줄 안에서 글자를 긁어 골랐다.
+  if (!add) return setPicked(new Set([from]));
   const next = new Set(picked);
   if (next.has(from)) next.delete(from); else next.add(from);
   setPicked(next);

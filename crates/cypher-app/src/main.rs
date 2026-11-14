@@ -404,6 +404,7 @@ fn main() {
             todo::todo_write,
             todo::todo_remove,
             commands::run_start,
+            commands::run_pick,
             reader::table_pick,
             commands::store_dirs,
             closed::closed_restore,

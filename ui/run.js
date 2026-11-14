@@ -4,6 +4,8 @@
 // 끝나면 종료 코드로 성공·실패를 가린다. 세션이 아니므로 셸 프롬프트가 남지 않고, 다시 실행하면 처음부터 돈다.
 // 다시 시작한 뒤에는 명령만 되살리고 스스로 실행하지는 않는다(사용자가 ▶를 눌러야 돈다).
 
+import { emptyZone } from './empty.js';
+
 let api = null; // { invoke, listen, make, setStatus, showMenu, Channel, look(), scrollback, toClaude(item, text, ev), finished(item, info) }
 
 const live = new Map();   // 돌고 있는 프로세스의 번호 → 끝났을 때 부를 함수
@@ -49,7 +51,8 @@ function clock(ms) {
 
 /**
  * 명령 항목의 화면을 host 안에 만든다.
- * saved: { command(명령 한 줄), start(만들자마자 실행할지 — 사용자가 방금 명령을 적어 만든 항목만) }
+ * saved: { command(명령 한 줄), start(만들자마자 실행할지) }
+ * 명령이 없으면 빈 영역으로 시작한다: 위 칸에 명령을 적거나, 실행할 파일을 끌어다 놓거나 고른다.
  */
 export function createRun(item, host, saved = {}, onChange = () => {}) {
   const { invoke, make, setStatus } = api;
@@ -87,8 +90,16 @@ export function createRun(item, host, saved = {}, onChange = () => {}) {
     }),
   );
   const $term = make('div', 'term run-term');
+  // 명령을 아직 정하지 않은 동안의 빈 영역(출력 화면 위를 덮는다): 실행할 파일을 끌어다 놓거나 고르면 명령을 채워 준다.
+  const zone = emptyZone(make, {
+    title: '실행할 명령을 위 칸에 적고 Enter를 누르세요',
+    hint: '스크립트나 실행 파일을 여기에 끌어다 놓거나 아래 단추로 고르면 그 파일을 실행하는 명령을 채워 줍니다. 채운 명령은 ▶ 실행을 눌러야 돕니다.',
+    pick: { label: '실행할 파일 고르기…', tip: '실행할 스크립트·실행 파일 고르기', action: () => pickFile() },
+  });
+  const $stage = make('div', 'run-stage');
+  $stage.append($term, zone.node);
   const box = make('div', 'doc runner'); // `run`은 HTTP 항목의 실행 단추가 쓰는 이름이라 쓰지 않는다.
-  box.append(bar, $term);
+  box.append(bar, $stage);
   host.append(box);
 
   const look = api.look();
@@ -117,7 +128,11 @@ export function createRun(item, host, saved = {}, onChange = () => {}) {
     return code == null ? '시작하지 못함' : `실패 · 종료 코드 ${code} · ${duration(took)}`;
   }
 
+  /** 명령을 아직 정하지 않았는지: 한 번도 실행하지 않았고 명령 칸이 비어 있다. */
+  const blank = () => phase === 'idle' && !$command.value.trim();
+
   function refresh() {
+    zone.node.hidden = !blank();
     $go.textContent = busy() ? '■ 멈춤' : phase === 'idle' ? '▶ 실행' : '▶ 다시 실행';
     $go.title = busy() ? '명령 멈추기 (프로세스를 끝냅니다)' : `이 폴더에서 실행: ${item.cwd} (Ctrl+Enter)`;
     $go.classList.toggle('stop', busy());
@@ -193,6 +208,27 @@ export function createRun(item, host, saved = {}, onChange = () => {}) {
     if (stopping) invoke('session_close', { id }).catch(() => {}); // 띄우는 사이에 멈춤을 눌렀다.
     refresh();
     onChange();
+  }
+
+  /**
+   * 그 파일을 실행하는 명령을 명령 칸에 채운다(고른 파일, 빈 영역에 끌어다 놓은 파일). 실행은 사용자가 ▶를 눌러야 한다.
+   * 빈칸이나 한글이 든 경로는 PowerShell이 글자가 아니라 실행할 것으로 읽게 `& '경로'`로 적는다.
+   */
+  function takeFile(target) {
+    if (busy()) { setStatus('실행 중에는 명령을 바꿀 수 없습니다.'); return false; }
+    const line = /^[\w.:\\/-]+$/.test(target) ? target : `& '${target.replace(/'/g, "''")}'`;
+    $command.value = line;
+    command = line;
+    refresh();
+    onChange();
+    $go.focus();
+    setStatus(`명령을 채웠습니다: ${line} · ▶ 실행(Enter)을 누르면 이 폴더에서 실행합니다: ${item.cwd}`);
+    return true;
+  }
+
+  async function pickFile() {
+    const chosen = await invoke('run_pick', { start: item.cwd || null }).catch((err) => { setStatus(String(err)); return null; });
+    if (chosen && !disposed) takeFile(chosen);
   }
 
   /** 돌고 있는 명령을 멈춘다(프로세스를 끝낸다). */
@@ -292,7 +328,12 @@ export function createRun(item, host, saved = {}, onChange = () => {}) {
     ev.stopPropagation();
     if (busy()) setStatus('실행 중입니다. 다시 실행하려면 먼저 [■ 멈춤]을 누르세요.'); else start();
   });
-  $command.addEventListener('input', () => { if (!busy()) { command = $command.value.trim(); onChange(); } });
+  $command.addEventListener('input', () => {
+    if (busy()) return;
+    command = $command.value.trim();
+    zone.node.hidden = !blank(); // 명령을 적기 시작하면 빈 영역을 걷고, 다 지우면 다시 보인다.
+    onChange();
+  });
   box.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter' && ev.ctrlKey && !ev.altKey && !ev.shiftKey) {
       ev.preventDefault();
@@ -312,7 +353,7 @@ export function createRun(item, host, saved = {}, onChange = () => {}) {
   window.addEventListener('cypher-look', relook);
 
   refresh();
-  // 사용자가 방금 명령을 적어 만든 항목은 바로 실행한다(화면에 놓여 크기가 잡힌 뒤에).
+  // 만들자마자 실행하라고 한 항목(saved.start)은 바로 실행한다(화면에 놓여 크기가 잡힌 뒤에).
   const ready = Promise.resolve().then(() => {
     if (saved.start === true && command) requestAnimationFrame(() => { if (!disposed) start(); });
   });
@@ -321,6 +362,9 @@ export function createRun(item, host, saved = {}, onChange = () => {}) {
     ready,
     focus: () => { fit(); if (busy()) term.focus(); else if (command) $go.focus(); else $command.focus(); },
     title,
+    /** 명령을 아직 정하지 않았는지(이 창에 끌어다 놓은 파일을 받아 명령으로 채운다). */
+    wantsFile: blank,
+    takeFile,
     state: () => ({ command }),
     close: () => Promise.resolve(true),
     dispose: () => {
