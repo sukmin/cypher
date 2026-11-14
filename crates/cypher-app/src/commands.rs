@@ -67,11 +67,11 @@ pub fn open_claude_file(which: String) -> Result<String, String> {
     Ok(path.to_string_lossy().into_owned())
 }
 
-/// 사용자의 것을 두는 폴더들(메모·마인드맵·ERD·이미지). 같은 그룹의 Claude 세션에 파일 경로를 알려 줄 때 쓴다.
+/// 사용자의 것을 두는 폴더들(메모·마인드맵·ERD·할 일·이미지). 같은 그룹의 Claude 세션에 파일 경로를 알려 줄 때 쓴다.
 #[tauri::command]
 pub fn store_dirs() -> serde_json::Value {
     let dir = |name: &str| crate::user_dir().join(name).to_string_lossy().into_owned();
-    serde_json::json!({ "memos": dir("memos"), "mindmaps": dir("mindmaps"), "erds": dir("erds"), "images": dir("images") })
+    serde_json::json!({ "memos": dir("memos"), "mindmaps": dir("mindmaps"), "erds": dir("erds"), "todos": dir("todos"), "images": dir("images") })
 }
 
 /// 본창 화면 전체의 배율(화면 글자 크기 설정). 사이트 항목의 웹 페이지에는 영향이 없다.
@@ -298,6 +298,81 @@ pub fn session_create(
     Ok(id)
 }
 
+/// 명령 항목이 받는 명령 한 줄의 길이(글자 수).
+const MAX_RUN_COMMAND: usize = 8000;
+
+/// 명령 항목의 명령 한 줄을 PowerShell에 넘길 글로 만든다. 명령이 실패했으면 그 종료 코드로 끝나게 한다
+/// (그냥 두면 PowerShell은 실패를 모두 1로 뭉갠다). 명령 끝의 주석이 뒷부분을 삼키지 않게 줄을 바꿔 붙인다.
+fn run_script(command: &str, utf8: bool) -> String {
+    let utf8 = if utf8 { POWERSHELL_UTF8 } else { "" };
+    format!("{utf8}{command}\n; if (-not $?) {{ if ($LASTEXITCODE) {{ exit $LASTEXITCODE }}; exit 1 }}")
+}
+
+/// 명령 항목을 돌릴 PowerShell: 설정의 `powershell` 프로필이 PowerShell(powershell·pwsh)이면 그 프로그램, 아니면 Windows PowerShell.
+fn run_shell(config: &Config) -> String {
+    config
+        .profile("powershell")
+        .map(|profile| profile.program.clone())
+        .filter(|program| {
+            let name = Path::new(program).file_stem().map(|s| s.to_string_lossy().to_ascii_lowercase());
+            matches!(name.as_deref(), Some("powershell" | "pwsh"))
+        })
+        .unwrap_or_else(|| "powershell.exe".into())
+}
+
+/// 명령 항목: 명령 한 줄을 그 폴더에서 PowerShell로 실행한다. 끝나면 세션과 같이 `session-exit`로 종료 코드를 알린다.
+/// 입력·크기 조절·멈춤은 세션의 명령(`session_write`, `session_resize`, `session_close`)을 그대로 쓴다.
+/// 세션이 아니므로 Claude Code에 붙이는 것(상태줄·훅·Cypher 도구, 끼움 프로그램)은 넣지 않는다.
+#[tauri::command]
+pub fn run_start(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    cwd: String,
+    command: String,
+    cols: u16,
+    rows: u16,
+    on_output: Channel<InvokeResponseBody>,
+) -> Result<u32, String> {
+    let command = command.trim();
+    if command.is_empty() {
+        return Err("실행할 명령이 비어 있습니다".into());
+    }
+    if command.chars().count() > MAX_RUN_COMMAND || command.contains('\0') {
+        return Err(format!("명령이 너무 깁니다({MAX_RUN_COMMAND}자까지). 스크립트 파일로 만들어 그 파일을 실행하세요."));
+    }
+    let cwd = PathBuf::from(cwd);
+    if !cwd.is_dir() {
+        return Err(format!("폴더가 없습니다: {}", cwd.display()));
+    }
+    let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+    let options = SpawnOptions {
+        path_first: None,
+        program: run_shell(&state.config),
+        args: vec!["-NoLogo".into(), "-Command".into(), run_script(command, state.config.session.utf8)],
+        cwd,
+        env: vec![("TERM_PROGRAM".into(), "cypher".into()), ("COLORTERM".into(), "truecolor".into())],
+        env_remove: vec!["CLAUDECODE".into(), "CLAUDE_CODE_ENTRYPOINT".into(), "CLAUDE_CODE_CHILD_SESSION".into()],
+        cols,
+        rows,
+    };
+    // 등록이 끝나기 전에 종료 알림이 먼저 지우려 들지 않도록 잠근 채로 띄운다.
+    let mut sessions = state.sessions.lock().unwrap();
+    let exit_app = app.clone();
+    let session = PtySession::spawn(
+        options,
+        move |bytes| {
+            let _ = on_output.send(InvokeResponseBody::Raw(bytes.to_vec()));
+        },
+        move |code| {
+            exit_app.state::<AppState>().sessions.lock().unwrap().remove(&id);
+            let _ = exit_app.emit("session-exit", ExitPayload { id, code });
+        },
+    )
+    .map_err(|e| format!("{e:#}"))?;
+    sessions.insert(id, Arc::new(session));
+    Ok(id)
+}
+
 fn session(state: &State<'_, AppState>, id: u32) -> Result<Arc<PtySession>, String> {
     state.sessions.lock().unwrap().get(&id).cloned().ok_or_else(|| "끝난 세션입니다".to_string())
 }
@@ -419,6 +494,26 @@ mod tests {
         assert!(!wants_powershell_hook("cmd.exe", &none));
         assert!(!POWERSHELL_CWD_HOOK.contains('"') && !POWERSHELL_UTF8.contains('"'));
         assert!(is_plain_cmd("cmd.exe", &[]) && !is_plain_cmd("cmd.exe", &none));
+    }
+
+    #[test]
+    fn 명령_항목의_명령은_실패한_종료_코드를_그대로_낸다() {
+        let script = run_script("cargo test # 주석", true);
+        // 명령은 그대로 들어가고, 주석이 뒷부분을 삼키지 않게 줄이 바뀐다.
+        assert!(script.starts_with(POWERSHELL_UTF8) && script.contains("cargo test # 주석\n; if (-not $?)"));
+        assert!(script.ends_with("{ if ($LASTEXITCODE) { exit $LASTEXITCODE }; exit 1 }"));
+        assert!(run_script("dir", false).starts_with("dir\n"));
+    }
+
+    #[test]
+    fn 명령_항목은_설정의_파워셸로_돈다() {
+        let mut config = Config::default();
+        assert_eq!(run_shell(&config), "powershell.exe");
+        config.profiles.iter_mut().find(|p| p.id == "powershell").unwrap().program = r"C:\Program Files\PowerShell\7\pwsh.exe".into();
+        assert_eq!(run_shell(&config), r"C:\Program Files\PowerShell\7\pwsh.exe");
+        // `powershell` 프로필을 다른 셸로 바꿔 둔 경우에는 Windows PowerShell을 쓴다.
+        config.profiles.iter_mut().find(|p| p.id == "powershell").unwrap().program = "cmd.exe".into();
+        assert_eq!(run_shell(&config), "powershell.exe");
     }
 
     #[test]

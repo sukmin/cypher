@@ -25,6 +25,7 @@ mod peer;
 mod reader;
 mod status;
 mod template;
+mod todo;
 
 use std::collections::HashMap;
 use std::ffi::OsString;
@@ -287,6 +288,7 @@ fn main() {
             memo::clean_closed();
             mindmap::clean_closed();
             erd::clean_closed();
+            todo::clean_closed();
             image::clean_closed();
             let config_path = config_path();
             let (config, config_error) = Config::load(&config_path);
@@ -398,6 +400,11 @@ fn main() {
             erd::erd_read,
             erd::erd_write,
             erd::erd_remove,
+            todo::todo_read,
+            todo::todo_write,
+            todo::todo_remove,
+            commands::run_start,
+            reader::table_pick,
             commands::store_dirs,
             closed::closed_restore,
             commands::ui_zoom,

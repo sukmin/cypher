@@ -42,7 +42,7 @@ pub fn restore_in(dir: &Path, id: &str, ext: &str) -> Result<bool, String> {
     Ok(true)
 }
 
-/// 닫은 항목의 내용을 저장소로 되돌린다. `kind`: "memo" | "mindmap" | "erd" | "image"(이미지는 `ext`가 필요하다).
+/// 닫은 항목의 내용을 저장소로 되돌린다. `kind`: "memo" | "mindmap" | "erd" | "todo" | "image"(이미지는 `ext`가 필요하다).
 #[tauri::command]
 pub fn closed_restore(kind: String, id: String, ext: Option<String>) -> Result<bool, String> {
     if !is_id(&id) {
@@ -52,6 +52,7 @@ pub fn closed_restore(kind: String, id: String, ext: Option<String>) -> Result<b
         "memo" => ("memos", "txt".to_string()),
         "mindmap" => ("mindmaps", "md".to_string()),
         "erd" => ("erds", "mmd".to_string()),
+        "todo" => ("todos", "md".to_string()),
         "image" => {
             let ext = ext.unwrap_or_default();
             if !IMAGE_FORMATS.contains(&ext.as_str()) {

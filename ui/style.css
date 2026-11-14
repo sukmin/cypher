@@ -71,25 +71,9 @@ input:focus { border-color: var(--accent); }
   border-right: 1px solid var(--line);
 }
 
-#new-buttons { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px; }
-
-#folder-row {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  padding: 0 10px 10px;
-  border-bottom: 1px solid var(--line);
-}
-#folder {
-  flex: 1;
-  min-width: 0;
-  color: var(--dim);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  direction: rtl; /* 긴 경로는 끝부분이 보이게 */
-  text-align: left;
-}
+/* 사이드바 맨 위: "+ 그룹"만 둔다(세션과 항목은 그룹 머리의 +로 그 그룹 안에 만든다) */
+#new-buttons { display: flex; flex-wrap: wrap; gap: 6px; padding: 10px; border-bottom: 1px solid var(--line); }
+#new-buttons button { flex: 1; }
 
 #sessions { list-style: none; margin: 0; padding: 6px; flex: 1; overflow-y: auto; }
 
@@ -137,7 +121,10 @@ li:hover .close, .pane-head:hover .close { visibility: visible; }
 
 /* 묶음(그룹·폴더) 머리: 배경이 있는 굵은 줄. 그 아래 세션은 들여쓰고 이음선으로 잇는다. */
 #sessions li.group {
-  grid-template-columns: 12px 1fr auto auto auto auto;
+  /* 접힘 표시, 이름, 할 일 진행, 서브에이전트, 재개, 더하기, 항목 수를 한 줄로 늘어놓는다. 이름이 남는 너비를 다 쓰고, 없는 것(빈 자리)은 틈도 차지하지 않는다. */
+  display: flex;
+  flex-wrap: wrap; /* 사이드바가 아주 좁으면 뒤쪽 것들이 다음 줄로 내려간다(머리 밖으로 넘치지 않게) */
+  gap: 2px 6px;
   margin-top: 10px;
   padding: 6px 8px;
   font-size: 12px;
@@ -148,6 +135,10 @@ li:hover .close, .pane-head:hover .close { visibility: visible; }
   border-radius: 6px;
 }
 #sessions li.group:first-child { margin-top: 0; }
+#sessions li.group > * { flex: none; }
+#sessions li.group > span:empty { display: none; }
+/* 이름은 남는 너비를 쓰고, 넘치면 말줄임표로 줄인다(항목 줄의 이름처럼 안에 여러 조각을 늘어놓지 않는다). */
+#sessions li.group > .name { display: block; flex: 1 1 3em; min-width: 3em; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #sessions li.group:hover { background: var(--select); }
 #sessions li.group .count { padding: 0 6px; font-weight: normal; font-size: 11px; color: var(--dim); background: var(--chip); border-radius: 8px; }
 #sessions li.group.attention .count { background: var(--attention); color: var(--on-accent); }
@@ -480,8 +471,11 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
 
 #sessions li.group .close { font-size: 14px; line-height: 14px; }
 #sessions li.group .close:hover { color: var(--accent); }
+/* 세션·항목을 더하는 +: 만드는 길이 여기뿐이라 마우스를 올리지 않아도 늘 보인다. */
+#sessions li.group .close.add { visibility: visible; color: var(--attention); font-weight: bold; }
+#sessions li.group .close.add:hover { color: var(--accent); }
 #sessions li.group.drop { background: var(--select); outline: 1px dashed var(--accent); }
-#sessions li.group.new { color: var(--idle); font-weight: normal; background: none; border: 1px dashed var(--line); justify-items: start; }
+#sessions li.group.new { color: var(--idle); font-weight: normal; background: none; border: 1px dashed var(--line); }
 #sessions.dragging li:not(.group) { opacity: 0.55; }
 .drag-ghost {
   position: fixed;

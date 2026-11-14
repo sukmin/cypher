@@ -16,6 +16,9 @@ import { initClosed, rememberClosed, reopenLast, showClosed, closedCount } from 
 import { initReader, createReader } from './reader.js';
 import { initNotices, recordNotice, markRead, showNotices, unreadCount } from './notices.js';
 import { initTemplate, saveTemplate, showTemplates } from './template.js';
+import { initTodo, createTodo } from './todo.js';
+import { initRun, createRun } from './run.js';
+import { initTable, createTable } from './table.js';
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -26,7 +29,7 @@ window.addEventListener('error', (ev) => window.cypherErrors.push(String(ev.mess
 window.addEventListener('unhandledrejection', (ev) => window.cypherErrors.push(String(ev.reason)));
 
 const $ = (id) => document.getElementById(id);
-const $terms = $('terms'), $list = $('sessions'), $folder = $('folder');
+const $terms = $('terms'), $list = $('sessions');
 const $search = $('search'), $searchInput = $('search-input');
 
 const BUSY_MS = 1200;           // 이 시간 안에 출력이 있었으면 "작업 중"으로 본다.
@@ -70,18 +73,42 @@ const KINDS = {
       return path ? { path } : null;
     },
   },
+  todo: { label: '할 일', icon: '☑', hint: '업무의 체크 목록 · 같은 그룹의 Claude가 채우고 체크', create: createTodo },
+  run: {
+    label: '명령', icon: '▷', hint: '자주 돌리는 명령(시험·빌드·개발 서버)을 단추로 두고 실행 · 성공·실패 표시',
+    create: createRun,
+    // 명령을 먼저 묻는다. 적지 않으면 항목을 만들지 않는다. 사용자가 방금 적은 명령이므로 만들자마자 실행한다.
+    prepare: async (opts) => {
+      const where = opts.cwd || (active && sessions.has(active.key) ? (active.project || active.startCwd) : folder);
+      const command = await ask(`실행할 명령 (PowerShell에서 실행 · 폴더: ${where})`, '예: cargo test');
+      return command ? { command, start: true } : null;
+    },
+  },
+  table: {
+    label: '표', icon: '▤', hint: 'CSV·TSV·JSON 파일을 표로 보기 · 정렬·거르기 · 바뀌면 자동 갱신',
+    create: createTable,
+    // 파일을 먼저 고른다. 고르지 않으면 항목을 만들지 않는다.
+    prepare: async (opts) => {
+      const start = opts.cwd || (active && sessions.has(active.key) ? active.cwd : folder);
+      const path = await invoke('table_pick', { start });
+      return path ? { path } : null;
+    },
+  },
 };
 
-/** 그 종류의 항목을 새로 만든다. 종류에 따라 먼저 물어볼 것(사이트 주소 등)을 묻는다. */
+/** 그 종류의 항목을 새로 만든다. 종류에 따라 먼저 물어볼 것(볼 파일, 실행할 명령)을 묻는다. */
 async function createKind(kind, opts = {}) {
   const def = KINDS[kind];
   if (!def) return null;
+  // 들어갈 그룹을 먼저 정한다(물어본 뒤에 "그룹이 없다"고 하지 않게, 묻는 사이 다른 항목으로 옮겨 가도 그 그룹에 들어가게).
+  const group = groupFor(opts);
+  if (!group) return null;
   let { saved } = opts;
   if (!saved && def.prepare) {
-    saved = await def.prepare();
+    saved = await def.prepare(opts);
     if (!saved) return null;
   }
-  return newItem(kind, { ...opts, saved });
+  return newItem(kind, { ...opts, group, saved });
 }
 
 /** @type {Map<number, object>} 화면용 번호(key) → 항목(터미널 세션, 메모, HTTP …) */
@@ -114,7 +141,7 @@ groupList = Array.isArray(groupList) ? groupList.filter((g) => typeof g === 'str
 // (그룹 이름이 무엇이든 열쇠로 쓸 수 있게 원형이 없는 객체에 담는다.)
 let groupProfiles = Object.create(null);
 try { Object.assign(groupProfiles, JSON.parse(localStorage.getItem('cypher.profiles') || '{}')); } catch { /* 무시 */ }
-// 그룹 이름 → 그 그룹에서 여는 세션이 시작될 폴더(그룹 폴더). 정해 두지 않은 그룹은 사이드바 위의 새 세션 폴더를 쓴다.
+// 그룹 이름 → 그 그룹에서 여는 세션이 시작될 폴더(그룹 폴더). 정해 두지 않은 그룹은 그 그룹에 있는 항목의 폴더나 기본 폴더(사용자 폴더)를 쓴다.
 let groupFolders = Object.create(null);
 try { Object.assign(groupFolders, JSON.parse(localStorage.getItem('cypher.groupFolders') || '{}')); } catch { /* 무시 */ }
 // 브라우저 시작 페이지: 새 사이트 항목과 "chrome" 엔진의 브라우저가 처음 여는 주소. 비어 있으면 빈 화면으로 연다.
@@ -142,38 +169,17 @@ async function init() {
   const loaded = await invoke('app_config');
   config = loaded.config;
   if (loaded.error) setStatus(`설정 파일 오류(기본값으로 동작): ${loaded.error}`);
-  folder = localStorage.getItem('cypher.folder') || await invoke('home_dir');
-  showFolder();
+  // 기본 폴더는 사용자 폴더다. 세션이 시작될 폴더는 그룹마다 정한다(그룹을 만들 때, 또는 그룹 오른쪽 클릭 → 그룹 폴더 정하기).
+  folder = await invoke('home_dir');
   storeDirs = await invoke('store_dirs').catch(() => ({}));
   // 테마·글꼴·글자 크기를 적용한다. 바뀔 때마다 열려 있는 터미널과 항목 화면을 맞춘다.
   initLook({ invoke, make, openPopup, config, onChange: applyLook });
 
-  const addButton = (label, title, onClick) => {
-    const b = document.createElement('button');
-    b.textContent = label;
-    b.title = `${title} · Ctrl+클릭: 나란히 열기`;
-    b.onclick = (ev) => onClick(ev.ctrlKey ? 'split' : 'replace');
-    $('new-buttons').append(b);
-    return b;
-  };
-  for (const p of config.profiles) {
-    const b = addButton(`+ ${p.label}`, `${p.program} ${p.args.join(' ')}`.trim(), (show) => newSession(p.id, { show }));
-    // 기본 Claude 단추의 풍선말은 지금 정해 둔 실행 명령을 보여 준다(설정 → Claude 실행 명령…).
-    if (p.id === 'claude') {
-      b.onmouseenter = () => { b.title = `${claudeCommand || `${p.program} ${p.args.join(' ')}`.trim()} · Ctrl+클릭: 나란히 열기 · 명령 바꾸기: 설정 → Claude 실행 명령`; };
-    }
-  }
-  if (offersWorktree()) {
-    addButton('+ 워크트리', '새 git 워크트리에서 Claude 시작', newWorktree);
-  }
-  // 터미널이 아닌 항목(메모, HTTP …)
-  for (const [kind, def] of Object.entries(KINDS)) {
-    addButton(`+ ${def.label}`, def.hint, (show) => createKind(kind, { show }));
-  }
-  // 새 그룹 만들기
+  // 사이드바 맨 위에는 "+ 그룹"만 둔다. 세션과 항목은 그룹 밖(루트)에 만들 수 없고, 그룹 머리의 +로 그 그룹 안에 만든다.
+  // (맨 위에 "+ Claude" 같은 단추가 있으면 어느 그룹에 생길지 눈에 보이지 않아 엉뚱한 그룹에 세션이 생긴다.)
   const groupButton = make('button', '', '+ 그룹');
-  groupButton.title = '새 그룹 만들기 · 항목을 끌어다 놓아 채우기';
-  groupButton.onclick = newGroup;
+  groupButton.title = '새 그룹 만들기 · 세션과 항목은 그룹 안에서만 만듭니다(그룹 머리의 +)';
+  groupButton.onclick = () => newGroup();
   $('new-buttons').append(groupButton);
 
   initExtras({
@@ -216,6 +222,8 @@ async function init() {
     itemOfRow: (row) => sessions.get(Number(row.dataset.key)),
     contextOfHead: (head) => ({ group: head.dataset.group || '', cwd: head.dataset.cwd || folder }),
     screenEmpty: () => !visible.length,
+    // 놓은 자리(묶음 머리, 항목의 줄이나 창)의 그룹. 빈 곳에 놓았으면 지금 보는 항목의 그룹으로 정한다.
+    groupFor: (context) => groupFor({ group: context.near?.group || context.group }),
   });
   initPalette({ make, openPopup, entries: paletteEntries });
   initClosed({
@@ -228,10 +236,18 @@ async function init() {
     invoke, make, setStatus, showMenu, baseName, toClaude: imageToClaude,
     openMemo,
   });
+  initTodo({ invoke, make, setStatus, showMenu, toClaude: textToClaude });
+  initRun({
+    invoke, listen, make, setStatus, showMenu, Channel, toClaude: textToClaude,
+    look: currentLook,
+    scrollback: config.session.scrollback,
+    finished: runFinished,
+  });
+  initTable({ invoke, make, setStatus, showMenu, baseName, toClaude: imageToClaude, openMemo });
   initNotices({ make, openPopup, setStatus, jump: jumpToNotice, onChange: renderNoticeButton });
   initTemplate({
     invoke, make, openPopup, ask, setStatus, notice, baseName,
-    folder: () => folder,
+    pickFolder: (title) => invoke('pick_folder', { start: startFolderHint(), title }),
     current: currentGroup,
     pack: packGroup,
     open: openTemplate,
@@ -262,8 +278,6 @@ async function init() {
   initSidebarKeys();
   listen('menu', ({ payload }) => runMenu(payload));
 
-  $('pick').onclick = pickFolder;
-  $('recent').onclick = folderMenu;
   // 사이드바의 빈 곳(세션·버튼이 아닌 곳)을 오른쪽 클릭하면 할 수 있는 일을 메뉴로 보여 준다.
   $('sidebar').addEventListener('contextmenu', (ev) => {
     if (ev.target.closest('li, button')) return;
@@ -315,13 +329,15 @@ async function init() {
   const auto = await invoke('autostart');
   if (auto) {
     // 바로 시작 모드: 지난 세션은 되살리지 않지만 메모·HTTP 항목은 사이드바에 남긴다.
-    folder = auto[1];
-    showFolder();
+    // 세션은 그룹 안에서만 열리므로, 그룹 없이 쓰던 것을 모으는 `root` 그룹(없으면 만든다)에 연다.
     await restore({ docsOnly: true });
-    await newSession(auto[0]);
+    await newSession(auto[0], { group: adoptGroup(), cwd: auto[1] });
   } else {
     await restore();
   }
+  // 되살릴 항목이 없어도 사이드바는 그린다: 항목 없이 남아 있는 그룹의 머리(세션·항목을 만드는 길은 그 머리의 +뿐이다)와,
+  // 그룹이 하나도 없을 때의 안내 줄이 여기서 나온다.
+  render();
 }
 
 /** 창 상단 메뉴(도구·설정·도움말)에서 고른 항목을 실행한다. 항목 번호는 앱 쪽 메뉴 정의와 맞춘다. */
@@ -361,12 +377,36 @@ const viewedGroup = () => (active && sessions.has(active.key) && active.group) |
 /** 그 그룹에 따로 정해 둔 폴더(그룹 폴더). 정해 두지 않았으면 빈 글. */
 const groupFolderOf = (name) => (name && typeof groupFolders[name] === 'string' ? groupFolders[name] : '');
 
-/** 사이드바 위의 폴더 줄: 새 세션 폴더. 그룹 폴더는 여기가 아니라 그 그룹 머리의 폴더 줄에 보이고 거기서 바꾼다. */
-function showFolder() {
-  const group = viewedGroup(), own = groupFolderOf(group);
-  // 오른쪽 정렬 말줄임에서 글자 순서가 뒤집히지 않도록 방향 표시 문자를 붙인다.
-  $folder.textContent = '‎' + folder;
-  $folder.title = `새 세션 폴더: ${folder}${own ? `\n지금 보는 그룹 "${group}"의 세션은 그 그룹의 폴더에서 시작합니다: ${own}` : ''}`;
+/** 폴더를 고르는 창이 처음 보여 줄 곳: 지금 보는 항목의 폴더, 없으면 가장 최근에 세션을 시작한 폴더, 그것도 없으면 기본 폴더. */
+const startFolderHint = () => {
+  const here = active && sessions.has(active.key) ? active : null;
+  return (here && (here.project || here.startCwd)) || recentFolders[0] || folder;
+};
+
+/**
+ * 새 세션·항목이 들어갈 그룹. 그룹 밖(루트)에는 아무것도 만들 수 없다.
+ * 정해 준 그룹 → 지금 보고 있는 항목의 그룹 → 그룹이 하나뿐이면 그 그룹. 정할 수 없으면 까닭을 알리고 빈 글을 돌려준다.
+ */
+function groupFor(opts) {
+  const group = opts.group || (!opts.restoring && viewedGroup()) || (groupList.length === 1 ? groupList[0] : '');
+  if (!group) {
+    notice('그룹 안에서만 만들 수 있습니다', groupList.length
+      ? '어느 그룹에 만들지 알 수 없습니다. 만들 그룹의 머리에 있는 +를 누르거나, 그 그룹의 항목을 보고 있을 때 다시 하세요.'
+      : '먼저 사이드바 위의 [+ 그룹]으로 그룹을 만드세요. 세션과 항목은 그룹 머리의 +로 그 그룹 안에 만듭니다.');
+  }
+  return group;
+}
+
+/** 그룹 없이 쓰던 항목을 모아 두는 그룹의 이름. */
+const ROOT_GROUP = 'root';
+
+/**
+ * 그룹 없이 적혀 있던 항목(이전 버전에서 그룹 없이 쓰던 세션·항목, 그때 닫은 항목의 기록)을 넣을 그룹: `root`.
+ * 없으면 만든다. 그룹의 폴더는 정하지 않는다(여러 폴더의 항목이 섞여 있고, 항목마다 자기 폴더를 그대로 쓴다).
+ */
+function adoptGroup() {
+  ensureGroup(ROOT_GROUP);
+  return ROOT_GROUP;
 }
 
 /** 그룹 폴더를 정하거나(path) 푼다(빈 글). */
@@ -374,72 +414,21 @@ function setGroupFolder(name, path) {
   if (!name) return;
   if (path) groupFolders[name] = path; else delete groupFolders[name];
   localStorage.setItem('cypher.groupFolders', JSON.stringify(groupFolders));
-  render(); // 묶음 머리의 폴더 줄과 풍선말을 맞춘다.
+  render(); // 묶음 머리의 풍선말을 맞춘다.
   setStatus(path
     ? `그룹 "${name}"의 폴더: ${path} (이 그룹에서 여는 세션은 여기서 시작합니다)`
-    : `그룹 "${name}"의 폴더를 풀었습니다. 이 그룹의 세션도 새 세션 폴더(${folder})에서 시작합니다.`);
+    : `그룹 "${name}"의 폴더를 풀었습니다. 이 그룹의 세션은 기본 폴더(${folder})에서 시작합니다.`);
 }
 
 async function pickGroupFolder(name) {
-  const picked = await invoke('pick_folder', { start: groupFolderOf(name) || folder, title: `그룹 "${name}"의 세션을 시작할 폴더` });
+  const picked = await invoke('pick_folder', { start: groupFolderOf(name) || startFolderHint(), title: `그룹 "${name}"의 세션을 시작할 폴더` });
   if (picked) setGroupFolder(name, picked);
-}
-
-/** 새 세션이 시작될 폴더를 바꾼다. */
-function useFolder(path) {
-  folder = path;
-  localStorage.setItem('cypher.folder', folder);
-  showFolder();
-  setStatus(`새 세션 폴더: ${folder}`);
 }
 
 /** 세션을 시작한 폴더를 최근 폴더 목록 맨 앞에 올린다. */
 function rememberFolder(path) {
   recentFolders = [path, ...recentFolders.filter((other) => other.toLowerCase() !== path.toLowerCase())].slice(0, MAX_FOLDERS);
   localStorage.setItem('cypher.folders', JSON.stringify(recentFolders));
-}
-
-/** 새 세션 폴더로 고를 만한 곳: 지금 보고 있는 항목의 폴더와 최근에 세션을 시작한 폴더(지금 폴더 `current`는 뺀다). */
-function folderChoices(current = folder) {
-  const here = active && sessions.has(active.key) ? (active.project || active.startCwd) : '';
-  const seen = new Set([current.toLowerCase()]);
-  const choices = [];
-  for (const [path, note] of [[here, '지금 항목의 폴더'], ...recentFolders.map((path) => [path, '최근 폴더'])]) {
-    if (!path || seen.has(path.toLowerCase())) continue;
-    seen.add(path.toLowerCase());
-    choices.push({ path, note });
-  }
-  return choices;
-}
-
-/**
- * 폴더 줄의 ▾ 단추: 최근 폴더에서 골라 그 줄의 폴더를 바꾼다.
- * 사이드바 위의 폴더 줄은 새 세션 폴더를, 그룹 머리의 폴더 줄(groupName)은 그 그룹의 폴더를 바꾼다.
- */
-function folderMenu(ev, groupName = '') {
-  const choice = (use) => ({ path, note }) => ({
-    label: `${baseName(path)}  —  ${path}${note === '지금 항목의 폴더' ? '  (지금 항목)' : note === '새 세션 폴더' ? '  (새 세션 폴더)' : ''}`,
-    action: () => use(path),
-  });
-  if (!groupName) {
-    return showMenu(ev, [
-      { caption: `새 세션 폴더: ${folder}` },
-      ...folderChoices().map(choice(useFolder)),
-      { label: '다른 폴더 고르기…', action: pickFolder },
-    ]);
-  }
-  const own = groupFolderOf(groupName);
-  const choices = folderChoices(own);
-  // 새 세션 폴더도 고를 수 있게 한다(그룹 폴더로 못박아 두면 새 세션 폴더가 바뀌어도 따라가지 않는다).
-  if (folder.toLowerCase() !== own.toLowerCase() && !choices.some(({ path }) => path.toLowerCase() === folder.toLowerCase())) {
-    choices.push({ path: folder, note: '새 세션 폴더' });
-  }
-  showMenu(ev, [
-    { caption: own ? `그룹 "${groupName}"의 폴더: ${own}` : `그룹 "${groupName}"의 폴더: 정하지 않음 (새 세션 폴더 ${folder}에서 시작)` },
-    ...choices.map(choice((path) => setGroupFolder(groupName, path))),
-    { label: '다른 폴더 고르기…', action: () => pickGroupFolder(groupName) },
-    ...(own ? [{ label: `그룹 폴더 풀기 (새 세션 폴더 ${baseName(folder)}을(를) 따르기)`, action: () => setGroupFolder(groupName, '') }] : []),
-  ]);
 }
 
 const quote = (p) => (p.includes(' ') ? `"${p}"` : p);
@@ -499,16 +488,17 @@ function ask(title, placeholder = '', value = '') {
 async function newSession(profileId, opts = {}) {
   const profile = config.profiles.find((p) => p.id === profileId);
   if (!profile) return null;
+  // 세션은 그룹 안에서만 연다. 그룹을 정해 주지 않았으면 지금 보고 있는 항목의 그룹에 연다.
+  const group = groupFor(opts);
+  if (!group) return null;
   if (!opts.restoring) lastProfile = profileId;
-  // 이름 붙인 그룹. 비어 있으면 시작 폴더별로 묶인다. 새 세션은 지금 세션의 그룹을 따른다.
-  const group = opts.group ?? ((!opts.restoring && active?.group) || '');
-  // 시작 폴더: 정해 주지 않았으면 그 그룹의 폴더(그룹 폴더), 그것도 없으면 사이드바 위의 새 세션 폴더.
+  // 시작 폴더: 정해 주지 않았으면 그 그룹의 폴더(그룹 폴더), 그것도 없으면 기본 폴더(사용자 폴더).
   let start = opts.cwd || folder;
   const own = opts.cwd ? '' : groupFolderOf(group);
   if (own) {
     // 네트워크 경로(\\서버\…)는 있는지 확인하지 않고 그대로 쓴다(확인하는 명령이 네트워크 경로를 보지 않는다).
     const [exists] = /^[\\/]{2}/.test(own) ? [true] : await invoke('dirs_exist', { paths: [own] }).catch(() => [true]);
-    if (exists === false) setStatus(`그룹 "${group}"의 폴더가 없어 새 세션 폴더에서 시작합니다: ${own}`);
+    if (exists === false) setStatus(`그룹 "${group}"의 폴더가 없어 기본 폴더(${folder})에서 시작합니다: ${own}`);
     else start = own;
   }
   $('empty').hidden = true;
@@ -540,7 +530,7 @@ async function newSession(profileId, opts = {}) {
   const s = {
     key: ++seq, kind: 'term', id: null, profile, term, fitAddon, search, pane, head, view: null,
     startCwd: cwd, cwd, project: '', worktree: opts.worktree || '',
-    name: opts.name || '', color: opts.color || '',
+    name: opts.name || '', color: opts.color || '', mark: freeMark(opts.mark),
     group,
     title: '', model: '', effort: '', context: null, cost: 0,
     usage: '', usageEl: null,
@@ -637,9 +627,13 @@ function wakeGroup(group) {
 async function newItem(kind, opts = {}) {
   const def = KINDS[kind];
   if (!def) return null;
+  // 항목은 그룹 안에서만 만든다. 그룹을 정해 주지 않았으면 지금 보고 있는 항목의 그룹에 만든다.
+  const group = groupFor(opts);
+  if (!group) return null;
   $('empty').hidden = true;
   // 폴더는 지금 보고 있는 항목의 것을 따른다(같은 업무의 요청 파일·메모가 한 폴더에 모이게).
-  const base = !opts.restoring && active ? (active.project || active.startCwd) : folder;
+  // 보고 있는 항목이 없으면 그 그룹의 폴더, 그것도 없으면 기본 폴더.
+  const base = !opts.restoring && active && sessions.has(active.key) ? (active.project || active.startCwd) : groupFolderOf(group) || folder;
   const cwd = (opts.cwd || base).replace(/\//g, '\\').replace(/(?<=[^:\\])\\+$/, '');
 
   const pane = make('div', 'pane hidden');
@@ -651,8 +645,8 @@ async function newItem(kind, opts = {}) {
   const s = {
     key: ++seq, kind, id: null, profile: null, term: null, pane, head, view: null,
     startCwd: cwd, cwd, project: '', worktree: '',
-    name: opts.name || '', color: opts.color || '',
-    group: opts.group ?? ((!opts.restoring && active?.group) || ''),
+    name: opts.name || '', color: opts.color || '', mark: freeMark(opts.mark),
+    group,
     title: '', model: '', effort: '', context: null, cost: 0,
     usage: '', usageEl: null, agents: new Map(), tools: new Map(), waiting: '',
     lastOutput: -Infinity, busy: false, attention: false, exited: false,
@@ -811,7 +805,9 @@ function layout() {
   $('empty').hidden = visible.length > 0;
   $('empty').textContent = sessions.size
     ? '화면에 띄운 항목이 없습니다. 사이드바에서 항목을 누르거나 화면으로 끌어다 놓으세요.'
-    : '왼쪽에서 세션이나 메모·HTTP·사이트·이미지·마인드맵·문서 항목을 시작하세요.';
+    : groupList.length
+      ? '그룹 머리의 +를 눌러 세션이나 메모·HTTP·사이트·문서·할 일 같은 항목을 더하세요.'
+      : '왼쪽 위의 [+ 그룹]으로 그룹을 만들고, 그룹 머리의 +로 세션이나 항목을 더하세요.';
   syncComposer();
   syncSites(); // 사이트 항목의 웹뷰를 새 창 자리에 맞춘다.
   requestAnimationFrame(() => {
@@ -942,6 +938,9 @@ function closedRecord(s) {
   if (s.kind === 'image' && s.view.empty()) return null;
   if (s.kind === 'site' && !s.view.url()) return null;
   if (s.kind === 'reader' && !s.view.path()) return null;
+  if (s.kind === 'todo' && !s.view.text().trim()) return null;
+  if (s.kind === 'run' && !s.view.command()) return null;
+  if (s.kind === 'table' && !s.view.path()) return null;
   try {
     return { ...describe(s), label: label(s) };
   } catch {
@@ -995,11 +994,65 @@ async function restartSession(s) {
   const fresh = await revive(describe(s), { show: 'hidden' });
   if (!fresh || !sessions.has(s.key)) return;
   if (after && sessions.has(after.key)) placeInOrder(fresh, after, false);
+  // 북마크는 한 숫자에 항목 하나라 새 세션에는 비어 있다. 옛 세션의 것을 넘겨준다.
+  if (s.mark) { fresh.mark = s.mark; s.mark = ''; }
   const leaf = findLeaf(s);
   if (leaf) leaf.s = fresh;
   const wasActive = active === s;
   await closeSession(s, { forget: true });
   if (wasActive || leaf) activate(fresh); else render();
+}
+
+// ── 북마크: 항목에 숫자(0~9)를 붙여 두고 Ctrl+숫자로 바로 간다 ──
+// 숫자 하나에 항목 하나다. Ctrl+Shift+숫자(또는 오른쪽 클릭 메뉴)로 지금 항목에 붙이고, 같은 숫자를 다시 누르면 푼다.
+// 다른 항목이 쓰던 숫자를 붙이면 그 항목에서 옮겨 온다. 다시 시작해도 남고, 닫은 항목을 다시 열면 그 숫자가 비어 있을 때 되돌아온다.
+
+const MARKS = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '0']; // 글쇠판에 놓인 차례
+
+/** 그 숫자가 붙은 항목(없으면 undefined). */
+const markedItem = (digit) => [...sessions.values()].find((s) => s.mark === digit);
+/** 새로 만드는 항목에 줄 북마크: 숫자 한 자리이고 다른 항목이 쓰고 있지 않을 때만. */
+const freeMark = (digit) => (typeof digit === 'string' && /^\d$/.test(digit) && !markedItem(digit) ? digit : '');
+
+/** 사이드바 줄과 창 제목 줄에 보이는 북마크 숫자. */
+function markBadge(digit) {
+  const badge = make('b', 'mark', digit);
+  badge.title = `북마크 ${digit}: Ctrl+${digit}로 바로 가기`;
+  return badge;
+}
+
+/** 오른쪽 클릭 메뉴의 숫자 단추에 붙는 풍선말. */
+function markTitle(s, digit) {
+  const owner = markedItem(digit);
+  if (s.mark === digit) return `북마크 ${digit} 풀기`;
+  return owner ? `북마크 ${digit} (지금은 "${label(owner)}"의 것 — 이 항목으로 옮김)` : `북마크 ${digit}로 지정 (Ctrl+Shift+${digit})`;
+}
+
+/** 그 항목에 북마크 숫자를 붙인다. 이미 그 숫자면 풀고, 다른 항목이 쓰던 숫자면 옮겨 온다. */
+function setMark(s, digit) {
+  if (!s || !sessions.has(s.key)) return setStatus('북마크할 항목이 없습니다. 먼저 항목을 고르세요.');
+  if (s.mark === digit) {
+    s.mark = '';
+    setStatus(`북마크 ${digit}을(를) 풀었습니다: ${label(s)}`);
+  } else {
+    const owner = markedItem(digit);
+    if (owner) owner.mark = '';
+    s.mark = digit;
+    setStatus(`북마크 ${digit}: ${label(s)} — Ctrl+${digit}로 바로 갑니다.${owner ? ` ("${label(owner)}"에서 옮겼습니다)` : ''}`);
+  }
+  render();
+  return saveState();
+}
+
+/** 그 숫자의 북마크로 간다: 화면에 없으면 지금 창 자리에 띄우고, 쉬는 세션이면 재개한다. 갔으면 참. */
+function jumpToMark(digit) {
+  const s = markedItem(digit);
+  if (!s) { setStatus(`북마크 ${digit}이(가) 없습니다. 항목을 보면서 Ctrl+Shift+${digit}을(를) 누르면 붙습니다.`); return false; }
+  collapsed.delete(groupKey(s)); // 접어 둔 묶음 안에 있으면 펴서 사이드바에서도 보이게 한다.
+  localStorage.setItem('cypher.collapsed', JSON.stringify([...collapsed]));
+  activate(s);
+  $list.querySelector(`li[data-key="${s.key}"]`)?.scrollIntoView({ block: 'nearest' });
+  return true;
 }
 
 /** 사이드바에 보이는 차례대로의 항목(접어 둔 묶음 안의 것도 포함). */
@@ -1362,8 +1415,10 @@ function duration(ms) {
 
 /** 사이드바의 세션 한 줄. */
 function sessionItem(s) {
+  // 터미널이 아닌 항목이 내놓는 상태(명령 항목의 실행 중·성공·실패, 다 끝낸 할 일)는 종류 기호와 아랫줄의 색으로 보인다.
+  const tone = isTerm(s) ? '' : s.view?.tone?.() || '';
   const li = make('li', [
-    s === active && 'active', visible.includes(s) && 'shown', s.waiting,
+    s === active && 'active', visible.includes(s) && 'shown', s.waiting, tone && `tone-${tone}`,
     s.exited ? 'exited' : s.dormant ? 'dormant' : s.busy ? 'busy' : s.attention && 'attention',
   ].filter(Boolean).join(' '));
   li.title = '끌기: 화면 분할·순서 바꾸기·묶음 옮기기 · 두 번 누르기: 별칭 · 오른쪽 클릭: 메뉴';
@@ -1385,9 +1440,10 @@ function sessionItem(s) {
     name = renameInput(s);
   } else {
     name = make('span', 'name');
+    if (s.mark) name.append(markBadge(s.mark));
     name.append(make('span', 'alias', label(s)));
     if (s.name) name.append(make('span', 'origin', baseLabel(s)));
-    name.title = `${s.name ? `${baseLabel(s)}\n` : ''}${s.cwd}`;
+    name.title = `${s.name ? `${baseLabel(s)}\n` : ''}${s.cwd}${s.mark ? `\n북마크 ${s.mark}: Ctrl+${s.mark}로 바로 가기` : ''}`;
     if (s.color) name.style.color = s.color;
   }
   const close = make('button', 'close', '×');
@@ -1434,7 +1490,9 @@ function sessionItem(s) {
   const subText = s.exited ? '종료됨 (오른쪽 클릭: 다시 시작)'
     : s.dormant ? (resumeOf(s) ? '쉬는 중 · 누르면 대화를 이어 재개' : '쉬는 중 · 누르면 재개')
     : s.waiting === 'done' && s.took >= 1000 ? `완료 · ${duration(s.took)} 걸림 · 다음 지시 대기`
-    : WAITING_TEXT[s.waiting] || (s.heldStop && s.agents.size ? '서브에이전트가 끝나기를 기다리는 중' : running ? '' : s.title);
+    : WAITING_TEXT[s.waiting] || (s.heldStop && s.agents.size ? '서브에이전트가 끝나기를 기다리는 중' : running ? ''
+      // 터미널이 아닌 항목은 그 화면이 내놓는 한 줄(할 일의 진행, 명령의 상태)을 보여 준다.
+      : isTerm(s) ? s.title : s.view?.sub?.() || '');
   if (subText) sub.append(subText);
   s.toolEl = null;
   if (running) {
@@ -1556,26 +1614,45 @@ function ensureGroup(name) {
   saveGroups();
 }
 
-/** "+ 그룹" 버튼: 빈 그룹을 만든다. 세션을 끌어다 놓거나 그룹 머리의 +로 세션을 열어 채운다. */
-async function newGroup() {
-  const name = await ask('새 그룹 이름', '예: 결제 개편');
-  if (!name) return;
-  ensureGroup(name);
-  collapsed.delete(`g:${name}`);
-  render();
+/**
+ * 그룹을 만든다(이미 있으면 그대로 둔다). `path`를 주면 그 그룹의 폴더로 정한다. 만든(또는 있던) 그룹의 이름을 돌려준다.
+ * 세션과 항목은 그룹 안에서만 만들 수 있으므로, 무엇을 하든 그룹부터 만든다.
+ */
+function createGroup(name, path = '') {
+  const given = String(name ?? '').trim();
+  if (!given) return '';
+  ensureGroup(given);
+  collapsed.delete(`g:${given}`);
+  localStorage.setItem('cypher.collapsed', JSON.stringify([...collapsed]));
+  if (path) setGroupFolder(given, path); else render();
+  return given;
 }
 
-/** 세션을 그룹으로 옮긴다. 이름이 비면 폴더별 묶음으로 돌아간다. */
+/** "+ 그룹" 단추: 이름을 묻고 그룹을 만든 뒤, 그 그룹의 세션이 시작될 폴더를 고르게 한다(취소하면 나중에 그룹 오른쪽 클릭 메뉴에서 정한다). */
+async function newGroup() {
+  const name = await ask('새 그룹 이름 (세션과 항목은 그룹 안에서만 만듭니다)', '예: 결제 개편');
+  if (!name) return '';
+  const fresh = !groupList.includes(name);
+  createGroup(name);
+  if (!fresh) { setStatus(`그룹 "${name}"은(는) 이미 있습니다. 그룹 머리의 +로 세션·항목을 더하세요.`); return name; }
+  const picked = await invoke('pick_folder', { start: startFolderHint(), title: `그룹 "${name}"의 세션을 시작할 폴더 (취소: 나중에 정하기)` }).catch(() => null);
+  if (picked && groupList.includes(name)) setGroupFolder(name, picked);
+  setStatus(`그룹 "${name}"을(를) 만들었습니다${picked ? ` (폴더: ${picked})` : ' (폴더는 그룹 오른쪽 클릭 → 그룹 폴더 정하기에서 정합니다)'}. 그룹 머리의 +로 세션·항목을 더하세요.`);
+  return name;
+}
+
+/** 세션·항목을 그 그룹으로 옮긴다. 그룹 밖으로는 뺄 수 없다(이름이 비면 아무것도 하지 않는다). */
 function moveToGroup(list, name) {
+  if (!name) return setStatus('항목은 그룹 안에만 둘 수 있습니다. 옮길 그룹의 이름을 적어 주세요.');
   ensureGroup(name);
   for (const s of list) s.group = name;
   render();
-  saveState();
+  return saveState();
 }
 
 async function askGroup(list, current = '') {
-  const name = await ask('그룹 이름 (비우면 폴더별 묶음으로)', groupList.length ? `있는 그룹: ${groupList.join(', ')}` : '예: 결제 개편', current);
-  if (name != null) moveToGroup(list, name);
+  const name = await ask('옮길 그룹 이름 (없는 이름이면 새 그룹을 만듭니다)', groupList.length ? `있는 그룹: ${groupList.join(', ')}` : '예: 결제 개편', current);
+  if (name) moveToGroup(list, name);
 }
 
 /** 그 이름의 그룹에 지금 들어 있는 항목 전부. 사이드바가 "대기만 보기"로 걸러져 있어도, 이름을 묻는 사이 새 항목이 생겼어도 빠뜨리지 않는다. */
@@ -1605,13 +1682,23 @@ async function renameGroup(group) {
   moveToGroup(membersOf(group.name), name);
 }
 
-/** 그룹을 없앤다. 안에 있던 세션은 닫지 않고 폴더별 묶음으로 돌려보낸다. */
+/**
+ * 그룹을 없앤다. 빈 그룹만 없앨 수 있다: 항목은 그룹 밖에 둘 수 없으므로, 항목이 남아 있으면 먼저 닫거나 다른 그룹으로 옮겨야 한다.
+ * 없앴으면 참.
+ */
 function deleteGroup(group) {
+  const left = membersOf(group.name).length;
+  if (left) {
+    notice('그룹을 지울 수 없습니다', `그룹 "${group.name}"에 항목이 ${left}개 있습니다. 항목은 그룹 밖에 둘 수 없으니, 먼저 닫거나(그룹 오른쪽 클릭 → 모두 닫기) 다른 그룹으로 옮긴 뒤에 지우세요.`);
+    return false;
+  }
   groupList = groupList.filter((g) => g !== group.name);
   saveGroups();
   delete groupFolders[group.name];
   localStorage.setItem('cypher.groupFolders', JSON.stringify(groupFolders));
-  moveToGroup(membersOf(group.name), '');
+  render();
+  setStatus(`그룹 "${group.name}"을(를) 지웠습니다.`);
+  return true;
 }
 
 /** 그 묶음에 새 항목을 넣을 때 쓸 그룹 이름과 폴더. */
@@ -1626,12 +1713,12 @@ function groupContext(group) {
 
 /**
  * 그 묶음에 새 항목을 더하는 메뉴 항목들: 터미널 프로필들과 그 밖의 종류(메모, HTTP …).
- * 폴더는 그 묶음에 이미 있는 항목의 것을 따른다(없으면 새 세션 폴더).
+ * 폴더는 그 그룹의 폴더, 정해 두지 않았으면 그 묶음에 이미 있는 항목의 것을 따른다(없으면 기본 폴더).
  */
 function addItems(group) {
   const opts = groupContext(group);
   // 그룹 폴더를 정해 둔 그룹의 새 세션은 폴더를 넘기지 않는다. newSession이 그 그룹의 폴더를 찾아 쓰고,
-  // 그 폴더가 없어졌으면 새 세션 폴더에서 시작한다.
+  // 그 폴더가 없어졌으면 기본 폴더에서 시작한다.
   const forSession = group.logical && groupFolderOf(group.name) ? { group: opts.group } : opts;
   return [
     { caption: `폴더: ${opts.cwd}${group.logical && groupFolderOf(group.name) ? ' (그룹 폴더)' : ''}` },
@@ -1665,6 +1752,9 @@ function templateItem(s) {
     case 'site': return { ...base, saved: { url: state.url, home: state.home, title: state.title } };
     case 'http': return { ...base, saved: { file: state.file } };
     case 'reader': return state.path ? { ...base, saved: { path: state.path } } : null;
+    case 'todo': return { ...base, saved: { text: s.view.text() } };
+    case 'run': return state.command ? { ...base, saved: { command: state.command } } : null;
+    case 'table': return state.path ? { ...base, saved: { path: state.path } } : null;
     default: return null;
   }
 }
@@ -1697,13 +1787,18 @@ function templateSaved(kind, saved) {
     case 'site': return { ...text('url'), ...text('home'), ...text('title') };
     case 'http': return { ...text('file') };
     case 'reader': return { ...text('path') };
+    case 'todo': return { ...text('text') };
+    // 명령은 받아 두기만 하고 실행하지 않는다(틀을 펼친 뒤 사용자가 ▶를 눌러야 돈다).
+    case 'run': return { ...text('command') };
+    case 'table': return { ...text('path') };
     default: return null;
   }
 }
 
 /**
  * 틀을 그룹으로 펼친다. `cwd`를 주면 모든 항목을 그 폴더에서 열고, 아니면 저장해 둔 폴더에서 연다
- * (없어진 폴더의 항목은 지금의 새 세션 폴더에서). 만든 항목 수와 건너뛴 것의 까닭을 돌려준다.
+ * (없어진 폴더의 항목은 기본 폴더에서). `cwd`를 줬고 그 그룹에 폴더를 정해 두지 않았으면 그 폴더를 그룹의 폴더로 정한다.
+ * 만든 항목 수와 건너뛴 것의 까닭을 돌려준다.
  */
 async function openTemplate(template, { group, cwd = null }) {
   const all = (Array.isArray(template?.items) ? template.items : []).filter((item) => item && typeof item === 'object');
@@ -1714,6 +1809,7 @@ async function openTemplate(template, { group, cwd = null }) {
   const exist = cwd ? [] : await invoke('dirs_exist', { paths: folders }).catch(() => folders.map(() => true));
   const missing = new Set(folders.filter((_, index) => exist[index] === false));
   ensureGroup(group);
+  if (cwd && !groupFolderOf(group)) setGroupFolder(group, cwd);
   const made = [];
   let moved = 0;
   for (const item of items) {
@@ -1757,12 +1853,12 @@ function groupMenu(group, ev) {
   if (resting) items.push({ label: `쉬는 세션 ${resting}개 모두 재개`, action: () => wakeGroup(whole) });
   if (all.length) items.push({ label: '이 묶음을 틀로 저장… (같은 구성을 다시 펼칠 수 있게)', action: () => saveTemplate(whole) });
   if (group.logical) {
-    // 그룹 폴더: 이 그룹에서 여는 세션이 시작될 폴더. 정해 두지 않으면 사이드바 위의 새 세션 폴더에서 시작한다.
+    // 그룹 폴더: 이 그룹에서 여는 세션이 시작될 폴더. 정해 두지 않으면 기본 폴더(사용자 폴더)에서 시작한다.
     const own = groupFolderOf(group.name);
     items.push({ label: own ? '그룹 폴더 바꾸기…' : '그룹 폴더 정하기… (이 그룹의 세션이 시작될 폴더)', action: () => pickGroupFolder(group.name) });
-    if (own) items.push({ label: '그룹 폴더 풀기 (새 세션 폴더를 따르기)', action: () => setGroupFolder(group.name, '') });
+    if (own) items.push({ label: '그룹 폴더 풀기 (기본 폴더에서 시작)', action: () => setGroupFolder(group.name, '') });
     items.push({ label: '그룹 이름 바꾸기', action: () => renameGroup(group) });
-    items.push({ label: '그룹 삭제 (세션은 폴더별 묶음으로)', action: () => deleteGroup(group) });
+    items.push({ label: all.length ? `그룹 삭제 (항목 ${all.length}개를 먼저 닫거나 옮겨야 함)` : '그룹 삭제', action: () => deleteGroup(whole) });
   } else {
     items.push({ label: '이 묶음을 그룹으로 만들기…', action: () => askGroup(all) });
   }
@@ -1820,7 +1916,8 @@ document.addEventListener('mouseup', (ev) => {
   if (head) {
     // 묶음 머리에 놓음: 그 묶음으로 옮긴다.
     if (head.dataset.drop === 'new') askGroup([s]).then(render);
-    else moveToGroup([s], head.dataset.drop === 'logical' ? head.dataset.name : '');
+    else if (head.dataset.drop === 'logical') moveToGroup([s], head.dataset.name);
+    else render();
     return;
   }
   // 다른 항목의 줄에 놓음: 그 줄의 위나 아래로 순서를 옮긴다. 다른 그룹의 줄이면 그 그룹으로도 옮긴다.
@@ -1828,7 +1925,7 @@ document.addEventListener('mouseup', (ev) => {
   if (over) {
     if (over.target !== s) {
       if (over.target.group) ensureGroup(over.target.group);
-      s.group = over.target.group;
+      if (over.target.group) s.group = over.target.group; // 그룹 밖으로는 옮기지 않는다.
       placeInOrder(s, over.target, over.after);
       saveState();
     }
@@ -1926,7 +2023,7 @@ function render() {
       'group', group.logical && 'logical', group.list.some((s) => s.attention || s.waiting) && 'attention',
     ].filter(Boolean).join(' '));
     const ownFolder = group.logical ? groupFolderOf(group.name) : '';
-    head.title = `${group.hint}${ownFolder ? `\n그룹 폴더: ${ownFolder}` : ''}\n클릭: 접기·펼치기 · 오른쪽 클릭: 메뉴 · 끌어다 놓기: 이 묶음에 넣기`;
+    head.title = `${group.hint}\n${group.logical ? `그룹 폴더: ${ownFolder || `정하지 않음 (기본 폴더 ${folder}에서 시작)`}\n` : ''}클릭: 접기·펼치기 · 오른쪽 클릭: 메뉴(폴더 정하기 포함) · +: 세션·항목 더하기 · 끌어다 놓기: 이 묶음에 넣기`;
     head.dataset.drop = group.logical ? 'logical' : 'folder';
     head.dataset.name = group.name;
     // 밖에서 끌어다 놓은 것을 이 묶음의 항목으로 만들 때 쓴다(drop.js).
@@ -1937,6 +2034,14 @@ function render() {
       make('span', '', folded ? '▸' : '▾'),
       make('span', 'name', group.logical ? `◆ ${group.name}` : group.name),
     );
+    // 묶음의 할 일 진행(그 묶음의 할 일 항목을 모두 합친 것. 접어 두어도 보인다).
+    const todo = group.list.reduce((sum, s) => {
+      const part = isTerm(s) ? null : s.view?.progress?.();
+      return part ? { done: sum.done + part.done, total: sum.total + part.total } : sum;
+    }, { done: 0, total: 0 });
+    const progress = make('span', todo.total ? `todo-pill${todo.done === todo.total ? ' full' : ''}` : '', todo.total ? `${todo.done}/${todo.total}` : '');
+    if (todo.total) progress.title = `이 묶음의 할 일: ${todo.total}개 가운데 ${todo.done}개 끝냄`;
+    head.append(progress);
     // 묶음 안에서 돌고 있는 서브에이전트 수(접어 두어도 보인다).
     const running = group.list.reduce((sum, s) => sum + s.agents.size, 0);
     head.append(running ? agentPill(running, `이 묶음에서 서브에이전트 ${running}개 실행 중`) : make('span'));
@@ -1948,30 +2053,12 @@ function render() {
       play.onclick = (ev) => { ev.stopPropagation(); wakeGroup(group); };
     }
     head.append(play);
-    const add = make('button', 'close', '+');
-    add.title = '이 묶음에 새 항목 더하기';
+    const add = make('button', 'close add', '+'); // 세션·항목을 만드는 길이므로 마우스를 올리지 않아도 늘 보인다.
+    add.title = '이 그룹에 세션·항목 더하기';
     add.onclick = (ev) => { ev.stopPropagation(); showMenu(ev, addItems(group)); };
     head.append(add);
     head.append(make('span', 'count', String(group.list.length)));
-    // 그룹의 폴더 줄: 이름 바로 아래에 그룹 폴더를 보여 주고 거기서 바로 고른다(접어 두어도 보인다).
-    // 위쪽 폴더 줄은 새 세션 폴더만, 이 줄은 이 그룹의 폴더만 바꾼다.
-    if (group.logical) {
-      const row = make('div', ownFolder ? 'group-folder' : 'group-folder unset');
-      // 오른쪽 정렬 말줄임에서 글자 순서가 뒤집히지 않도록 방향 표시 문자를 붙인다.
-      const path = make('span', 'path', ownFolder ? '‎' + ownFolder : '폴더를 정하지 않음');
-      path.title = ownFolder
-        ? `그룹 "${group.name}"의 폴더: ${ownFolder}\n이 그룹에서 여는 세션은 여기서 시작합니다.\n클릭·▾: 바꾸기·풀기`
-        : `그룹 "${group.name}"의 폴더를 정하지 않았습니다. 이 그룹의 세션은 새 세션 폴더(${folder})에서 시작합니다.\n클릭·▾: 정하기`;
-      const recent = make('button', '', '▾');
-      recent.title = '최근 폴더에서 골라 이 그룹의 폴더로 정하기';
-      const pick = make('button', '', '폴더…');
-      pick.title = ownFolder ? '이 그룹의 폴더 바꾸기' : '이 그룹의 폴더 정하기';
-      path.onclick = recent.onclick = (ev) => folderMenu(ev, group.name);
-      pick.onclick = () => pickGroupFolder(group.name);
-      row.onclick = (ev) => ev.stopPropagation(); // 폴더 줄을 눌러도 묶음이 접히지 않게
-      row.append(path, recent, pick);
-      head.append(row);
-    }
+    // 그룹의 폴더를 고르는 줄은 사이드바에 두지 않는다. 그룹의 폴더는 풍선말에 보이고, 그룹 오른쪽 클릭 메뉴에서 정한다.
     head.onclick = () => {
       if (folded) collapsed.delete(group.key); else collapsed.add(group.key);
       localStorage.setItem('cypher.collapsed', JSON.stringify([...collapsed]));
@@ -1983,6 +2070,13 @@ function render() {
   }
   if (renaming != null && !sessions.has(renaming)) renaming = null;
   if (filterWaiting && !rows.length) rows.push(make('li', 'group', '대기 중인 세션이 없습니다.'));
+  // 그룹이 하나도 없으면 무엇부터 해야 하는지 알려 준다(세션과 항목은 그룹 안에서만 만든다).
+  if (!filterWaiting && !rows.length) {
+    const hint = make('li', 'group new', '그룹이 없습니다 — 여기를 누르거나 위의 [+ 그룹]으로 그룹을 만드세요');
+    hint.title = '세션과 항목은 그룹 안에서만 만들 수 있습니다';
+    hint.onclick = () => newGroup();
+    rows.push(hint);
+  }
   if (drag?.active) {
     const fresh = make('li', 'group new', '+ 새 그룹으로 (여기에 놓기)');
     fresh.dataset.drop = 'new';
@@ -1992,7 +2086,6 @@ function render() {
 
   // 창 아래 상태줄에도 지금 세션의 모델·effort를 항상 보여 준다.
   renderWhere();
-  showFolder(); // 보고 있는 항목의 그룹이 바뀌면 폴더 줄의 풍선말(그 그룹의 세션이 시작될 곳)도 바뀐다.
   $('status-model').textContent = active?.model
     ? [active.model, active.effort, active.context == null ? '' : `컨텍스트 ${percent(active.context)}`,
       active.agents.size ? `서브에이전트 ${active.agents.size}` : ''].filter(Boolean).join(' · ')
@@ -2021,6 +2114,7 @@ function render() {
       s.head.ondblclick = () => showOnly(s);
     }
     s.headInfo.replaceChildren(
+      ...(s.mark ? [markBadge(s.mark)] : []),
       make('span', 'title', label(s)),
       ...(s.agents.size ? [agentPill(s.agents.size, agentSummary(s))] : []),
       make('span', 'model', [s.model, s.effort].filter(Boolean).join(' · ')),
@@ -2042,6 +2136,7 @@ function renderWhere() {
     make('span', 'where-sep', '›'),
   ];
   if (!isTerm(s)) parts.push(make('span', 'where-kind', `${KINDS[s.kind].icon} ${KINDS[s.kind].label}`));
+  if (s.mark) parts.push(markBadge(s.mark));
   parts.push(name);
   if (s.name) parts.push(make('span', 'where-origin', baseLabel(s)));
   parts.push(make('span', 'where-path', `‎${s.cwd}`));
@@ -2096,15 +2191,12 @@ function showOnly(s) {
   activate(s);
 }
 
-/** 사이드바의 빈 곳을 오른쪽 클릭했을 때의 메뉴: 새로 열기, 그룹, 보기 방식. */
+/** 사이드바의 빈 곳을 오른쪽 클릭했을 때의 메뉴: 새 그룹, 보기 방식. 세션과 항목은 그룹 머리의 +(또는 그룹 오른쪽 클릭)로 만든다. */
 function sidebarMenu(ev) {
-  const items = config.profiles.map((p) => ({ label: `새 ${p.label} 세션`, action: () => newSession(p.id) }));
-  if (offersWorktree()) {
-    items.push({ label: '새 워크트리 세션…', action: () => newWorktree('replace') });
-  }
-  for (const [kind, def] of Object.entries(KINDS)) items.push({ label: `새 ${def.label}`, action: () => createKind(kind) });
-  items.push({ label: '새 그룹 만들기…', action: newGroup });
-  items.push({ label: '새 세션 폴더 바꾸기…', action: pickFolder });
+  const items = [
+    { caption: '세션과 항목은 그룹 안에서만 만듭니다 (그룹 머리의 +)' },
+    { label: '새 그룹 만들기…', action: () => newGroup() },
+  ];
   items.push({ label: '빠른 이동·명령 찾기…  (Ctrl+Shift+K)', action: showPalette });
   if (closedCount()) items.push({ label: '닫은 항목 다시 열기…  (Ctrl+Shift+R)', action: showClosed });
   if (visible.length > 1) {
@@ -2129,12 +2221,6 @@ function sidebarMenu(ev) {
   showMenu(ev, items);
 }
 
-/** 새 세션 폴더를 고른다. 그룹의 폴더는 그룹 머리의 폴더 줄에서 고른다(pickGroupFolder). */
-async function pickFolder() {
-  const picked = await invoke('pick_folder', { start: folder });
-  if (picked) useFolder(picked);
-}
-
 /**
  * 빠른 이동 창에 올릴 것: 사이드바의 항목(최근에 본 순서, 지금 보고 있는 것은 맨 뒤)과 앱의 명령.
  * 아무것도 치지 않고 Enter를 누르면 바로 전에 보던 항목으로 간다.
@@ -2147,17 +2233,20 @@ function paletteEntries() {
       return {
         icon: isTerm(s) ? '›' : KINDS[s.kind].icon,
         title: label(s),
-        note: [s.group ? `◆ ${s.group}` : baseName(s.startCwd), s.name ? baseLabel(s) : '', state, s === active ? '지금 보는 항목' : ''].filter(Boolean).join(' · '),
+        note: [s.mark ? `북마크 ${s.mark}` : '', s.group ? `◆ ${s.group}` : baseName(s.startCwd), s.name ? baseLabel(s) : '', state, s === active ? '지금 보는 항목' : ''].filter(Boolean).join(' · '),
         keywords: [s.cwd, s.title, isTerm(s) ? '세션 터미널' : KINDS[s.kind].label, s.model].filter(Boolean).join(' '),
         tone: s.waiting === 'approval' ? 'alert' : s.waiting === 'done' ? 'done' : '',
         action: () => activate(s),
       };
     });
   const command = (title, action, note = '명령') => ({ icon: '⌘', title, note, action });
+  // 새로 만드는 것은 지금 보고 있는 항목의 그룹에 들어간다(그룹이 하나뿐이면 그 그룹). 어느 그룹인지 설명에 적는다.
+  const into = viewedGroup() || (groupList.length === 1 ? groupList[0] : '');
+  const where = into ? `명령 · 그룹 "${into}"에 만듦` : `명령 · ${groupList.length ? '그룹의 항목을 보고 있을 때만(또는 그룹 머리의 +)' : '먼저 그룹을 만들어야 함'}`;
   const commands = [
-    ...config.profiles.map((p) => command(`새 ${p.label} 세션`, () => newSession(p.id), `명령 · 폴더: ${groupFolderOf(viewedGroup()) || folder}`)),
-    ...(offersWorktree() ? [command('새 워크트리 세션…', () => newWorktree('replace'))] : []),
-    ...Object.entries(KINDS).map(([kind, def]) => command(`새 ${def.label}`, () => createKind(kind))),
+    ...config.profiles.map((p) => command(`새 ${p.label} 세션`, () => newSession(p.id), into ? `${where} · 폴더: ${groupFolderOf(into) || folder}` : where)),
+    ...(offersWorktree() ? [command('새 워크트리 세션…', () => newWorktree('replace'), where)] : []),
+    ...Object.entries(KINDS).map(([kind, def]) => command(`새 ${def.label}`, () => createKind(kind), where)),
     command('새 그룹 만들기…', newGroup),
     command('닫은 항목 다시 열기…', showClosed, '명령 · Ctrl+Shift+R: 가장 나중에 닫은 것'),
     command('알림 기록', showNotices, `명령 · Ctrl+Shift+A${unreadCount() ? ` · 새 알림 ${unreadCount()}개` : ''}`),
@@ -2179,8 +2268,7 @@ function paletteEntries() {
     command('Claude 공통 설정 열기 (settings.json)', () => runMenu('claude-settings'), '설정'),
     command('Claude 공통 지침 열기 (CLAUDE.md)', () => runMenu('claude-memory'), '설정'),
     command('단축키 보기', showHelp, '도움말 · F1'),
-    command('새 세션 폴더 고르기…', pickFolder, `폴더 · 지금: ${folder}`),
-    ...folderChoices().map(({ path, note }) => command(`새 세션 폴더를 ${baseName(path)}(으)로`, () => useFolder(path), `${note} · ${path}`)),
+    ...(viewedGroup() ? [command(`그룹 "${viewedGroup()}"의 폴더 정하기…`, () => pickGroupFolder(viewedGroup()), `폴더 · 지금: ${groupFolderOf(viewedGroup()) || '정하지 않음'}`)] : []),
   ];
   return [...items, ...commands];
 }
@@ -2246,6 +2334,8 @@ function sessionMenu(s, ev) {
     { label: s.name ? `별칭 바꾸기… (지금: ${s.name})` : '별칭 붙이기…', action: () => rename(s) },
     ...(s.name ? [{ label: '별칭 지우기 (원래 이름으로)', action: () => { s.name = ''; render(); saveState(); } }] : []),
     { colors: COLORS, action: (color) => { s.color = color; render(); saveState(); } },
+    { caption: s.mark ? `북마크 ${s.mark} · Ctrl+${s.mark}로 바로 가기 (같은 숫자를 다시 누르면 풂)` : '북마크: 숫자를 고르면 Ctrl+숫자로 바로 갑니다' },
+    { icons: MARKS.map((digit) => ({ node: make('b', '', digit), title: markTitle(s, digit), on: s.mark === digit, action: () => setMark(s, digit) })) },
     { label: s.group ? `그룹 바꾸기… (지금: ${s.group})` : '그룹 지정…', action: () => askGroup([s], s.group) },
     ...(visible.length > 1 || !visible.includes(s) ? [{ label: '이것만 보기 (나머지는 화면에서 숨기기)', action: () => showOnly(s) }] : []),
     visible.includes(s)
@@ -2422,7 +2512,7 @@ function browserSelect(s, id) {
 function groupItemsText(s) {
   // 그룹이 없는 세션에는 같은 폴더 묶음의 다른 항목을 알려 주지 않는다(다룰 수 없는 것들이다).
   if (!s.group) {
-    return `${NO_GROUP}\n지금은 폴더 묶음 ${s.startCwd}에 있습니다. 그룹이 없어도 새 항목을 놓는 것은 됩니다: memo_write(새 메모), image_add, doc_show, mindmap_write(새 마인드맵), erd_write(새 ERD). 놓은 항목은 이 세션의 폴더 묶음에 들어갑니다.`;
+    return `${NO_GROUP}\n지금은 폴더 묶음 ${s.startCwd}에 있습니다. 그룹이 없어도 새 항목을 놓는 것은 됩니다: memo_write(새 메모), image_add, doc_show, table_show, mindmap_write(새 마인드맵), erd_write(새 ERD), todo_write(새 할 일). 놓은 항목은 이 세션의 폴더 묶음에 들어갑니다.`;
   }
   const dir = (name) => storeDirs[name] || `%APPDATA%\\cypher\\${name}`;
   const lines = [...sessions.values()].filter((other) => other.group === s.group).map((other) => {
@@ -2444,6 +2534,12 @@ function groupItemsText(s) {
     if (other.kind === 'image') return `- ${head} 이미지 ${name} — 파일: ${other.view.path() || '(아직 그림 없음)'}${state.source ? ` · 출처: ${state.source}` : ''}`;
     if (other.kind === 'mindmap') return `- ${head} 마인드맵 ${name} — 개요 글 파일: ${dir('mindmaps')}\\${other.view.store()}.md (고칠 때는 mindmap_write에 id ${other.key})`;
     if (other.kind === 'erd') return `- ${head} ERD ${name} — erDiagram 글 파일: ${dir('erds')}\\${other.view.store()}.mmd (고칠 때는 erd_write에 id ${other.key})`;
+    if (other.kind === 'todo') {
+      const { done, total } = other.view.progress();
+      return `- ${head} 할 일 ${name} — 끝낸 일 ${done}/${total} · 체크 목록 파일: ${dir('todos')}\\${other.view.store()}.md (더하거나 바꿀 때는 todo_write, 체크할 때는 todo_check에 id ${other.key})`;
+    }
+    if (other.kind === 'run') return `- ${head} 명령 ${name} — 명령: ${other.view.command() || '(없음)'} · 폴더: ${other.cwd} · 상태: ${other.view.stateText()} (출력은 run_output에 id ${other.key}. 실행·멈춤은 사용자가 한다)`;
+    if (other.kind === 'table') return `- ${head} 표 ${name} — 파일: ${other.view.path() || '(아직 파일 없음)'} (표로 보여 주는 화면. 파일을 고치면 스스로 다시 읽는다)`;
     return `- ${head} ${KINDS[other.kind]?.label || other.kind} ${name}`;
   });
   return `그룹 "${s.group}"의 Cypher 항목 ${lines.length}개(이 그룹 밖의 항목은 다룰 수 없음):\n${lines.join('\n')}`;
@@ -2554,23 +2650,91 @@ async function imageAdd(s, { stored, title }) {
 
 const samePath = (a, b) => pathKey(a) === pathKey(b);
 
-/** 파일을 그 세션의 묶음에 문서 항목으로 놓는다. 이미 그 파일을 보여 주는 문서가 있으면 그것을 새로 읽는다. */
-async function docShow(s, { path, title }) {
-  let doc = [...sessions.values()].find((other) => other.kind === 'reader' && groupKey(other) === groupKey(s) && samePath(other.view.path(), path));
+/**
+ * 파일을 그 세션의 묶음에 그 파일을 보여 주는 항목(문서: 'reader', 표: 'table')으로 놓는다.
+ * 이미 그 파일을 보여 주는 같은 종류의 항목이 있으면 그것을 새로 읽는다. `noun`은 Claude와 사용자에게 보일 종류 이름.
+ */
+async function showFile(s, { path, title }, kind, noun) {
+  let doc = [...sessions.values()].find((other) => other.kind === kind && groupKey(other) === groupKey(s) && samePath(other.view.path(), path));
   const fresh = !doc;
   if (!doc) {
-    doc = await newItem('reader', { ...besideOf(s), saved: { path }, name: title ? String(title).slice(0, 120) : '', show: 'hidden' });
+    doc = await newItem(kind, { ...besideOf(s), saved: { path }, name: title ? String(title).slice(0, 120) : '', show: 'hidden' });
   } else if (canControl(s, doc)) {
     await doc.view.reload();
     if (title) { doc.name = String(title).slice(0, 120); saveState(); }
   } else {
-    // 그룹 없는 묶음에 이미 있는 문서 항목은 건드리지 않는다(파일이 바뀌면 그 화면이 스스로 다시 그린다).
-    return `이 파일을 보여 주는 문서 항목 #${doc.key} "${label(doc)}"이 이미 있습니다. ${LATER_NEEDS_GROUP}`;
+    // 그룹 없는 묶음에 이미 있는 항목은 건드리지 않는다(파일이 바뀌면 그 화면이 스스로 다시 그린다).
+    return `이 파일을 보여 주는 ${noun} 항목 #${doc.key} "${label(doc)}"이 이미 있습니다. ${LATER_NEEDS_GROUP}`;
   }
-  announce(doc, s, fresh ? '문서를 놓았습니다' : '문서를 새로 읽었습니다');
+  announce(doc, s, fresh ? `${noun}를 놓았습니다` : `${noun}를 새로 읽었습니다`);
   return fresh
-    ? `문서 항목 #${doc.key} "${label(doc)}"을 놓았습니다(${placedIn(s)}). 파일이 바뀌면 화면이 스스로 다시 그립니다.`
-    : `이 파일을 보여 주는 문서 항목 #${doc.key} "${label(doc)}"이 이미 있어 새로 읽었습니다.`;
+    ? `${noun} 항목 #${doc.key} "${label(doc)}"을 놓았습니다(${placedIn(s)}). 파일이 바뀌면 화면이 스스로 다시 그립니다.`
+    : `이 파일을 보여 주는 ${noun} 항목 #${doc.key} "${label(doc)}"이 이미 있어 새로 읽었습니다.`;
+}
+
+/** 할 일 항목을 만들거나, 있는 목록에 덧붙이거나 통째로 바꾼다. 답에는 할 일마다 번호를 붙인 지금의 목록을 싣는다. */
+async function todoWrite(s, { item, title, text, replace }) {
+  const name = typeof title === 'string' ? title.trim().slice(0, 120) : ''; // 글자가 아닌 값이 별칭이 되지 않게 한다.
+  const listing = (target) => {
+    const { done, total } = target.view.progress();
+    return `지금의 목록(끝낸 일 ${done}/${total}, 앞의 숫자가 할 일의 번호):\n${target.view.listing()}`;
+  };
+  if (item != null) {
+    let target = itemInGroup(s, item, 'todo');
+    await target.view.ready;
+    target = itemInGroup(s, item, 'todo'); // 기다리는 사이에 닫혔거나 다른 그룹으로 옮겨졌으면 여기서 거절된다.
+    if (replace) target.view.setText(text); else target.view.append(text);
+    if (name) target.name = name;
+    saveState();
+    announce(target, s, replace ? '할 일을 바꿨습니다' : '할 일을 더했습니다');
+    return `할 일 #${target.key} "${label(target)}"${replace ? '의 내용을 바꿨습니다' : '의 끝에 덧붙였습니다'}. ${listing(target)}`;
+  }
+  const made = await newItem('todo', { ...besideOf(s), saved: { text }, name, show: 'hidden' });
+  announce(made, s, '할 일을 만들었습니다');
+  return `할 일 항목 #${made.key} "${label(made)}"을 만들었습니다(${placedIn(s)}). ${s.group ? `일을 끝내면 todo_check에 id ${made.key}와 그 할 일의 번호나 글을 주어 체크하세요.` : LATER_NEEDS_GROUP} ${listing(made)}`;
+}
+
+/** 할 일 항목에서 할 일을 체크하거나 푼다. 진행은 사이드바(그 줄과 묶음 머리)에 바로 보이므로 따로 알리지 않는다. */
+async function todoCheck(s, { item, items, done }) {
+  let target = itemInGroup(s, item, 'todo');
+  await target.view.ready;
+  target = itemInGroup(s, item, 'todo'); // 기다리는 사이에 닫혔거나 다른 그룹으로 옮겨졌으면 여기서 거절된다.
+  const { changed, already, problems } = target.view.check(items, done !== false);
+  const { done: finished, total } = target.view.progress();
+  const listing = `지금의 목록(끝낸 일 ${finished}/${total}):\n${target.view.listing()}`;
+  // 하나도 찾지 못했으면 실패로 알린다(번호나 글을 고쳐 다시 부를 수 있게 목록을 함께 준다).
+  if (!changed && !already) throw new Error(`할 일을 찾지 못했습니다: ${problems.join(' / ')}\n${listing}`);
+  if (changed) saveState();
+  const parts = [
+    changed ? `${changed}개를 ${done !== false ? '끝냄으로 체크했습니다' : '체크를 풀었습니다'}` : '',
+    already ? `${already}개는 이미 그 상태였습니다` : '',
+    problems.length ? `찾지 못한 것: ${problems.join(' / ')}` : '',
+  ].filter(Boolean);
+  return `할 일 #${target.key} "${label(target)}": ${parts.join(' · ')}. ${listing}`;
+}
+
+/** 명령 항목의 상태와 출력의 끝부분. 읽기만 한다(실행·멈춤은 사용자가 한다). */
+function runOutput(s, { item, lines }) {
+  const target = itemInGroup(s, item, 'run');
+  const body = target.view.output(Math.min(400, Math.max(1, Number(lines) || 80)));
+  return `명령 #${target.key} "${label(target)}" — 명령: ${target.view.command() || '(없음)'} · 폴더: ${target.cwd} · 상태: ${target.view.stateText()}\n출력의 끝부분:\n${body || '(출력 없음)'}`;
+}
+
+const RUN_NOTICE_MS = 10000; // 이보다 금방 끝난 성공한 명령은 알리지 않는다(그 줄의 표시로 충분하다).
+
+/** 명령 항목의 명령이 끝났다: 보고 있지 않았으면 그 줄에 표시하고, 실패했거나 오래 걸린 것은 알린다. */
+function runFinished(item, { ok, took, text }) {
+  if (!sessions.has(item.key)) return;
+  const seen = visible.includes(item) && document.hasFocus();
+  if (!visible.includes(item)) item.attention = true;
+  render();
+  if (ok && took < RUN_NOTICE_MS) return;
+  const title = `${label(item)}: ${ok ? '명령이 끝났습니다' : '명령이 실패했습니다'}`;
+  const body = `${text} — ${whereOf(item)} (누르면 엽니다)`;
+  logNotice(item, 'item', title, body, !seen);
+  if (seen) return;
+  if (!document.hasFocus() && config.notify.system) invoke('notify', { title, body });
+  if (config.notify.in_app) toast(item, title, body);
 }
 
 /** Claude 세션이 보낸 알림: 앱 안 알림과(창이 뒤에 있으면) Windows 알림으로 보이고 알림 기록에 남긴다. */
@@ -2632,7 +2796,7 @@ function shouldPlace(s, path, kind) {
   if (s.placedFiles.has(pathKey(path))) return false;
   s.placedFiles.add(pathKey(path));
   // 그 묶음에 이미 이 파일을 보여 주는 항목이 있으면 더 놓지 않는다.
-  const shows = (other) => (other.kind === 'reader' && samePath(other.view.path(), path))
+  const shows = (other) => ((other.kind === 'reader' || other.kind === 'table') && samePath(other.view.path(), path))
     || (other.kind === 'http' && samePath(other.view.state().file || '', path))
     || (other.kind === 'memo' && samePath(other.view.state().path || '', path));
   if ([...sessions.values()].some((other) => groupKey(other) === groupKey(s) && shows(other))) return false;
@@ -2656,6 +2820,7 @@ async function placeCreated(s, path, kind) {
     const [image] = await addImages([await invoke('image_import', { path })], { ...besideOf(s), source: path });
     return image;
   }
+  if (kind === 'table') return newItem('table', { ...besideOf(s), saved: { path }, show: 'hidden' });
   // 요청 파일은 그 폴더를 보는 HTTP 항목으로 놓는다. 그룹이 없는 세션은 자기 폴더 묶음에만 놓을 수 있으므로,
   // 요청 파일이 다른 폴더의 것이면(남의 폴더 묶음에 끼어들게 된다) 문서 항목으로 보여 준다.
   const home = kind === 'http' ? httpHome(path) : '';
@@ -2689,7 +2854,11 @@ async function mcpAction(req) {
     case 'erd_write': return { text: await erdWrite(s, req) };
     case 'memo_write': return { text: await memoWrite(s, req) };
     case 'image_add': return { text: await imageAdd(s, req) };
-    case 'doc_show': return { text: await docShow(s, req) };
+    case 'doc_show': return { text: await showFile(s, req, 'reader', '문서') };
+    case 'table_show': return { text: await showFile(s, req, 'table', '표') };
+    case 'todo_write': return { text: await todoWrite(s, req) };
+    case 'todo_check': return { text: await todoCheck(s, req) };
+    case 'run_output': return { text: runOutput(s, req) };
     case 'notify': return { text: claudeNotice(s, req) };
     case 'http_scope': return { folders: httpFolders(s) };
     // "chrome" 엔진의 브라우저는 그룹마다 따로 뜬다. 그룹에 든 세션에만, 그 그룹의 브라우저만 맡긴다.
@@ -2877,19 +3046,25 @@ async function openSourcePage(item, url) {
   }
 }
 
-/** 이미지 파일의 경로를 Claude 세션 입력창에 넣는다. 같은 묶음의 세션을 먼저 고르고, 여럿이면 고르게 한다. */
-function imageToClaude(item, path, ev) {
-  if (!path) return setStatus('아직 그림이 없습니다.');
+/** 글을 Claude 세션 입력창에 넣는다(보내지는 않는다). 같은 묶음의 세션을 먼저 고르고, 여럿이면 고르게 한다. */
+function textToClaude(item, text, ev) {
+  if (!text) return undefined;
   const claudes = [...sessions.values()].filter(aliveClaude);
   if (!claudes.length) return setStatus('열려 있는 Claude 세션이 없습니다. 먼저 Claude 세션을 여세요.');
   const give = (target) => {
     activate(target);
-    target.term.paste(`${quote(path)} `);
+    target.term.paste(text);
   };
   const same = claudes.filter((s) => groupKey(s) === groupKey(item));
   const pool = same.length ? same : claudes;
   if (pool.length === 1) return give(pool[0]);
-  showMenu(ev, pool.map((s) => ({ label: `${label(s)}에 넣기`, action: () => give(s) })));
+  return showMenu(ev, pool.map((s) => ({ label: `${label(s)}에 넣기`, action: () => give(s) })));
+}
+
+/** 파일(이미지·문서·표)의 경로를 Claude 세션 입력창에 넣는다. */
+function imageToClaude(item, path, ev) {
+  if (!path) return setStatus('아직 파일이 없습니다.');
+  return textToClaude(item, `${quote(path)} `, ev);
 }
 
 /** 대기 중인 다음 세션으로 간다. 승인 대기가 있으면 그쪽을 먼저 돈다. */
@@ -3139,6 +3314,7 @@ function describe(s) {
     name: s.name,
     group: s.group,
     color: s.color,
+    mark: s.mark || undefined, // 북마크 숫자(Ctrl+숫자로 바로 가기)
     ...(isTerm(s) ? {
       profile: s.profile.id,
       resume: resumeOf(s) || null,
@@ -3149,7 +3325,8 @@ function describe(s) {
 
 /** describe()로 적어 둔 내용으로 항목을 다시 만든다. `opts`는 newSession·newItem에 그대로 더해진다(show, restoring 등). */
 function revive(item, opts = {}) {
-  const common = { cwd: item.cwd, name: item.name, color: item.color, group: item.group || '', ...opts };
+  // 그룹 없이 적혀 있던 것(이전 버전에서 그룹 없이 쓰던 것, 그때 닫은 항목)은 `root` 그룹에 넣는다. 그룹 밖에는 아무것도 둘 수 없다.
+  const common = { cwd: item.cwd, name: item.name, color: item.color, mark: item.mark, ...opts, group: opts.group || item.group || adoptGroup() };
   // 종류 표시가 없는 예전 기록은 터미널 세션이다.
   const term = !item.kind || item.kind === 'term';
   return term
@@ -3517,8 +3694,14 @@ window.addEventListener('keydown', (ev) => {
     return;
   }
   const combo = ev.ctrlKey && ev.shiftKey && !ev.altKey;
+  // 북마크: Ctrl+Shift+숫자로 지금 항목에 숫자를 붙이고, Ctrl+숫자로 그 항목에 간다.
+  // Shift를 누르면 글쇠가 내는 글자가 바뀌므로(1 → !) 글쇠의 자리로 본다.
+  const digit = /^(?:Digit|Numpad)(\d)$/.exec(ev.code)?.[1];
   let handled = true;
-  if (combo && key === 't') newSession(lastProfile);
+  if (digit && combo) setMark(active, digit);
+  // 그 숫자의 북마크가 없으면 가로채지 않는다(Ctrl+0은 문서·ERD·마인드맵·메모에서 기본 크기·전체 맞춤이기도 하다).
+  else if (digit && ev.ctrlKey && !ev.shiftKey && !ev.altKey && markedItem(digit)) jumpToMark(digit);
+  else if (combo && key === 't') newSession(lastProfile);
   else if (combo && key === 'd') newSession(lastProfile, { show: 'split' });
   else if (combo && key === 'w') { if (active) closeSession(active); }
   else if (combo && key === 'x') { if (active) toggleShown(active); }
@@ -3551,8 +3734,8 @@ document.addEventListener('contextmenu', (ev) => ev.preventDefault());
 window.cypher = {
   sessions, newSession, newItem, activate, closeSession, toggleShown, send, setBroadcast, provideLinks, paste, moveToGroup, runMenu, showOnly,
   onHook, onStatus, nextWaiting, writeState, rename, sendPrompt, text: sessionText, addImages, onCaptured, captureBrowser,
-  setLook, currentLook, mcpAction, handoffSite, onMcpRequest,
-  showPalette, paletteEntries, showClosed, reopenLast, restartSession, placeInOrder, inSidebarOrder, cycle, find, recallPrompt, useFolder, folderChoices,
+  setLook, currentLook, mcpAction, handoffSite, onMcpRequest, setMark, jumpToMark, markedItem, textToClaude, runFinished,
+  showPalette, paletteEntries, showClosed, reopenLast, restartSession, placeInOrder, inSidebarOrder, cycle, find, recallPrompt, createGroup, newGroup, adoptGroup, groupFor,
   onCreatedFile, onTool, wake, wakeGroup, restore, runsClaude, askClaudeCommand, setGroupFolder, groupFolderOf, groupContext, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
   get visible() { return visible; },
   get active() { return active; },

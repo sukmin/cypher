@@ -78,7 +78,7 @@ pub struct Dropped {
     path: String,
     /// 파일 이름(확장자 포함).
     name: String,
-    /// "image" | "text" | "http" | "link" | "folder" | "other"
+    /// "image" | "text" | "table" | "http" | "link" | "folder" | "other"
     kind: &'static str,
     /// 인터넷 바로 가기(.url)일 때 그 주소.
     url: Option<String>,
@@ -122,6 +122,10 @@ fn classify(path: &Path) -> Dropped {
     if meta.len() > MAX_TEXT_BYTES || (!utf16 && head.contains(&0)) {
         return done("other", None);
     }
+    // 값을 구분자로 나눈 글은 표 항목으로 연다(JSON은 메모로 연다. 표로 보려면 "+ 표"에서 고른다).
+    if ext == "csv" || ext == "tsv" {
+        return done("table", None);
+    }
     done("text", None)
 }
 
@@ -148,6 +152,11 @@ mod tests {
         assert_eq!(kind(&file("no-extension", b"plain")), "text");
         assert_eq!(kind(&file("utf16.txt", &[0xff, 0xfe, b'a', 0, b'b', 0])), "text");
         assert_eq!(kind(&file("api.http", b"GET https://example.com\n")), "http");
+        assert_eq!(kind(&file("결과.csv", "이름,값\n가,1\n".as_bytes())), "table");
+        assert_eq!(kind(&file("rows.TSV", b"a\tb\n")), "table");
+        assert_eq!(kind(&file("data.json", b"[1]")), "text");
+        // 글자가 아닌 것은 확장자가 csv여도 표가 아니다.
+        assert_eq!(kind(&file("binary.csv", &[1, 0, 2, 0])), "other");
         assert_eq!(kind(&file("tool.exe", &[b'M', b'Z', 0, 0, 3, 0])), "other");
         assert_eq!(kind(&dir.join("sub")), "folder");
         assert_eq!(kind(&dir.join("없는 파일")), "other");

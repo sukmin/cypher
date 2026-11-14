@@ -459,8 +459,6 @@ li.attention .dot.kind { background: none; box-shadow: none; color: var(--text);
 /* 요청을 처리한 지 지난 시간: 자릿수가 바뀌어도 흔들리지 않게 고정폭 숫자로 */
 .elapsed { margin-right: 6px; font-weight: normal; font-variant-numeric: tabular-nums; color: var(--busy); }
 
-#recent { flex: none; padding: 4px 6px; }
-
 /* ───────── 터미널 화면에서 찾기: 개수, 방식 단추 ───────── */
 
 #search { align-items: center; }
@@ -571,33 +569,6 @@ li.approval .sub .tool { color: inherit; }
 .sub .repeat { margin-right: 5px; padding: 0 4px; font-weight: normal; color: var(--on-accent); background: var(--busy); border-radius: 6px; }
 :root[data-theme="win32"] #sessions li.active .sub .tool { color: inherit; }
 
-/* 그룹의 폴더 줄: 그룹 이름 바로 아래에 그룹 폴더와 고르는 단추(▾, 폴더…)를 둔다. 사이드바 위의 폴더 줄과 같은 모양이다. */
-#sessions li.group .group-folder {
-  grid-column: 2 / -1;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  min-width: 0;
-  margin-top: 2px;
-  font-weight: normal;
-  cursor: default;
-}
-/* 경로는 머리의 글자색을 그대로 써서 또렷하게 보인다. */
-#sessions li.group .group-folder .path {
-  flex: 1;
-  min-width: 0;
-  font: normal 11px/18px var(--mono-font);
-  color: inherit;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  direction: rtl; /* 긴 경로는 끝부분이 보이게 */
-  text-align: left;
-  cursor: pointer;
-}
-#sessions li.group .group-folder .path:hover { text-decoration: underline; }
-#sessions li.group .group-folder.unset .path { direction: ltr; font-family: inherit; opacity: 0.65; }
-#sessions li.group .group-folder button { flex: none; padding: 0 6px; font-size: 11px; line-height: 16px; }
 
 /* ───────── ERD 항목: 왼쪽은 코드(erDiagram 글), 오른쪽은 그림 ───────── */
 
@@ -647,3 +618,126 @@ li.dormant .dot { background: none; border: 1px solid var(--idle); }
 li.dormant .name, li.dormant .sub { opacity: 0.65; }
 #sessions li.group .wake { visibility: visible; font-size: 10px; color: var(--attention); }
 #sessions li.group .wake:hover { color: var(--accent); }
+
+/* ───────── 북마크: 항목에 붙인 숫자(Ctrl+숫자로 바로 가기). 사이드바 줄·창 제목 줄·작업영역 표시줄에 눈에 띄게 보인다 ───────── */
+
+.mark {
+  flex: none;
+  align-self: center;
+  display: inline-block;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 4px;
+  box-sizing: border-box;
+  border-radius: 5px;
+  font: bold 12px/18px var(--mono-font);
+  text-align: center;
+  color: var(--on-accent);
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--bg), 0 0 6px var(--accent);
+}
+#sessions li .name .mark { margin-right: 1px; }
+#where .mark { margin-right: -2px; }
+:root[data-theme="win32"] .mark { color: #ffffff; background: #c00000; border-radius: 0; box-shadow: none; }
+:root[data-theme="win32"] #sessions li.active .mark { color: #000080; background: #ffffff; }
+#menu .menu-icons b { font: bold 12px var(--mono-font); }
+
+/* ───────── 터미널이 아닌 항목이 내놓는 상태: 명령의 실행 중·성공·실패, 다 끝낸 할 일 ───────── */
+
+li.tone-busy .dot.kind { color: var(--busy); animation: pulse 1.2s infinite; }
+li.tone-busy .sub { color: var(--busy); }
+li.tone-ok .dot.kind, li.tone-ok .sub { color: var(--ok); }
+li.tone-fail .dot.kind, li.tone-fail .sub { color: var(--dead); }
+
+/* 묶음 머리의 할 일 진행(끝낸 수/전체) */
+#sessions li.group .todo-pill { padding: 0 5px; font: normal 11px/16px var(--ui-font); font-variant-numeric: tabular-nums; color: var(--text); border: 1px solid var(--attention); border-radius: 8px; }
+#sessions li.group .todo-pill.full { color: var(--ok); border-color: var(--ok); }
+/* Windows 고전 테마의 묶음 머리는 남색 바탕이라 흰 글자로 보인다. */
+:root[data-theme="win32"] #sessions li.group .todo-pill,
+:root[data-theme="win32"] #sessions li.group .todo-pill.full { color: #ffffff; border-color: #ffffff; border-radius: 0; }
+:root[data-theme="win32"] #sessions li.group .agents { color: #ffffff; background: none; border-color: #ffffff; border-radius: 0; }
+:root[data-theme="win32"] #sessions li.group .close.add { color: #ffffff; }
+
+/* ───────── 할 일 항목: 체크 목록 ───────── */
+
+.doc.todo .doc-bar { flex-wrap: wrap; row-gap: 4px; overflow: visible; }
+.todo-meter { flex: none; width: 90px; height: 8px; border-radius: 4px; background: var(--chip); border: 1px solid var(--line); overflow: hidden; }
+.todo-meter i { display: block; height: 100%; width: 0; background: var(--attention); transition: width 0.15s; }
+.todo-meter.full i { background: var(--ok); }
+.todo-count { flex: none; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--text); }
+.todo-view { flex: 1; min-height: 0; display: flex; flex-direction: column; background: var(--bg); }
+.todo-view[hidden], .todo-code[hidden] { display: none; }
+.todo-list { flex: 1; min-height: 0; overflow-y: auto; padding: 8px 10px 12px; outline: none; }
+.todo-list:empty { flex: none; padding: 0; }
+.todo-row { display: flex; align-items: center; gap: 8px; min-height: 28px; padding: 2px 6px 2px 8px; border: 1px solid transparent; border-radius: 5px; cursor: default; }
+.todo-row:hover { background: var(--hover); }
+.todo-row.sel { background: var(--select); }
+.todo-list:focus .todo-row.sel { border-color: var(--accent); }
+.todo-row input[type="checkbox"] { flex: none; width: 15px; height: 15px; margin: 0; accent-color: var(--accent); cursor: pointer; }
+.todo-text { flex: 1; min-width: 0; font-size: 13px; line-height: 1.5; overflow-wrap: anywhere; user-select: text; }
+.todo-text.blank { color: var(--idle); }
+.todo-row.done .todo-text { color: var(--dim); text-decoration: line-through; }
+.todo-edit { flex: 1; min-width: 0; height: 24px; padding: 0 6px; font: 13px var(--ui-font); }
+.todo-act { flex: none; visibility: hidden; padding: 0 6px; font-size: 11px; line-height: 18px; }
+.todo-row:hover .todo-act, .todo-row.sel .todo-act { visibility: visible; }
+.todo-head { margin: 12px 4px 4px; padding-bottom: 3px; font-weight: bold; color: var(--accent); border-bottom: 1px solid var(--line); }
+.todo-head:first-child { margin-top: 2px; }
+.todo-head.level-1 { font-size: 16px; color: var(--text); }
+.todo-head.level-2 { font-size: 13px; }
+.todo-head.level-3 { font-size: 12px; border-bottom: none; }
+.todo-note { padding: 2px 6px; font-size: 12px; line-height: 1.5; color: var(--dim); overflow-wrap: anywhere; user-select: text; }
+.todo-add { flex: none; margin: 0 10px 10px; height: 28px; padding: 0 8px; font: 13px var(--ui-font); }
+.todo-code {
+  flex: 1;
+  min-height: 0;
+  padding: 10px 12px;
+  resize: none;
+  outline: none;
+  border: none;
+  border-radius: 0;
+  color: var(--text);
+  background: var(--field);
+  font: 13px/20px var(--mono-font);
+  white-space: pre;
+  overflow: auto;
+  tab-size: 2;
+  user-select: text;
+}
+
+/* ───────── 명령 항목: 명령 한 줄과 그 출력 ───────── */
+
+.doc.runner .doc-bar { overflow: visible; }
+.run-go { min-width: 78px; font-weight: bold; }
+.run-go.stop { color: var(--dead); border-color: var(--dead); }
+.run-command { flex: 1; min-width: 120px; height: 24px; padding: 0 6px; font: 12px var(--mono-font); }
+.run-command:read-only { color: var(--dim); }
+.run-state { flex: none; max-width: 40%; padding: 0 8px; overflow: hidden; text-overflow: ellipsis; font-size: 12px; line-height: 20px; font-variant-numeric: tabular-nums; color: var(--dim); border: 1px solid var(--line); border-radius: 10px; }
+.run-state.busy { color: var(--busy); border-color: var(--busy); }
+.run-state.ok { color: var(--ok); border-color: var(--ok); }
+.run-state.fail { color: var(--dead); border-color: var(--dead); }
+.run-term { flex: 1; min-height: 0; }
+
+/* ───────── 표 항목: CSV·TSV·JSON을 표로 ───────── */
+
+.doc.tabular .doc-bar { flex-wrap: wrap; row-gap: 4px; overflow: visible; }
+.doc.tabular .doc-title { flex: 0 1 auto; color: var(--text); }
+.tbl-filter { flex: 1 1 160px; min-width: 120px; max-width: 420px; height: 24px; padding: 0 6px; font: 12px var(--ui-font); }
+.tbl-filter[hidden], .tbl-info[hidden] { display: none; }
+.tbl-info { flex: none; font-size: 12px; font-variant-numeric: tabular-nums; color: var(--dim); }
+.tbl-scroll { flex: 1; min-height: 0; overflow: auto; outline: none; background: var(--bg); }
+.tbl { border-collapse: separate; border-spacing: 0; font: 12px/1.5 var(--ui-font); }
+.tbl[hidden] { display: none; }
+.tbl th, .tbl td { max-width: 420px; padding: 3px 10px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; text-align: left; border-right: 1px solid var(--line); border-bottom: 1px solid var(--line); }
+.tbl th { position: sticky; top: 0; z-index: 1; font-weight: bold; color: var(--text); background: var(--panel); border-bottom: 1px solid var(--tree); cursor: pointer; user-select: none; }
+.tbl th:hover { background: var(--select); }
+.tbl td { user-select: text; }
+.tbl .num { text-align: right; font-variant-numeric: tabular-nums; }
+.tbl .tbl-no { position: sticky; left: 0; min-width: 34px; text-align: right; color: var(--idle); background: var(--panel); cursor: default; user-select: none; }
+.tbl th.tbl-no { z-index: 2; }
+.tbl tbody tr:hover td { background: var(--hover); }
+.tbl tbody tr:hover td.tbl-no { background: var(--panel); }
+.tbl td.sel { background: var(--select); box-shadow: inset 0 0 0 1px var(--accent); }
+.tbl-sort { margin-left: 5px; font-size: 9px; color: var(--accent); }
+.tbl-detail { flex: none; max-height: 30%; overflow: auto; padding: 6px 10px; font: 12px/1.5 var(--mono-font); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; background: var(--panel); border-top: 1px solid var(--line); }
+.tbl-detail[hidden] { display: none; }
+.tbl-detail b { display: block; margin-bottom: 2px; font: bold 11px var(--ui-font); color: var(--dim); }

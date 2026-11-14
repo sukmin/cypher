@@ -23,6 +23,7 @@ const MAIN: &[&str] = &[
     "browser_open", "browser_where", "browser_capture", "browser_engine_info", "browser_latest_version",
     "mcp_reply", "mindmap_read", "mindmap_write", "mindmap_remove", "mindmap_export", "mindmap_pdf",
     "erd_read", "erd_write", "erd_remove",
+    "todo_read", "todo_write", "todo_remove", "run_start", "table_pick",
     "store_dirs", "ui_zoom", "closed_restore",
     "http_files", "http_read", "http_save", "http_run_at",
 ];

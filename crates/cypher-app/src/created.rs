@@ -2,7 +2,7 @@
 //!
 //! Claude Code가 Write 도구로 파일을 쓰기 직전과 직후에 훅 신호가 온다(`status.rs`). 쓰기 직전에 그 파일이
 //! 없었으면 "새로 만든 파일"이고, 그런 파일만 종류를 가려 화면에 알린다. 화면은 그 세션의 묶음에
-//! 종류에 맞는 항목(문서, 이미지, HTTP)으로 놓는다.
+//! 종류에 맞는 항목(문서, 이미지, HTTP, 표)으로 놓는다.
 //!
 //! 전달 프로그램은 직전 신호를 보낸 뒤 앱이 받아 처리할 때까지 기다렸다가 끝나므로(`status.rs`의 답),
 //! "그때 파일이 있었는지"는 Claude Code가 실제로 쓰기 전에 확인된다.
@@ -65,7 +65,7 @@ fn is_plumbing(name: &str) -> bool {
     name.starts_with('.') || matches!(name, "node_modules" | "target" | "dist" | "build" | "__pycache__")
 }
 
-/// 사이드바에 보일 종류: "doc"(문서), "image"(이미지), "http"(HTTP 요청), "other"(그 밖의 글자 파일).
+/// 사이드바에 보일 종류: "doc"(문서), "image"(이미지), "http"(HTTP 요청), "table"(표: CSV·TSV), "other"(그 밖의 글자 파일).
 /// 보여 주지 않는 파일(설정·저장소·임시 폴더 안, 숨김 폴더·의존성·빌드 폴더 안, 글자가 아닌 파일)은 None.
 ///
 /// 숨김·빌드 폴더 규칙은 세션이 일하는 폴더(`base`) 아래의 부분에만 건다. 프로젝트 자체가 `D:\build\app`이나
@@ -97,6 +97,8 @@ fn kind_of(path: &Path, base: Option<&Path>, skip: &[PathBuf]) -> Option<&'stati
     }
     match ext.as_str() {
         "http" => Some("http"),
+        // 값을 구분자로 나눈 글은 표 항목으로 보여 준다(JSON은 설정 파일인 경우가 많아 표로 치지 않는다).
+        "csv" | "tsv" => Some("table"),
         "md" | "markdown" | "mdown" | "mkd" | "txt" => Some("doc"),
         _ => looks_like_text(path).then_some("other"),
     }
@@ -137,6 +139,9 @@ mod tests {
         assert_eq!(kind("shot.PNG", b"\x89PNG"), Some("image"));
         assert_eq!(kind("api/요청.http", b"GET http://x"), Some("http"));
         assert_eq!(kind("src/main.rs", b"fn main() {}"), Some("other"));
+        assert_eq!(kind("out/결과.csv", b"a,b\n1,2"), Some("table"));
+        assert_eq!(kind("out/rows.TSV", b"a\tb"), Some("table"));
+        assert_eq!(kind("package.json", b"{}"), Some("other"));
         // .rest 파일은 HTTP 항목이 열지 못하므로 요청 파일로 치지 않는다.
         assert_eq!(kind("api/요청.rest", b"GET http://x"), Some("other"));
         assert_eq!(kind("data.bin", &[1, 0, 2]), None);

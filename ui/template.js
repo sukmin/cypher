@@ -6,7 +6,7 @@
 // 이미지는 담지 않는다. 항목을 어떻게 담고 펼칠지는 main.js가 알고, 여기서는 목록 창과 저장소를 맡는다.
 
 let api = null;
-// { invoke, make, openPopup, ask, setStatus, notice, folder() → 새 세션 폴더, baseName,
+// { invoke, make, openPopup, ask, setStatus, notice, pickFolder(title) → 고른 폴더 | null, baseName,
 //   current() → 지금 보고 있는 묶음 { name, list } | null,
 //   pack(group) → { items, skipped, summary },
 //   open(template, { group, cwd }) → Promise<{ made, skipped }> }
@@ -51,8 +51,8 @@ export async function saveTemplate(group) {
   }
 }
 
-/** 틀을 펼친다. `here`이면 모든 항목을 지금의 새 세션 폴더에서 연다(같은 구성을 다른 폴더의 업무에 쓸 때). */
-async function openTemplate(info, here) {
+/** 틀을 펼친다. `elsewhere`이면 폴더를 골라 모든 항목을 그 폴더에서 연다(같은 구성을 다른 폴더의 업무에 쓸 때). */
+async function openTemplate(info, elsewhere) {
   const { invoke, ask, setStatus, notice } = api;
   let template;
   try {
@@ -60,14 +60,16 @@ async function openTemplate(info, here) {
   } catch (err) {
     return notice('틀을 열지 못했습니다', `${info.name}: ${err}`);
   }
+  const dir = elsewhere ? await api.pickFolder(`"${info.name}" 틀의 모든 항목을 열 폴더`) : null;
+  if (elsewhere && !dir) return;
   const group = await ask(
-    `"${info.name}" 틀을 펼칠 그룹 이름${here ? ` (모든 항목을 ${api.folder()}에서 엽니다)` : ''}`,
+    `"${info.name}" 틀을 펼칠 그룹 이름${dir ? ` (모든 항목을 ${dir}에서 엽니다)` : ''}`,
     '있는 그룹 이름을 적으면 그 그룹에 더합니다', info.name,
   );
   if (!group) return;
   setStatus(`틀을 펼치는 중: ${info.name}…`);
   try {
-    const { made, skipped } = await api.open(template, { group, cwd: here ? api.folder() : null });
+    const { made, skipped } = await api.open(template, { group, cwd: dir });
     setStatus(`틀을 펼쳤습니다: ${info.name} → 그룹 "${group}"에 항목 ${made}개${skipped.length ? ` — ${skipped.join(' · ')}` : ''}`);
   } catch (err) {
     notice('틀을 펼치지 못했습니다', `${info.name}: ${err}`);
@@ -89,8 +91,8 @@ export async function showTemplates() {
     use.append(make('span', 'template-summary', `항목 ${info.items}개${info.summary ? ` · ${info.summary}` : ''}`));
     use.title = `${info.name}\n${info.summary || `항목 ${info.items}개`}\n저장: ${when(info.saved)}\n클릭: 저장해 둔 폴더대로 펼치기`;
     use.onclick = () => { close(); openTemplate(info, false); };
-    const here = make('button', 'template-here', '이 폴더에서');
-    here.title = `모든 항목을 새 세션 폴더에서 열기: ${api.folder()}`;
+    const here = make('button', 'template-here', '다른 폴더에서…');
+    here.title = '폴더를 골라 모든 항목을 그 폴더에서 열기 (그 그룹에 폴더를 정해 두지 않았으면 그룹의 폴더로도 정합니다)';
     here.onclick = () => { close(); openTemplate(info, true); };
     const remove = make('button', 'close', '×');
     remove.title = '이 틀 지우기';

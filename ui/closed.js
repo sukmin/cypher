@@ -1,8 +1,8 @@
 // 닫은 항목 다시 열기(Ctrl+Shift+R): 닫은 항목을 기억해 두었다가 같은 자리(그룹·폴더·별칭·색)에 되살린다.
 //
 // - Claude 세션: 닫을 때의 대화 번호로 대화를 이어 연다(`claude --resume`). 대화가 없던 세션과 다른 터미널은 같은 폴더에서 새로 시작한다.
-// - 메모·마인드맵·이미지: 닫을 때 저장소의 `closed` 폴더로 옮겨 둔 내용을 제자리로 되돌린 뒤 연다(30일 보관).
-// - 사이트·HTTP: 보던 주소·파일로 다시 연다.
+// - 메모·마인드맵·ERD·할 일·이미지: 닫을 때 저장소의 `closed` 폴더로 옮겨 둔 내용을 제자리로 되돌린 뒤 연다(30일 보관).
+// - 사이트·HTTP·문서·표: 보던 주소·파일로 다시 연다. 명령: 적어 둔 명령으로 다시 연다(실행하지는 않는다).
 //
 // 목록은 이 컴퓨터에 기억한다(localStorage). 보관 기간(30일)이 지난 것은 목록에서도 뺀다.
 
@@ -14,6 +14,7 @@ const STORED = {
   memo: (saved) => (saved.memo ? { kind: 'memo', id: saved.memo, ext: null } : null),
   mindmap: (saved) => (saved.map ? { kind: 'mindmap', id: saved.map, ext: null } : null),
   erd: (saved) => (saved.erd ? { kind: 'erd', id: saved.erd, ext: null } : null),
+  todo: (saved) => (saved.todo ? { kind: 'todo', id: saved.todo, ext: null } : null),
   image: (saved) => (saved.image ? { kind: 'image', id: saved.image, ext: saved.ext } : null),
 };
 

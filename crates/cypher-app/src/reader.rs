@@ -74,6 +74,32 @@ pub async fn reader_pick(start: Option<String>) -> Option<String> {
     .flatten()
 }
 
+/// 표 항목으로 볼 수 있는 확장자: 값을 구분자로 나눈 글(CSV·TSV)과 JSON(배열, 한 줄에 하나씩).
+pub const TABLE_FORMATS: &[&str] = &["csv", "tsv", "json", "jsonl", "ndjson"];
+
+/// 표 항목으로 볼 수 있는 파일인지(확장자로 가린다).
+pub fn is_table(path: &Path) -> bool {
+    path.extension().is_some_and(|ext| TABLE_FORMATS.iter().any(|format| ext.eq_ignore_ascii_case(format)))
+}
+
+/// 표로 볼 파일을 고른다. 취소하면 None. 읽기와 "바뀌었는지"는 문서와 같은 명령(`reader_read`, `reader_stamp`)을 쓴다.
+#[tauri::command]
+pub async fn table_pick(start: Option<String>) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("표로 볼 파일")
+            .add_filter("표(CSV·TSV·JSON)", TABLE_FORMATS)
+            .add_filter("모든 파일", &["*"]);
+        if let Some(dir) = start.filter(|d| Path::new(d).is_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog.pick_file().map(|path| path.to_string_lossy().into_owned())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// 파일을 글로 읽는다. 인코딩(UTF-8, UTF-16, CP949)은 내용으로 알아본다.
 #[tauri::command]
 pub async fn reader_read(path: String) -> Result<ReaderFile, String> {
@@ -118,6 +144,16 @@ mod tests {
         // 읽을 때 준 시각과 따로 물은 시각이 같아야 화면이 "바뀌지 않았다"고 본다.
         assert_eq!(Some(file.modified), stamp(&path.to_string_lossy()));
         assert!(file.modified > 0.0 && file.bytes > 0);
+    }
+
+    #[test]
+    fn 표로_볼_파일은_확장자로_가린다() {
+        for table in [r"C:\a\결과.csv", r"C:\a\b.TSV", r"C:\a\rows.json", r"C:\a\log.jsonl", r"C:\a\x.ndjson"] {
+            assert!(is_table(Path::new(table)), "{table}");
+        }
+        for other in [r"C:\a\notes.md", r"C:\a\csv", r"C:\a\data.csv.bak", r"C:\a\x.xlsx"] {
+            assert!(!is_table(Path::new(other)), "{other}");
+        }
     }
 
     #[test]
