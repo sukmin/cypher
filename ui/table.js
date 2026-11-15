@@ -555,6 +555,8 @@ export function createTable(item, host, saved = {}, onChange = () => {}) {
     },
     path: () => path,
     reload,
+    /** 보던 파일이 밖에서(같은 워크스페이스의 Claude 세션 등) 고쳐졌다: 다음 살핌을 기다리지 않고 바로 견주어 다시 읽는다. */
+    refresh: check,
     /** 지금 표에 든 것(자동 검증용): 열 이름, 전체 줄 수, 보이는 줄 수, 그려 둔 줄 수. */
     summary: () => ({ columns: [...table.columns], rows: table.rows.length, shown: order.length, drawn, note: $note.textContent }),
     setFilter,

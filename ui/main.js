@@ -276,6 +276,7 @@ async function init() {
   listen('session-status', ({ payload }) => onStatus(payload));
   listen('session-hook', ({ payload }) => onHook(payload));
   listen('session-file', ({ payload }) => onCreatedFile(payload));
+  listen('session-edit', ({ payload }) => onEditedFile(payload));
   listen('session-tool', ({ payload }) => onTool(payload));
   listen('system-usage', ({ payload }) => onUsage(payload));
   // 창에 끌어다 놓은 파일·글자·링크·그림은 drop.js가 받는다(터미널에는 입력하고, 그 밖에는 항목으로 만든다).
@@ -2849,15 +2850,51 @@ const dirName = (path) => withRootSlash(path.replace(/[\\/][^\\/]*$/, ''));
 const httpHome = (path) => { const dir = dirName(path); const m = /^(.+?)[\\/](?:\.cypher[\\/]http|http)$/i.exec(dir); return m ? withRootSlash(m[1]) : dir; };
 /** 이 컴퓨터의 파일을 사이트 항목으로 열 때의 주소(`file:///C:/…`). 이름의 빈칸·한글·# 같은 글자는 주소에 맞게 바꾼다. */
 const fileUrl = (path) => `file:///${path.replace(/\\/g, '/').split('/').map((part, i) => (i === 0 ? part : encodeURIComponent(part))).join('/')}`;
-/** 두 주소가 같은 파일을 가리키는지(주소에 맞게 바꾼 글자와 대/소문자 차이는 무시). */
-const sameFileUrl = (a, b) => { try { return decodeURI(a).toLowerCase() === decodeURI(b).toLowerCase(); } catch { return a === b; } };
+/** 두 주소가 같은 파일을 가리키는지(주소에 맞게 바꾼 글자와 대/소문자 차이, 뒤에 붙은 `#자리`·`?값`은 무시). */
+const sameFileUrl = (a, b) => {
+  const bare = (url) => url.replace(/[?#].*$/, '');
+  try { return decodeURI(bare(a)).toLowerCase() === decodeURI(bare(b)).toLowerCase(); } catch { return bare(a) === bare(b); }
+};
 /** 경로를 견줄 때 쓰는 모양(구분자와 대/소문자를 맞춘 것). */
 const pathKey = (path) => path.replace(/\//g, '\\').toLowerCase();
+
+/** 그 항목이 그 파일을 보여 주고 있는지: 문서·표가 읽는 파일, 메모에 연결된 파일, HTTP 항목이 열어 둔 요청 파일, 사이트가 연 파일, 이미지를 가져온 파일. */
+function showsFile(other, path) {
+  switch (other.kind) {
+    case 'reader': case 'table': return samePath(other.view.path(), path);
+    case 'memo': return samePath(other.view.state().path || '', path);
+    case 'http': return samePath(other.view.state().file || '', path);
+    case 'site': return sameFileUrl(other.view.url() || '', fileUrl(path));
+    case 'image': return samePath(other.view.state().source || '', path);
+    default: return false;
+  }
+}
+
+/**
+ * Claude 세션이 파일을 썼다: 그 세션과 같은 묶음(워크스페이스)에서 그 파일을 보여 주는 항목이 바로 다시 읽게 한다.
+ * 문서·표·메모는 화면에 보이는 동안 스스로도 살피지만 그보다 먼저 맞추고, 스스로 살피지 않는 사이트(HTML 파일)와
+ * 이미지는 여기서만 새 내용이 된다. 고치던 글이 있는 메모·HTTP 항목은 덮어쓰지 않는다(그 화면이 알아서 가린다).
+ */
+function refreshShown(s, path) {
+  for (const other of sessions.values()) {
+    if (other === s || groupKey(other) !== groupKey(s) || !showsFile(other, path)) continue;
+    Promise.resolve(other.view.refresh?.()).catch(() => {});
+  }
+}
+
+/** 앱이 알려 온 "Claude 세션이 고쳐 쓴 파일": 그 파일을 보여 주는 항목을 다시 읽게 한다. */
+function onEditedFile({ id, path }) {
+  const s = byId(id);
+  if (s && path) refreshShown(s, path);
+}
 
 /** 앱이 알려 온 "Claude 세션이 새로 만든 파일"을 그 세션의 묶음에 놓는다. */
 async function onCreatedFile({ id, path, kind }) {
   const s = byId(id);
-  if (!s || !path || !shouldPlace(s, path, kind)) return;
+  if (!s || !path) return;
+  // 지웠다가 다시 만든 파일처럼, 이미 그 파일을 보여 주는 항목이 있으면 그 항목은 새 내용을 읽는다.
+  refreshShown(s, path);
+  if (!shouldPlace(s, path, kind)) return;
   try {
     const item = await placeCreated(s, path, kind);
     if (item && sessions.has(s.key)) announce(item, s, '파일을 만들었습니다');
@@ -2874,11 +2911,8 @@ function shouldPlace(s, path, kind) {
   s.placedFiles ??= new Set();
   if (s.placedFiles.has(pathKey(path))) return false;
   s.placedFiles.add(pathKey(path));
-  // 그 묶음에 이미 이 파일을 보여 주는 항목이 있으면 더 놓지 않는다.
-  const shows = (other) => ((other.kind === 'reader' || other.kind === 'table') && samePath(other.view.path(), path))
-    || (other.kind === 'http' && samePath(other.view.state().file || '', path))
-    || (other.kind === 'memo' && samePath(other.view.state().path || '', path))
-    || (other.kind === 'site' && kind === 'html' && sameFileUrl(other.view.url() || '', fileUrl(path)));
+  // 그 묶음에 이미 이 파일을 보여 주는 항목이 있으면 더 놓지 않는다(사이트 항목은 HTML 파일일 때만 친다).
+  const shows = (other) => (other.kind !== 'site' || kind === 'html') && showsFile(other, path);
   if ([...sessions.values()].some((other) => groupKey(other) === groupKey(s) && shows(other))) return false;
   // 한 요청에서 파일을 많이 만들면 사이드바가 넘치므로 몇 개까지만 놓고, 넘친 것은 한 번만 알린다.
   if ((s.placed || 0) >= MAX_PLACED) {
@@ -3929,7 +3963,7 @@ window.cypher = {
   onHook, onStatus, nextWaiting, writeState, rename, sendPrompt, text: sessionText, addImages, onCaptured, captureBrowser,
   setLook, currentLook, mcpAction, handoffSite, onMcpRequest, setMark, jumpToMark, markedItem, textToClaude, runFinished,
   showPalette, paletteEntries, showClosed, reopenLast, restartSession, placeInOrder, inSidebarOrder, cycle, find, recallPrompt, createGroup, newGroup, adoptGroup, groupFor,
-  onCreatedFile, onTool, realign, wake, wakeGroup, restore, runsClaude, askClaudeCommand, setGroupFolder, groupFolderOf, groupContext, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
+  onCreatedFile, onEditedFile, onTool, realign, wake, wakeGroup, restore, runsClaude, askClaudeCommand, setGroupFolder, groupFolderOf, groupContext, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
   get visible() { return visible; },
   get active() { return active; },
 };

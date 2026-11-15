@@ -69,7 +69,7 @@
 </svg>
 <main>
 <h1>Cypher 구현 방식</h1>
-<p class="lead">Cypher가 어떤 조각으로 이루어져 있고, Claude Code 세션과 어떻게 이야기하며, 워크스페이스라는 울타리를 어떻게 지키고, 스스로를 어떻게 업데이트하는지를 그림으로 설명합니다. 기준: 0.16.0 (2026-11-15). 쓰는 법은 <a href="manual.html">사용 설명서</a>에 있습니다.</p>
+<p class="lead">Cypher가 어떤 조각으로 이루어져 있고, Claude Code 세션과 어떻게 이야기하며, 워크스페이스라는 울타리를 어떻게 지키고, 스스로를 어떻게 업데이트하는지를 그림으로 설명합니다. 기준: 0.16.1 (2026-11-15). 쓰는 법은 <a href="manual.html">사용 설명서</a>에 있습니다.</p>
 
 <nav>
 <ol>
@@ -216,8 +216,8 @@
 <ul>
   <li>통로에 접속하면 첫 줄에 <b>확인값</b>(실행할 때마다 운영체제의 난수로 새로 만드는 128비트 값), 둘째 줄에 <b>세션 번호</b>(도구 연결은 <code>mcp &lt;세션 번호&gt;</code>)를 적습니다. 전달 프로그램은 이 값들을 환경 변수(<code>CYPHER_PORT</code>, <code>CYPHER_TOKEN</code>, <code>CYPHER_SESSION</code>)로 받습니다.</li>
   <li>전달 프로그램은 신호를 보낸 뒤 본체가 처리를 마치고 연결을 닫을 때까지(길어야 1.5초) 기다립니다. 그래서 "쓰기 직전" 신호는 Claude가 실제로 파일을 쓰기 전에 처리됩니다(본체가 1.5초 안에 처리하는 보통의 경우).</li>
-  <li><b>훅</b>: 늘 거는 것은 요청 시작(<code>UserPromptSubmit</code>), 응답 완료(<code>Stop</code>), 입력·승인 대기(<code>Notification</code>), 서브에이전트 시작·종료(<code>SubagentStart</code>·<code>SubagentStop</code>), Claude Code 종료(<code>SessionEnd</code>)입니다. 도구 훅(<code>PreToolUse</code>·<code>PostToolUse</code>)은 설정에 따라 다릅니다: <code>[session] activity</code>가 켜져 있으면 모든 도구에 걸고 실패 신호(<code>PostToolUseFailure</code>)도 받으며, 꺼져 있고 <code>show_created</code>만 켜져 있으면 <code>Write</code> 도구에만 겁니다. 둘 다 꺼져 있으면 걸지 않습니다.</li>
-  <li>본체는 도구 신호를 화면에 그대로 넘기지 않습니다. 도구 이름과 짧은 설명만 뽑아 <code>session-tool</code> 이벤트로 알리고(<a href="#activity">9절</a>), <code>Write</code> 도구의 신호에서는 새로 만든 파일만 가려 <code>session-file</code>로 알립니다(<a href="#created">8절</a>). 상태줄은 <code>session-status</code>, 그 밖의 훅은 <code>session-hook</code>입니다.</li>
+  <li><b>훅</b>: 늘 거는 것은 요청 시작(<code>UserPromptSubmit</code>), 응답 완료(<code>Stop</code>), 입력·승인 대기(<code>Notification</code>), 서브에이전트 시작·종료(<code>SubagentStart</code>·<code>SubagentStop</code>), Claude Code 종료(<code>SessionEnd</code>)입니다. 도구 훅(<code>PreToolUse</code>·<code>PostToolUse</code>)은 설정에 따라 다릅니다: <code>[session] activity</code>가 켜져 있으면 모든 도구에 걸고 실패 신호(<code>PostToolUseFailure</code>)도 받으며, 꺼져 있고 <code>show_created</code>만 켜져 있으면 파일을 쓰는 도구에만 겁니다(<code>Write</code>의 직전과 <code>Write</code>·<code>Edit</code>·<code>MultiEdit</code>의 직후). 둘 다 꺼져 있으면 걸지 않습니다.</li>
+  <li>본체는 도구 신호를 화면에 그대로 넘기지 않습니다. 도구 이름과 짧은 설명만 뽑아 <code>session-tool</code> 이벤트로 알리고(<a href="#activity">9절</a>), <code>Write</code> 도구의 신호에서는 새로 만든 파일을 가려 <code>session-file</code>로, 있던 파일을 고쳐 쓴 것(<code>Write</code>·<code>Edit</code>)은 <code>session-edit</code>로 알립니다(<a href="#created">8절</a>). 상태줄은 <code>session-status</code>, 그 밖의 훅은 <code>session-hook</code>입니다.</li>
   <li><b>도구는 26개</b>입니다: 브라우저 13개(<code>browser_*</code>), HTTP 2개(<code>http_list</code>·<code>http_run</code>), 항목 11개(<code>cypher_items</code>, <code>memo_write</code>, <code>mindmap_write</code>, <code>erd_write</code>, <code>todo_write</code>, <code>todo_check</code>, <code>run_output</code>, <code>image_add</code>, <code>doc_show</code>, <code>table_show</code>, <code>notify_user</code>).</li>
   <li>워크스페이스를 알아야 하는 도구는 본체가 화면에 물어서(<code>mcp-request</code> 이벤트) 답을 받습니다(20초 안에). 화면이 그 시각을 넘겨 받은 요청은 실행하지 않습니다(Claude가 다시 시도한 것과 겹치지 않게).</li>
   <li>상태줄 자리는 하나뿐이라, 사용자가 원래 쓰던 상태줄(HUD)이 있으면 전달 프로그램이 정보를 넘긴 뒤 그 명령을 이어서 실행해 출력을 그대로 내보냅니다(<code>CYPHER_STATUSLINE</code>).</li>
@@ -415,6 +415,20 @@
   <li>임시 폴더와 Claude·Cypher의 설정·데이터 폴더, 네트워크 경로에 만든 파일은 놓지 않습니다.</li>
 </ul>
 
+<h3>고쳐 쓴 파일은 보여 주던 항목이 새로 읽는다</h3>
+<p>있던 파일을 고친 것(<code>Edit</code>·<code>MultiEdit</code> 도구의 직후 신호, 새 파일이 아닌 <code>Write</code>의 직후 신호)은 항목을 놓지 않고 <code>session-edit</code> 이벤트로 화면에 알립니다. 화면(<code>onEditedFile</code>)은 그 세션과 <b>같은 워크스페이스</b>(워크스페이스가 없으면 같은 폴더 묶음)에서 그 파일을 보여 주는 항목을 찾아 바로 새로 읽게 합니다. 다른 워크스페이스의 항목은 같은 파일을 보고 있어도 건드리지 않습니다.</p>
+<table>
+  <tr><th>그 파일을 보여 주는 항목</th><th>하는 일</th></tr>
+  <tr><td>문서, 표</td><td>고친 시각을 견주어 보던 자리를 지킨 채 다시 읽습니다. 이 둘은 화면에 보이는 동안 1.5초마다 스스로도 살피지만, 신호가 오면 가려져 있어도 바로 읽습니다.</td></tr>
+  <tr><td>사이트 (주소가 그 파일의 <code>file:///</code> 주소인 것)</td><td>웹뷰를 새로 고칩니다. 주소 뒤의 <code>#자리</code>·<code>?값</code>은 빼고 견줍니다. 웹뷰가 아직 뜨지 않았으면 할 일이 없습니다(처음 볼 때 새 내용으로 뜹니다).</td></tr>
+  <tr><td>이미지 (그 파일에서 가져온 그림)</td><td>이미지 항목은 저장소에 복사해 둔 그림을 보여 주므로, 파일을 다시 가져와 그림을 바꿉니다. 옛 그림은 닫은 이미지처럼 보관 폴더로 옮깁니다(30일).</td></tr>
+  <tr><td>파일에 연결된 메모, HTTP 항목</td><td>고치던 글이 없을 때만 디스크의 내용으로 맞춥니다. 고치던 글이 있으면 표시만 해 두고, 저장할 때 "다시 읽기 / 덮어쓰기"를 묻습니다.</td></tr>
+</table>
+<ul>
+  <li>도구 신호로 아는 것이라 명령(Bash 등)으로 고친 파일은 알 수 없습니다. 문서·표는 스스로 살피므로 그래도 반영되고, 사이트는 ⟳로 다시 읽습니다.</li>
+  <li><code>[session] activity</code>와 <code>show_created</code>를 둘 다 꺼 두면 도구 훅을 걸지 않으므로 이 신호도 오지 않습니다.</li>
+</ul>
+
 <h2 id="activity">9. 사이드바에 보이는 세션 상태 <span class="new">0.12부터</span></h2>
 <p>세션 줄에 보이는 것은 모두 <a href="#channel">3절</a>의 신호에서 나옵니다. 화면은 신호를 받아 세션마다 작은 상태를 고쳐 두고 목록을 다시 그립니다.</p>
 <table>
@@ -562,7 +576,7 @@
 <h2 id="files">15. 코드 위치</h2>
 <table>
   <tr><th>하는 일</th><th>파일</th></tr>
-  <tr><td>항목·워크스페이스·분할·북마크, 범위 판정(<code>canControl</code>), 도구 요청에 답하기(<code>mcpAction</code>), 프로필 번호(<code>profileOf</code>), 만든 파일 놓기(<code>onCreatedFile</code>), 세션 상태(<code>onStatus</code>·<code>onHook</code>·<code>onTool</code>), 되살리기(<code>restore</code>·<code>wake</code>), 다시 맞추기(<code>realign</code>)</td><td><code>ui/main.js</code></td></tr>
+  <tr><td>항목·워크스페이스·분할·북마크, 범위 판정(<code>canControl</code>), 도구 요청에 답하기(<code>mcpAction</code>), 프로필 번호(<code>profileOf</code>), 만든 파일 놓기(<code>onCreatedFile</code>), 고친 파일 새로 읽기(<code>onEditedFile</code>),세션 상태(<code>onStatus</code>·<code>onHook</code>·<code>onTool</code>), 되살리기(<code>restore</code>·<code>wake</code>), 다시 맞추기(<code>realign</code>)</td><td><code>ui/main.js</code></td></tr>
   <tr><td>항목 화면: 메모, HTTP, 사이트, 이미지, 마인드맵, ERD, 문서, 할 일, 명령, 표, 빈 영역</td><td><code>ui/memo.js</code>, <code>http.js</code>, <code>site.js</code>, <code>image.js</code>, <code>mindmap.js</code>, <code>erd.js</code>, <code>reader.js</code>, <code>todo.js</code>, <code>run.js</code>, <code>table.js</code>, <code>empty.js</code></td></tr>
   <tr><td>떠 있는 창·메뉴·변경 내용·업데이트 창, 빠른 이동, 닫은 항목, 알림 기록, 워크스페이스 틀, 끌어다 놓기, 모양</td><td><code>ui/extras.js</code>, <code>palette.js</code>, <code>closed.js</code>, <code>notices.js</code>, <code>template.js</code>, <code>drop.js</code>, <code>look.js</code>, <code>matrix.js</code></td></tr>
   <tr><td>글자 칸 수 표</td><td><code>ui/widths.js</code></td></tr>

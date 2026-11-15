@@ -47,10 +47,15 @@ pub fn original_status_line(cwd: &Path) -> Option<StatusLine> {
     files.iter().find_map(|file| read_status_line(file))
 }
 
+/// 파일을 쓰는 도구(훅의 matcher 모양). 이 도구들의 직후 신호로 "세션이 파일을 썼다"는 것을 안다(`status.rs`).
+const WRITING_TOOLS: &str = "Write|Edit|MultiEdit";
+
 /// 세션 하나의 설정 내용: 상태줄과 훅을 전달 프로그램으로 지정한다.
 /// 원래 상태줄이 있으면 그 여백을 따르고, 더 자주 갱신하던 쪽에 맞춘다.
-/// `watch_files`이면 Write 도구의 직전·직후 훅도 건다(세션이 새로 만든 파일을 사이드바에 놓는 데 쓴다).
+/// `watch_files`이면 Write 도구의 직전 훅과 파일을 쓰는 도구의 직후 훅을 건다(세션이 새로 만든 파일을 사이드바에 놓고,
+/// 고쳐 쓴 파일을 보여 주는 항목을 다시 읽게 하는 데 쓴다).
 /// `activity`이면 모든 도구의 직전·직후·실패 훅을 건다(사이드바의 그 줄에 지금 쓰는 도구를 보여 주는 데 쓴다).
+/// 둘 다 아니면 도구 훅을 걸지 않는다.
 fn settings_json(bridge: &str, original: Option<&StatusLine>, watch_files: bool, activity: bool) -> Value {
     // 훅: 요청 시작(UserPromptSubmit), 응답 완료(Stop), 입력·승인 대기(Notification),
     // 서브에이전트 시작·종료(SubagentStart·SubagentStop), Claude Code 종료(SessionEnd: 셸 세션에서 직접 띄운
@@ -68,17 +73,18 @@ fn settings_json(bridge: &str, original: Option<&StatusLine>, watch_files: bool,
             "SubagentStart": hook, "SubagentStop": hook, "SessionEnd": hook
         }
     });
-    // 도구 훅: 지금 쓰는 도구를 보여 주려면 모든 도구를, 새로 만든 파일만 보려면 Write 도구만 본다
-    // (쓰기 직전에는 그 파일이 이미 있었는지를, 직후에는 실제로 생겼는지를 본다).
-    let matcher = if activity { Some("*") } else if watch_files { Some("Write") } else { None };
-    if let Some(matcher) = matcher {
-        let tools = json!([{ "matcher": matcher, "hooks": [{ "type": "command", "command": bridge }] }]);
-        settings["hooks"]["PreToolUse"] = tools.clone();
-        settings["hooks"]["PostToolUse"] = tools.clone();
-        if activity {
-            // 실패하거나 중단된 도구에는 직후 신호 대신 이 신호가 온다. 받아야 "하는 중" 표시가 남지 않는다.
-            settings["hooks"]["PostToolUseFailure"] = tools;
+    let tools = |matcher: &str| json!([{ "matcher": matcher, "hooks": [{ "type": "command", "command": bridge }] }]);
+    if activity {
+        // 지금 쓰는 도구를 보여 주려면 모든 도구의 직전·직후를 본다. 실패하거나 중단된 도구에는 직후 신호 대신
+        // 실패 신호가 온다. 받아야 "하는 중" 표시가 남지 않는다.
+        for event in ["PreToolUse", "PostToolUse", "PostToolUseFailure"] {
+            settings["hooks"][event] = tools("*");
         }
+    } else if watch_files {
+        // 세션이 쓴 파일만 보려면 파일을 쓰는 도구만 본다. 새로 만든 파일인지는 Write 도구의 직전(그 파일이 이미 있었는지)과
+        // 직후(실제로 생겼는지)로 가리고, 있던 파일을 고친 것은 직후 신호로 안다(그 파일을 보여 주는 항목이 다시 읽는다).
+        settings["hooks"]["PreToolUse"] = tools("Write");
+        settings["hooks"]["PostToolUse"] = tools(WRITING_TOOLS);
     }
     settings
 }
@@ -141,10 +147,11 @@ mod tests {
     fn 설정에는_전달_프로그램을_넣고_원래_여백과_갱신_주기를_따른다() {
         let plain = settings_json("C:/app/cypher-bridge.exe", None, false, false);
         assert!(plain["hooks"].get("PreToolUse").is_none() && plain["hooks"].get("PostToolUse").is_none());
-        // 새로 만든 파일을 보려면 Write 도구의 직전·직후 훅을 건다.
+        // 세션이 쓴 파일을 보려면 Write 도구의 직전 훅과, 파일을 쓰는 도구(고치는 도구 포함)의 직후 훅을 건다.
         let watching = settings_json("C:/app/cypher-bridge.exe", None, true, false);
+        assert_eq!(watching["hooks"]["PreToolUse"][0]["matcher"], "Write");
+        assert_eq!(watching["hooks"]["PostToolUse"][0]["matcher"], "Write|Edit|MultiEdit");
         for event in ["PreToolUse", "PostToolUse"] {
-            assert_eq!(watching["hooks"][event][0]["matcher"], "Write");
             assert_eq!(watching["hooks"][event][0]["hooks"][0]["command"], "C:/app/cypher-bridge.exe");
         }
         assert!(watching["hooks"].get("PostToolUseFailure").is_none());

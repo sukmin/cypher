@@ -135,11 +135,19 @@ fn same_dir(a: &std::path::Path, b: &std::path::Path) -> bool {
     plain(a) == plain(b)
 }
 
+/// 진짜 `claude`의 파일 이름. 한 폴더 안에서는 이 순서로 찾는다.
+const CLAUDE_NAMES: [&str; 3] = ["claude.exe", "claude.cmd", "claude.bat"];
+
 /// PATH에서 진짜 `claude`를 찾는다. 이 프로그램이 놓인 폴더(`own`)는 건너뛴다.
 fn find_claude(path: &std::ffi::OsStr, own: &std::path::Path) -> Option<PathBuf> {
+    find_in_path(path, own, &CLAUDE_NAMES)
+}
+
+/// PATH의 폴더를 차례로 보며 `names` 가운데 처음 나오는 파일을 찾는다. `own` 폴더는 건너뛴다.
+fn find_in_path(path: &std::ffi::OsStr, own: &std::path::Path, names: &[&str]) -> Option<PathBuf> {
     std::env::split_paths(path)
         .filter(|dir| !dir.as_os_str().is_empty() && !same_dir(dir, own))
-        .flat_map(|dir| ["claude.exe", "claude.cmd", "claude.bat"].map(|name| dir.join(name)))
+        .flat_map(|dir| names.iter().map(move |name| dir.join(name)))
         .find(|file| file.is_file())
 }
 
@@ -232,20 +240,28 @@ mod tests {
 
     #[test]
     fn 진짜_claude는_이_프로그램의_폴더를_건너뛰고_찾는다() {
-        let root = std::env::temp_dir().join("cypher-shim-test");
+        // 시험용 폴더는 임시 폴더가 아니라 빌드 폴더 아래에 두고, 프로그램처럼 보이는 파일(.exe, .cmd)은 만들지 않는다
+        // (임시 폴더에 내용 없는 가짜 실행 파일을 만들면 Windows의 백신이 잡을 수 있다). 찾는 이름만 바꿔 같은 길을 본다.
+        let names = ["tool.one", "tool.two", "tool.three"];
+        let find = |path: &std::ffi::OsStr, own: &std::path::Path| find_in_path(path, own, &names);
+        let root = std::env::current_exe().unwrap().parent().unwrap().join("test-files").join("cypher-shim-test");
         let _ = std::fs::remove_dir_all(&root);
         let (shim, first, second) = (root.join("shim"), root.join("a b"), root.join("c"));
         for dir in [&shim, &first, &second] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        std::fs::write(shim.join("claude.exe"), "").unwrap();
-        std::fs::write(second.join("claude.exe"), "").unwrap();
+        std::fs::write(shim.join("tool.one"), "").unwrap();
+        std::fs::write(second.join("tool.one"), "").unwrap();
         let path = std::env::join_paths([shim.clone(), first.clone(), second.clone()]).unwrap();
-        assert_eq!(find_claude(&path, &shim), Some(second.join("claude.exe")));
-        // 앞선 폴더의 .cmd가 뒤 폴더의 .exe보다 먼저다(PATH 순서). 표기가 달라도 자기 폴더는 건너뛴다.
-        std::fs::write(first.join("claude.cmd"), "").unwrap();
+        assert_eq!(find(&path, &shim), Some(second.join("tool.one")));
+        // 앞선 폴더의 둘째 이름이 뒤 폴더의 첫째 이름보다 먼저다(PATH 순서). 표기가 달라도 자기 폴더는 건너뛴다.
+        std::fs::write(first.join("tool.two"), "").unwrap();
         let upper = PathBuf::from(shim.to_string_lossy().to_uppercase().replace('\\', "/") + "/");
-        assert_eq!(find_claude(&path, &upper), Some(first.join("claude.cmd")));
-        assert_eq!(find_claude(&std::env::join_paths([shim.clone()]).unwrap(), &shim), None);
+        assert_eq!(find(&path, &upper), Some(first.join("tool.two")));
+        assert_eq!(find(&std::env::join_paths([shim.clone()]).unwrap(), &shim), None);
+        // 진짜 claude는 이 이름들로, 이 순서로 찾는다.
+        assert_eq!(CLAUDE_NAMES, ["claude.exe", "claude.cmd", "claude.bat"]);
+        assert_eq!(find_claude(&path, &shim), None);
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

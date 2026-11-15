@@ -268,6 +268,27 @@ export function createImage(item, host, saved = {}, onChange = () => {}) {
     return load();
   }
 
+  /**
+   * 이 그림을 가져온 파일(`source`)이 밖에서(같은 워크스페이스의 Claude 세션 등) 고쳐졌다: 그 파일을 다시 가져와 그림을 바꾼다.
+   * 이름과 보던 배율은 그대로 두고, 옛 그림은 닫은 이미지처럼 보관 폴더로 옮긴다. 가져오지 못하면(그림이 아니게 됐다 등)
+   * 보던 그림을 그대로 둔다. 잇달아 고쳐져도 하나씩 차례로 바꾼다(앞의 것이 읽는 그림을 뒤의 것이 치우지 않게).
+   */
+  let refreshing = Promise.resolve();
+  function refresh() {
+    refreshing = refreshing.then(async () => {
+      if (disposed || !image || !source) return;
+      const stored = await invoke('image_import', { path: source });
+      const old = disposed ? stored : image;
+      if (!disposed) {
+        image = { id: stored.id, ext: stored.ext };
+        at = Date.now();
+        await load();
+      }
+      await invoke('image_remove', { id: old.id, ext: old.ext });
+    }).catch(() => { /* 보던 그림을 그대로 둔다 */ });
+    return refreshing;
+  }
+
   /** 가져온 그림들을 넣는다. 이 항목이 비어 있으면 첫 장을 여기에, 나머지는 같은 묶음의 새 이미지 항목으로. */
   async function take(list) {
     if (!list.length) return;
@@ -459,6 +480,7 @@ export function createImage(item, host, saved = {}, onChange = () => {}) {
     /** 빈 항목인지(끌어다 놓은 그림을 여기에 채울 수 있는지). */
     empty: () => !image,
     fill,
+    refresh,
     /** 저장소 안의 그림 파일 경로. */
     path: () => path,
     /** 닫으면 그림은 보관 폴더로 옮겨 30일 동안 둔다. */

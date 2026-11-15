@@ -934,6 +934,8 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
     },
     /** 연결된 파일의 경로(없으면 null). 같은 파일을 연 메모가 이미 있는지 찾을 때 쓴다(main.js의 openMemo). */
     file: () => path,
+    /** 연결된 파일이 밖에서(같은 워크스페이스의 Claude 세션 등) 고쳐졌다: 고치지 않은 메모면 바로 다시 읽고, 고치던 메모면 표시만 해 둔다. */
+    refresh: () => checkDisk(),
     /** 다시 시작할 때 되살릴 내용. `stamp`는 연결된 파일을 마지막으로 본 때의 고친 시각이다(그 뒤로 바뀌었는지 견준다). */
     state: () => ({ memo: id, path, dirty: dirty(), encoding, eol, stamp }),
     /** 앱이 꺼질 때: 기다리던 임시 저장을 바로 한다. 돌려주는 약속은 저장이 끝나면 끝난다(기다리던 것이 없으면 값 없음). */

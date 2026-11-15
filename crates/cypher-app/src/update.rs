@@ -213,7 +213,15 @@ fn unzip(zip: &Path, to: &Path) -> Result<(), String> {
 
 /// 푼 폴더에서 실행 파일이 든 곳을 찾는다: 그 폴더 자체이거나, 그 안의 폴더 하나(`cypher-<버전>-windows-x64`).
 fn package_dir(unpacked: &Path) -> Result<PathBuf, String> {
-    let has = |dir: &Path| dir.join("cypher.exe").is_file() && dir.join("cypher-bridge.exe").is_file();
+    find_package(unpacked, &PROGRAMS)
+}
+
+/// 묶음에 반드시 들어 있어야 하는 실행 파일.
+const PROGRAMS: [&str; 2] = ["cypher.exe", "cypher-bridge.exe"];
+
+/// `names`의 파일이 모두 든 폴더를 찾는다: 푼 폴더 자신이거나 그 바로 아래의 폴더.
+fn find_package(unpacked: &Path, names: &[&str]) -> Result<PathBuf, String> {
+    let has = |dir: &Path| names.iter().all(|name| dir.join(name).is_file());
     if has(unpacked) {
         return Ok(unpacked.to_path_buf());
     }
@@ -347,11 +355,22 @@ mod tests {
     use super::*;
     use serde_json::json;
 
+    /// 시험용 폴더. 임시 폴더가 아니라 빌드 폴더(시험 프로그램이 있는 곳) 아래에 두고, 시험이 끝나면 `done`으로 지운다.
+    ///
+    /// 이 파일의 시험은 프로그램처럼 보이는 파일을 만들지 않는다: 이름은 `.txt`, 내용은 한 문장짜리 글로 쓴다.
+    /// 임시 폴더에 5바이트짜리 글("새 a")이 든 `a.exe`를 만들었더니 Windows의 백신(Defender)이 악성 프로그램
+    /// (`Trojan:Win32/Bearfoos.A!ml`)으로 잡아 격리했고, 이름을 `a.bin`으로 바꿔 빌드 폴더에 두어도 같은 내용이라 또 잡혔다
+    /// (2026-11-15). 파일 이름이 정해진 함수는 이름을 인자로 받는 안쪽 함수(`find_package`)로 시험한다.
     fn test_dir(name: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(name);
+        let dir = std::env::current_exe().unwrap().parent().unwrap().join("test-files").join(name);
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    /// 시험이 끝났다: 만든 것을 남기지 않는다.
+    fn done(dir: &Path) {
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
@@ -406,21 +425,24 @@ mod tests {
         let (from, to) = (root.join("new"), root.join("app"));
         std::fs::create_dir_all(from.join("sub")).unwrap();
         std::fs::create_dir_all(&to).unwrap();
-        for (name, text) in [("cypher.exe", "새 본체"), ("cypher-bridge.exe", "새 전달"), ("README.md", "새 글")] {
-            std::fs::write(from.join(name), text).unwrap();
+        // 내용은 누가 봐도 글인 한 문장으로 쓴다(몇 바이트짜리 내용은 백신이 잡은 적이 있다).
+        let text = |what: &str| format!("Cypher 단위 시험이 만든 글자 파일입니다: {what}\n");
+        for (name, what) in [("main.txt", "새 본체"), ("bridge.txt", "새 전달"), ("README.md", "새 글")] {
+            std::fs::write(from.join(name), text(what)).unwrap();
         }
-        std::fs::write(from.join("sub").join("x.txt"), "폴더 안의 것은 놓지 않는다").unwrap();
-        std::fs::write(to.join("cypher.exe"), "옛 본체").unwrap();
-        std::fs::write(to.join("config.txt"), "그대로").unwrap();
+        std::fs::write(from.join("sub").join("x.txt"), text("폴더 안의 것은 놓지 않는다")).unwrap();
+        std::fs::write(to.join("main.txt"), text("옛 본체")).unwrap();
+        std::fs::write(to.join("config.txt"), text("그대로")).unwrap();
 
         let mut placed = replace_files(&from, &to, "77").unwrap();
         placed.sort();
-        assert_eq!(placed, ["README.md", "cypher-bridge.exe", "cypher.exe"]);
+        assert_eq!(placed, ["README.md", "bridge.txt", "main.txt"]);
         let read = |name: &str| std::fs::read_to_string(to.join(name)).unwrap();
-        assert_eq!((read("cypher.exe"), read("cypher-bridge.exe"), read("README.md")), ("새 본체".into(), "새 전달".into(), "새 글".into()));
-        assert_eq!(read("cypher.exe.old-77"), "옛 본체"); // 옛 파일은 이름만 바뀌어 남는다
-        assert_eq!(read("config.txt"), "그대로");
+        assert_eq!((read("main.txt"), read("bridge.txt"), read("README.md")), (text("새 본체"), text("새 전달"), text("새 글")));
+        assert_eq!(read("main.txt.old-77"), text("옛 본체")); // 옛 파일은 이름만 바뀌어 남는다
+        assert_eq!(read("config.txt"), text("그대로"));
         assert!(!to.join("sub").exists());
+        done(&root);
     }
 
     #[test]
@@ -429,26 +451,32 @@ mod tests {
         let (from, to) = (root.join("new"), root.join("app"));
         std::fs::create_dir_all(&from).unwrap();
         std::fs::create_dir_all(&to).unwrap();
-        std::fs::write(from.join("a.exe"), "새 a").unwrap();
-        std::fs::write(from.join("b.exe"), "새 b").unwrap();
-        std::fs::write(to.join("a.exe"), "옛 a").unwrap();
-        // 옛 b.exe가 옮겨 갈 이름의 자리에 폴더를 두어 이름 바꾸기가 실패하게 한다.
-        std::fs::write(to.join("b.exe"), "옛 b").unwrap();
-        std::fs::create_dir_all(to.join("b.exe.old-9").join("안")).unwrap();
+        // 내용은 누가 봐도 글인 한 문장으로 쓴다. 5바이트짜리 "새 a"는 이름이 `.bin`이고 빌드 폴더에 있어도 백신이 잡았다.
+        let text = |what: &str| format!("Cypher 단위 시험이 만든 글자 파일입니다: {what}\n");
+        std::fs::write(from.join("a.txt"), text("새 a")).unwrap();
+        std::fs::write(from.join("b.txt"), text("새 b")).unwrap();
+        std::fs::write(to.join("a.txt"), text("옛 a")).unwrap();
+        // 옛 b.txt가 옮겨 갈 이름의 자리에 폴더를 두어 이름 바꾸기가 실패하게 한다.
+        std::fs::write(to.join("b.txt"), text("옛 b")).unwrap();
+        std::fs::create_dir_all(to.join("b.txt.old-9").join("안")).unwrap();
 
         assert!(replace_files(&from, &to, "9").is_err());
         let read = |name: &str| std::fs::read_to_string(to.join(name)).unwrap();
-        assert_eq!((read("a.exe"), read("b.exe")), ("옛 a".into(), "옛 b".into()));
-        assert!(!to.join("a.exe.old-9").exists());
+        assert_eq!((read("a.txt"), read("b.txt")), (text("옛 a"), text("옛 b")));
+        assert!(!to.join("a.txt.old-9").exists());
+        done(&root);
     }
 
     #[test]
     fn 묶음을_풀어_실행_파일이_든_폴더를_찾는다() {
+        // 실행 파일 자리에는 다른 이름의 글자 파일을 쓴다(찾는 이름만 바꿔 같은 길을 본다).
+        let names = ["main.txt", "bridge.txt"];
         let root = test_dir("cypher-update-unzip-test");
         let inner = root.join("src").join("cypher-9.9.9-windows-x64");
         std::fs::create_dir_all(&inner).unwrap();
-        std::fs::write(inner.join("cypher.exe"), "본체").unwrap();
-        std::fs::write(inner.join("cypher-bridge.exe"), "전달").unwrap();
+        let text = |what: &str| format!("Cypher 단위 시험이 만든 글자 파일입니다: {what}\n");
+        std::fs::write(inner.join("main.txt"), text("본체")).unwrap();
+        std::fs::write(inner.join("bridge.txt"), text("전달")).unwrap();
         // Windows에 든 tar로 zip을 만든다(-a: 이름의 확장자에 맞는 형식).
         let tar = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32").join("tar.exe");
         let zip = root.join("pack.zip");
@@ -457,29 +485,36 @@ mod tests {
 
         let unpacked = root.join("unpacked");
         unzip(&zip, &unpacked).unwrap();
-        let found = package_dir(&unpacked).unwrap();
+        let found = find_package(&unpacked, &names).unwrap();
         assert_eq!(found, unpacked.join("cypher-9.9.9-windows-x64"));
-        assert_eq!(std::fs::read_to_string(found.join("cypher.exe")).unwrap(), "본체");
-        // 실행 파일이 없는 묶음은 받지 않는다.
+        assert_eq!(std::fs::read_to_string(found.join("main.txt")).unwrap(), text("본체"));
+        // 파일이 든 폴더를 바로 가리켜도 찾는다.
+        assert_eq!(find_package(&found, &names).unwrap(), found);
+        // 하나라도 빠진 묶음, 실행 파일이 없는 묶음은 받지 않는다(진짜 묶음이 찾는 이름은 실행 파일 둘이다).
+        assert!(find_package(&unpacked, &["main.txt", "없는 것.txt"]).is_err());
+        assert!(package_dir(&unpacked).is_err());
+        assert_eq!(PROGRAMS, ["cypher.exe", "cypher-bridge.exe"]);
         let empty = root.join("empty");
         std::fs::create_dir_all(empty.join("x")).unwrap();
         assert!(package_dir(&empty).is_err());
         // zip이 아닌 파일은 풀지 못한다.
-        std::fs::write(root.join("bad.zip"), "zip 아님").unwrap();
+        std::fs::write(root.join("bad.zip"), text("zip이 아닌 파일")).unwrap();
         assert!(unzip(&root.join("bad.zip"), &root.join("bad")).is_err());
+        done(&root);
     }
 
-    /// 실제 GitHub에서 최신 릴리즈를 받아 임시 폴더에 설치해 본다(인터넷이 필요해 평소에는 돌리지 않는다).
+    /// 실제 GitHub에서 최신 릴리즈를 받아 시험용 폴더에 설치해 본다(인터넷이 필요해 평소에는 돌리지 않는다).
     #[test]
     #[ignore]
-    fn 실제_릴리즈를_받아_임시_폴더에_설치한다() {
+    fn 실제_릴리즈를_받아_시험용_폴더에_설치한다() {
         let release = latest().unwrap();
         let asset = release.asset.expect("묶음이 있어야 한다");
         assert!(asset.sha256.is_some(), "확인값이 있어야 한다");
         let root = test_dir("cypher-update-real-test");
         let app = root.join("app");
         std::fs::create_dir_all(&app).unwrap();
-        std::fs::write(app.join("cypher.exe"), "옛 본체").unwrap();
+        // 옛 본체 자리에는 진짜 실행 파일(이 시험 프로그램의 사본)을 둔다. 내용이 실행 파일이 아닌 `.exe`는 만들지 않는다.
+        std::fs::copy(std::env::current_exe().unwrap(), app.join("cypher.exe")).unwrap();
         let placed = install(&asset, &app, &root.join("work")).unwrap();
         assert!(placed.iter().any(|name| name == "cypher.exe") && placed.iter().any(|name| name == "cypher-bridge.exe"), "{placed:?}");
         assert!(std::fs::metadata(app.join("cypher.exe")).unwrap().len() > 1_000_000);
@@ -490,5 +525,6 @@ mod tests {
         std::fs::create_dir_all(&other).unwrap();
         assert!(install(&wrong, &other, &root.join("work2")).unwrap_err().contains("확인값"));
         assert!(std::fs::read_dir(&other).unwrap().next().is_none());
+        done(&root);
     }
 }

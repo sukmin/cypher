@@ -157,7 +157,9 @@ mod tests {
         assert_eq!(kind(&file("data.json", b"[1]")), "text");
         // 글자가 아닌 것은 확장자가 csv여도 표가 아니다.
         assert_eq!(kind(&file("binary.csv", &[1, 0, 2, 0])), "other");
-        assert_eq!(kind(&file("tool.exe", &[b'M', b'Z', 0, 0, 3, 0])), "other");
+        // 프로그램 같은 이진 파일. 시험에서는 `.exe` 이름이나 실행 파일의 머리(MZ)를 쓰지 않는다
+        // (임시 폴더에 가짜 실행 파일을 만들면 Windows의 백신이 악성 프로그램으로 잡는다).
+        assert_eq!(kind(&file("tool.bin", &[0xde, 0xad, 0, 0, 3, 0])), "other");
         assert_eq!(kind(&dir.join("sub")), "folder");
         assert_eq!(kind(&dir.join("없는 파일")), "other");
 

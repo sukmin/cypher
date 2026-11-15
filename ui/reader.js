@@ -1020,6 +1020,8 @@ export function createReader(item, host, saved = {}, onChange = () => {}) {
     find,
     open,
     reload,
+    /** 보던 파일이 밖에서(같은 워크스페이스의 Claude 세션 등) 고쳐졌다: 다음 살핌을 기다리지 않고 바로 견주어 다시 그린다. */
+    refresh: check,
     applyZoom,
   };
   views.add(view);

@@ -7,7 +7,8 @@
 //! - 세션 번호: 뒤따르는 내용이 Claude Code 상태줄 JSON 또는 훅 JSON(한 번 보내고 끊는다).
 //!   훅 가운데 도구의 직전·직후·실패 신호는 화면에 그대로 넘기지 않는다. 도구 이름과 짧은 설명만 뽑아
 //!   `session-tool`로 알리고(사이드바의 "지금 하는 일"), Write 도구의 신호에서는 새로 만든 파일을 가려
-//!   `session-file`로 알린다(`created.rs`).
+//!   `session-file`로 알린다(`created.rs`). 있던 파일을 고쳐 쓴 것(Write, Edit)은 `session-edit`로 알려,
+//!   그 파일을 보여 주는 항목이 바로 다시 읽게 한다.
 //! - `mcp <세션 번호>`: Cypher 도구용 MCP 연결(계속 이어진다)
 
 use serde::Serialize;
@@ -97,6 +98,13 @@ struct FilePayload {
     kind: &'static str,
 }
 
+/// Claude 세션이 고쳐 쓴 파일. 화면이 그 세션의 묶음에서 이 파일을 보여 주는 항목을 다시 읽게 한다.
+#[derive(Clone, Serialize)]
+struct EditPayload {
+    id: u32,
+    path: String,
+}
+
 /// Claude 세션이 지금 쓰는 도구. 화면이 사이드바의 그 세션 줄에 보여 준다.
 /// 도구에 넘긴 내용(파일 내용, 긴 명령)은 넘기지 않고 짧게 줄인 설명만 넘긴다.
 #[derive(Clone, Serialize, Debug, PartialEq)]
@@ -123,6 +131,8 @@ enum Message {
     WillWrite { id: u32, path: PathBuf },
     /// Write 도구가 파일을 쓴 직후. `base`는 그 세션이 일하고 있는 폴더.
     Wrote { id: u32, path: PathBuf, base: Option<PathBuf> },
+    /// Edit 도구가 있던 파일을 고친 직후.
+    Edited { id: u32, path: PathBuf },
 }
 
 /// 훅 내용 한 번의 크기 한도. Write 도구의 신호에는 쓴 파일의 내용이 통째로 들어 있다.
@@ -250,10 +260,16 @@ fn accept(app: AppHandle, token: &str, stream: TcpStream) {
             crate::created::before_write(id, &path);
             Ok(())
         }
-        Some(Message::Wrote { id, path, base }) if files => match crate::created::after_write(id, &path, base.as_deref()) {
-            Some(kind) => app.emit("session-file", FilePayload { id, path: path.to_string_lossy().into_owned(), kind }),
-            None => Ok(()),
-        },
+        Some(Message::Wrote { id, path, base }) => {
+            let fresh = if files { crate::created::after_write(id, &path, base.as_deref()) } else { None };
+            let path = path.to_string_lossy().into_owned();
+            match fresh {
+                Some(kind) => app.emit("session-file", FilePayload { id, path, kind }),
+                // 사이드바에 새로 놓을 파일이 아니면(있던 파일을 고쳐 썼다 등) 그 파일을 보여 주는 항목만 다시 읽게 한다.
+                None => app.emit("session-edit", EditPayload { id, path }),
+            }
+        }
+        Some(Message::Edited { id, path }) => app.emit("session-edit", EditPayload { id, path: path.to_string_lossy().into_owned() }),
         _ => Ok(()),
     };
     // 여기서 연결이 닫힌다. 전달 프로그램은 이것을 "처리했다"는 답으로 삼고 끝난다.
@@ -338,17 +354,17 @@ fn parse(id: u32, body: &str) -> Option<Message> {
 fn read(id: u32, v: &Value) -> Option<Message> {
     let text = |v: &Value| v.as_str().map(str::to_string);
     if let Some(event) = text(&v["hook_event_name"]) {
-        // 도구 신호에서는 Write 도구가 쓴 파일만 본다(지금 쓰는 도구는 `tool_signal`이 따로 뽑는다).
+        // 도구 신호에서는 파일을 쓰는 도구가 쓴 파일만 본다(지금 쓰는 도구는 `tool_signal`이 따로 뽑는다).
+        // Write 도구는 직전(그 파일이 이미 있었는지)과 직후를, 있던 파일을 고치는 Edit 도구는 직후만 본다.
         if is_tool_event(&event) {
-            if event == "PostToolUseFailure" || v["tool_name"].as_str() != Some("Write") {
-                return None;
-            }
-            let path = written_path(v)?;
-            return Some(if event == "PreToolUse" {
-                Message::WillWrite { id, path }
-            } else {
-                Message::Wrote { id, path, base: local_path(v["cwd"].as_str().unwrap_or("")) }
-            });
+            return match (v["tool_name"].as_str()?, event.as_str()) {
+                ("Write", "PreToolUse") => Some(Message::WillWrite { id, path: written_path(v)? }),
+                ("Write", "PostToolUse") => {
+                    Some(Message::Wrote { id, path: written_path(v)?, base: local_path(v["cwd"].as_str().unwrap_or("")) })
+                }
+                ("Edit" | "MultiEdit", "PostToolUse") => Some(Message::Edited { id, path: written_path(v)? }),
+                _ => None,
+            };
         }
         return Some(Message::Hook(HookPayload {
             id,
@@ -436,6 +452,26 @@ mod tests {
             r#"{"hook_event_name":"PreToolUse","tool_name":"Bash","tool_input":{"command":"ls"}}"#,
             r#"{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{}}"#,
             r#"{"hook_event_name":"PostToolUse","tool_name":"Write","tool_input":{"file_path":"상대.md"}}"#,
+        ] {
+            assert!(parse(4, other).is_none(), "{other}");
+        }
+    }
+
+    #[test]
+    fn 고치는_도구의_직후_신호에서_고친_파일을_꺼낸다() {
+        for tool in ["Edit", "MultiEdit"] {
+            let post = format!(
+                r#"{{"hook_event_name":"PostToolUse","tool_name":"{tool}","cwd":"C:\\ws\\proj","tool_input":{{"file_path":"docs/설명서.html","old_string":"a","new_string":"b"}}}}"#
+            );
+            let Some(Message::Edited { id, path }) = parse(4, &post) else { panic!("{tool}: 고친 직후 신호로 읽혀야 한다") };
+            assert_eq!((id, path), (4, PathBuf::from(r"C:\ws\proj\docs\설명서.html")));
+        }
+        // 고치기 직전의 신호, 파일을 쓰지 않는 도구, 경로를 알 수 없는 신호는 버린다.
+        for other in [
+            r#"{"hook_event_name":"PreToolUse","tool_name":"Edit","tool_input":{"file_path":"C:/ws/a.md"}}"#,
+            r#"{"hook_event_name":"PostToolUse","tool_name":"Read","tool_input":{"file_path":"C:/ws/a.md"}}"#,
+            r#"{"hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{"file_path":"//server/share/a.md"}}"#,
+            r#"{"hook_event_name":"PostToolUse","tool_name":"Edit","tool_input":{}}"#,
         ] {
             assert!(parse(4, other).is_none(), "{other}");
         }
@@ -540,9 +576,13 @@ mod tests {
         ] {
             assert_eq!(signal(other), None, "{other}");
         }
-        // 도구 신호는 훅 알림으로 화면에 넘기지 않는다(Write 도구의 실패 신호도 파일로 치지 않는다).
-        assert!(parse(5, pre).is_none() && parse(5, edit).is_none());
-        assert!(parse(5, r#"{"hook_event_name":"PostToolUseFailure","tool_name":"Write","tool_input":{"file_path":"C:/a.md"}}"#).is_none());
+        // 도구 신호는 훅 알림으로 화면에 넘기지 않는다(파일을 쓰는 도구의 실패 신호도 파일로 치지 않는다).
+        assert!(parse(5, pre).is_none());
+        assert!(!matches!(parse(5, edit), Some(Message::Hook(_))));
+        for tool in ["Write", "Edit"] {
+            let failed = format!(r#"{{"hook_event_name":"PostToolUseFailure","tool_name":"{tool}","tool_input":{{"file_path":"C:/a.md"}}}}"#);
+            assert!(parse(5, &failed).is_none(), "{tool}");
+        }
     }
 
     #[test]

@@ -314,6 +314,11 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
     title: () => title || hostOf(url) || '새 사이트',
     /** 지금 주소(빈 페이지면 빈 글). */
     url: () => url,
+    /**
+     * 보던 페이지의 파일이 밖에서(같은 워크스페이스의 Claude 세션 등) 고쳐졌다: 페이지를 새로 고친다.
+     * 웹뷰가 아직 없으면 할 일이 없다(처음 보일 때 지금의 내용으로 뜬다).
+     */
+    refresh: () => { if (opened) act('reload'); },
     /** 이 항목이 써야 하는 프로필을 앱에 알리고, 앱이 알게 될 때까지 기다린다(Claude의 도구가 이 항목을 쓰기 직전에 부른다). */
     assign: (profile) => tell(profile),
     /** 다시 시작할 때 되살릴 내용: 보던 주소와 처음 간 주소. */

@@ -460,6 +460,8 @@ export function createHttp(item, host, saved = {}, onChange = () => {}) {
     state: () => ({ file: current?.path || saved.file || null }),
     /** 폴더의 요청 파일 목록을 다시 읽는다(같은 워크스페이스의 Claude 세션이 이 폴더에 새 요청 파일을 만들었을 때). 열어 둔 파일과 고치던 내용은 그대로 둔다. */
     reload: () => load(false).catch((err) => hint(String(err))),
+    /** 열어 둔 요청 파일이 밖에서(같은 워크스페이스의 Claude 세션 등) 고쳐졌다: 고치던 내용이 없으면 디스크의 내용으로 맞춘다. */
+    refresh: () => syncFromDisk(),
     /** 앱이 꺼질 때: 고친 내용을 저장한다. 돌려주는 약속은 저장이 끝나면 끝난다(고친 것이 없으면 값 없음). */
     flush: () => (dirty() ? save(true) : undefined),
     /** 닫기 전에: 손댄 내용을 저장한다. 저장하지 못했으면 버리고 닫을지 묻는다. 거짓이면 닫지 않는다. */
