@@ -93,7 +93,7 @@ fn background(v: &Value) -> Option<Background> {
 struct FilePayload {
     id: u32,
     path: String,
-    /// "doc" | "image" | "http" | "other"
+    /// "doc" | "image" | "http" | "table" | "html" | "other"
     kind: &'static str,
 }
 

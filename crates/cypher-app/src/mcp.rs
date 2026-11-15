@@ -36,9 +36,9 @@ doc_show(Markdown·글자 파일을 문서 항목으로 보여 주기), table_sh
 notify_user로 알릴 수 있습니다(응답이 끝날 때의 알림은 Cypher가 알아서 띄우므로, 그때는 쓰지 않습니다).";
 
 /// Write 도구로 만든 파일을 Cypher가 알아서 놓는 설정일 때 덧붙이는 안내.
-const CREATED_NOTE: &str = " Write 도구로 새로 만든 문서(.md, .txt)·SVG 그림·요청 파일(.http)·표 파일(.csv, .tsv)은 Cypher가 알아서 이 세션의 워크스페이스에 \
+const CREATED_NOTE: &str = " Write 도구로 새로 만든 문서(.md, .txt)·SVG 그림·요청 파일(.http)·표 파일(.csv, .tsv)·HTML 파일(.html)은 Cypher가 알아서 이 세션의 워크스페이스에 \
 항목으로 놓으므로 doc_show나 image_add, table_show를 다시 부를 필요가 없습니다. 다만 숨김 폴더(.git 등)나 빌드 폴더 안의 파일, \
-한 요청에서 8개를 넘는 파일, 명령(Bash 등)으로 만든 파일은 놓이지 않으니, 사용자에게 보여 줄 것이면 doc_show·image_add로 놓으세요.";
+임시 폴더의 파일, 한 요청에서 8개를 넘는 파일, 명령(Bash 등)으로 만든 파일은 놓이지 않으니, 사용자에게 보여 줄 것이면 doc_show·image_add로 놓으세요.";
 
 /// 세션에 알려 줄 안내 글. `show_created`는 설정의 `[session] show_created`.
 fn instructions(show_created: &str) -> String {

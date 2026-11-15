@@ -36,6 +36,22 @@ pub struct ConfigPayload {
     /// 설정 파일을 읽지 못했을 때의 설명(이때는 기본값으로 동작한다).
     error: Option<String>,
     path: String,
+    /// 세션이 붙는 가상 터미널(ConPTY)이 어떤 것인지. 화면의 터미널이 글자 칸 수와 크기 변경을 거기에 맞춘다.
+    pty: PtyInfo,
+}
+
+#[derive(Serialize)]
+pub struct PtyInfo {
+    /// Windows 빌드 번호(예: 26200). 알 수 없으면 0.
+    build: u32,
+    /// 실행 파일 옆에 둔 ConPTY(`conpty.dll`)를 쓰는지. 없으면 Windows에 내장된 것을 쓴다.
+    bundled: bool,
+}
+
+fn pty_info() -> PtyInfo {
+    let build = sysinfo::System::kernel_version().and_then(|text| text.trim().parse().ok()).unwrap_or(0);
+    let bundled = std::env::current_exe().ok().and_then(|exe| Some(exe.parent()?.join("conpty.dll").is_file())).unwrap_or(false);
+    PtyInfo { build, bundled }
 }
 
 #[tauri::command]
@@ -44,6 +60,7 @@ pub fn app_config(state: State<'_, AppState>) -> ConfigPayload {
         config: state.config.clone(),
         error: state.config_error.clone(),
         path: state.config_path.to_string_lossy().into_owned(),
+        pty: pty_info(),
     }
 }
 

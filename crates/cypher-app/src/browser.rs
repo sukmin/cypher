@@ -25,13 +25,49 @@ fn err(e: impl std::fmt::Display) -> String {
     e.to_string()
 }
 
-/// 주소창에 친 글자를 실제 주소로 바꾼다. http/https만 연다.
+/// 이 컴퓨터의 HTML 파일(`.html`, `.htm`)을 가리키는 주소인지. 사이트 항목은 웹 주소 말고는 이것만 연다
+/// (Claude가 만든 HTML 결과물을 그 자리에서 보려는 것). 다른 로컬 파일과 네트워크 경로(`file://서버/…`)는 열지 않는다.
+pub fn is_local_html(url: &Url) -> bool {
+    url.scheme() == "file"
+        && url.host_str().is_none_or(str::is_empty)
+        && url.to_file_path().is_ok_and(|path| {
+            path.extension().is_some_and(|ext| matches!(ext.to_string_lossy().to_ascii_lowercase().as_str(), "html" | "htm"))
+        })
+}
+
+/// 적은 글이 이 컴퓨터의 파일을 가리키는지(`file:` 주소나 `C:\…` 같은 전체 경로).
+fn names_local_file(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    let drive = bytes.len() > 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' && matches!(bytes[2], b'\\' | b'/');
+    drive || text.to_ascii_lowercase().starts_with("file:")
+}
+
+/// 이 컴퓨터의 파일을 가리키는 글을 그 파일의 주소로 바꾼다. 실제로 있는 HTML 파일만 연다.
+fn local_html(text: &str) -> Result<Url, String> {
+    let refused = || format!("이 컴퓨터의 파일은 HTML 파일(.html)만 열 수 있습니다. 파일이 없거나 HTML이 아닙니다: {text}");
+    let url = if text.to_ascii_lowercase().starts_with("file:") {
+        Url::parse(text).map_err(|_| refused())?
+    } else {
+        Url::from_file_path(text.replace('/', "\\")).map_err(|_| refused())?
+    };
+    if is_local_html(&url) && url.to_file_path().is_ok_and(|path| path.is_file()) {
+        Ok(url)
+    } else {
+        Err(refused())
+    }
+}
+
+/// 주소창에 친 글자를 실제 주소로 바꾼다. http/https, 그리고 이 컴퓨터에 있는 HTML 파일만 연다.
 /// 주소처럼 생기지 않은 글자는 검색어로 본다.
 pub fn normalize_url(input: &str) -> Result<Url, String> {
     let text = input.trim();
     let lower = text.to_ascii_lowercase();
     if text.is_empty() || lower == "about:blank" {
         return Url::parse("about:blank").map_err(err);
+    }
+    // 이 컴퓨터의 파일을 가리키는 글은 열 수 없어도 검색어로 넘기지 않는다(경로가 검색 사이트로 나간다).
+    if names_local_file(text) {
+        return local_html(text);
     }
     if lower.starts_with("http://") || lower.starts_with("https://") {
         return Url::parse(text).map_err(|_| format!("올바르지 않은 주소입니다: {text}"));
@@ -958,8 +994,34 @@ mod tests {
     }
 
     #[test]
+    fn 이_컴퓨터의_html_파일은_연다() {
+        let dir = std::env::temp_dir().join("cypher-local-html-test");
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let page = dir.join("결과 보고서.html");
+        std::fs::write(&page, "<!doctype html>").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+        let expected = Url::from_file_path(&page).unwrap();
+        // 전체 경로(구분자 둘 다)와 file: 주소를 받는다.
+        let path = page.to_string_lossy().into_owned();
+        for input in [path.clone(), path.replace('\\', "/"), expected.to_string()] {
+            let url = normalize_url(&input).unwrap();
+            assert_eq!(url, expected, "{input}");
+            assert!(is_local_html(&url));
+        }
+        // 없는 파일, HTML이 아닌 파일, 네트워크 경로는 열지 않는다. 검색어로 넘기지도 않는다(경로가 밖으로 나간다).
+        let other = dir.join("notes.txt").to_string_lossy().into_owned();
+        let missing = dir.join("없는 파일.html").to_string_lossy().into_owned();
+        for input in [other.as_str(), missing.as_str(), "file://server/share/a.html", "file:///C:/Windows/win.ini", "C:/Windows/win.ini"] {
+            assert!(normalize_url(input).is_err(), "{input}");
+        }
+        assert!(!is_local_html(&Url::parse("file://server/share/a.html").unwrap()));
+        assert!(!is_local_html(&Url::parse("https://example.com/a.html").unwrap()));
+    }
+
+    #[test]
     fn 웹_주소가_아닌_것은_열지_않고_검색한다() {
-        for input in ["javascript:alert(1)", "file:///C:/Windows/win.ini", "data:text/html,x", "tauri://localhost/index.html"] {
+        for input in ["javascript:alert(1)", "data:text/html,x", "tauri://localhost/index.html"] {
             let url = normalize_url(input).unwrap();
             assert_eq!(url.host_str(), Some("www.google.com"), "{input}");
         }

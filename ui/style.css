@@ -495,6 +495,10 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
 
 .note { margin: 10px; color: var(--dim); white-space: normal; }
 .note:empty { display: none; }
+/* 업데이트 창의 릴리즈 노트: 줄바꿈을 살리고, 길면 그 안에서 굴린다. */
+.update-notes { max-height: 260px; overflow: auto; white-space: pre-wrap; font: inherit; user-select: text; }
+/* 떠 있는 창 안에서 숨긴 줄·단추는 자리도 차지하지 않는다(.row의 배치가 hidden을 이기지 않게). */
+#popup-body [hidden] { display: none; }
 
 /* ───────── 떠 있는 창과 메뉴 ───────── */
 

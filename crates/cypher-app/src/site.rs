@@ -239,8 +239,8 @@ fn create(app: &AppHandle, id: u32, url: &str, place: Option<Place>, profile: &s
     let builder = builder
         // 파일을 끌어다 놓는 것은 페이지가 직접 받게 한다(사이트의 끌어서 올리기가 동작하도록).
         .disable_drag_drop_handler()
-        // 웹 주소가 아닌 곳(file:, 앱 내부 주소 등)으로는 가지 못하게 한다.
-        .on_navigation(|url| matches!(url.scheme(), "http" | "https" | "about"))
+        // 웹 주소가 아닌 곳(앱 내부 주소, 다른 로컬 파일 등)으로는 가지 못하게 한다. 이 컴퓨터의 HTML 파일은 연다.
+        .on_navigation(|url| matches!(url.scheme(), "http" | "https" | "about") || crate::browser::is_local_html(url))
         // 새 창으로 열리는 링크는 같은 자리에서 연다(통제되지 않는 창이 생기지 않게).
         .on_new_window(move |url, _features| {
             if let Some(webview) = for_new.get_webview(&label(id)) {

@@ -230,6 +230,84 @@ export function showHelp() {
   }));
 }
 
+/**
+ * Cypher 업데이트: GitHub의 최신 릴리즈를 확인하고, 새 버전이면 내려받아 설치한다.
+ * Cypher는 스스로 확인하러 나가지 않는다. 이 창의 단추를 눌렀을 때만 인터넷에 나간다(로그인·토큰은 필요 없다).
+ */
+export async function showUpdate() {
+  const { invoke, make, setStatus } = api;
+  const row = (key, value) => {
+    const line = make('div', 'row help');
+    line.append(make('kbd', '', key), make('span', '', value));
+    return line;
+  };
+  const megabytes = (bytes) => `${(bytes / (1 << 20)).toFixed(1)}MB`;
+  const current = await invoke('update_current').catch(() => '');
+  const latest = row('최신 버전', '아직 확인하지 않았습니다');
+  const verdict = make('p', 'note', '');
+  const notes = make('pre', 'note update-notes', '');
+  notes.hidden = true;
+  const check = make('button', 'row add', '업데이트 확인 (인터넷에서 GitHub의 최신 릴리즈를 읽어 옵니다)');
+  const install = make('button', 'row add', '');
+  install.hidden = true;
+  const page = make('button', 'row add', '릴리즈 페이지 열기 (기본 브라우저)');
+  page.hidden = true;
+  const restart = make('button', 'row add', '지금 다시 시작 (열려 있는 세션은 끝나고, 다시 뜬 뒤 누르면 대화를 이어 갑니다)');
+  restart.hidden = true;
+  openPopup('Cypher 업데이트', [
+    row('지금 버전', current || '알 수 없음'),
+    latest, verdict, notes, check, install, restart, page,
+    make('p', 'note', 'Cypher는 스스로 버전을 확인하러 나가지 않습니다. 위 단추를 눌렀을 때만 GitHub(api.github.com, github.com)에 접속하고, 보내는 정보는 없습니다. '
+      + '내려받은 묶음은 GitHub가 알려 주는 확인값(SHA-256)과 견준 뒤에 설치합니다. 설정·메모·워크스페이스는 그대로 둡니다.'),
+  ]);
+  let found = null;
+  check.onclick = async () => {
+    check.disabled = true;
+    latest.lastChild.textContent = '확인 중…';
+    verdict.textContent = '';
+    install.hidden = true;
+    try {
+      found = await invoke('update_check');
+      latest.lastChild.textContent = `${found.latest}${found.published ? ` (${found.published})` : ''}`;
+      page.hidden = false;
+      if (!found.newer) {
+        verdict.textContent = '최신 버전을 쓰고 있습니다.';
+      } else {
+        verdict.textContent = found.blocked ? `새 버전이 있습니다. ${found.blocked}` : '새 버전이 있습니다.';
+        notes.textContent = found.notes.length > 4000 ? `${found.notes.slice(0, 4000)}\n…` : found.notes;
+        notes.hidden = !found.notes;
+        install.textContent = `${found.latest} 내려받아 설치 (${megabytes(found.size)})`;
+        install.hidden = !!found.blocked;
+      }
+    } catch (err) {
+      latest.lastChild.textContent = String(err);
+    }
+    check.disabled = false;
+  };
+  install.onclick = async () => {
+    install.disabled = check.disabled = true;
+    verdict.textContent = '내려받아 설치하는 중…';
+    try {
+      const version = await invoke('update_install');
+      verdict.textContent = `${version}을(를) 설치했습니다. Cypher를 다시 시작하면 새 버전으로 뜹니다.`;
+      install.hidden = true;
+      restart.hidden = false;
+      setStatus(`Cypher ${version}을(를) 설치했습니다. 다시 시작하면 적용됩니다.`);
+    } catch (err) {
+      verdict.textContent = `설치하지 못했습니다: ${err}`;
+      install.disabled = false;
+    }
+    check.disabled = false;
+  };
+  restart.onclick = async () => {
+    restart.disabled = true;
+    try { await api.restartApp(); } catch (err) { verdict.textContent = String(err); restart.disabled = false; }
+  };
+  page.onclick = () => {
+    if (found?.page) invoke('link_open', { target: found.page, cwd: '', openFile: false, line: null, col: null }).catch((err) => setStatus(String(err)));
+  };
+}
+
 // ───────────────────────── 오른쪽 클릭 메뉴 ─────────────────────────
 
 /**

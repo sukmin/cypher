@@ -5,6 +5,7 @@
 // 다시 시작한 뒤에는 명령만 되살리고 스스로 실행하지는 않는다(사용자가 ▶를 눌러야 돈다).
 
 import { emptyZone } from './empty.js';
+import { windowsPty, matchWidths } from './widths.js';
 
 let api = null; // { invoke, listen, make, setStatus, showMenu, Channel, look(), scrollback, toClaude(item, text, ev), finished(item, info) }
 
@@ -105,12 +106,13 @@ export function createRun(item, host, saved = {}, onChange = () => {}) {
   const look = api.look();
   const term = new window.Terminal({
     fontFamily: look.termFamily, fontSize: look.termPixels, theme: look.termTheme, minimumContrastRatio: look.contrast,
-    cursorBlink: false, scrollback: api.scrollback, allowProposedApi: true, allowTransparency: look.rain,
+    cursorBlink: false, scrollback: api.scrollback, allowProposedApi: true, allowTransparency: look.rain, windowsPty: windowsPty(),
   });
   const fitAddon = new window.FitAddon.FitAddon();
   term.loadAddon(fitAddon);
   term.loadAddon(new window.Unicode11Addon.Unicode11Addon());
   term.unicode.activeVersion = '11';
+  matchWidths(term); // 글자의 칸 수를 가상 터미널(conhost)과 같게 센다.
   term.open($term);
 
   const busy = () => phase === 'starting' || phase === 'running';

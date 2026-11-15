@@ -1,7 +1,7 @@
 // Cypher 화면: 세션 목록, 나란히 보는 터미널 창, 링크·붙여넣기·알림.
 // 빌드 단계 없이 그대로 실행 파일에 들어간다.
 import {
-  initExtras, showSnippets, showHelp, showEngine, showMemory, showMenu, toggleDiff, showDiff, diffRefreshFor, openPopup,
+  initExtras, showSnippets, showHelp, showEngine, showUpdate, showMemory, showMenu, toggleDiff, showDiff, diffRefreshFor, openPopup,
 } from './extras.js';
 import { initHttp, createHttp } from './http.js';
 import { initMemo, createMemo } from './memo.js';
@@ -19,6 +19,7 @@ import { initTemplate, saveTemplate, showTemplates } from './template.js';
 import { initTodo, createTodo } from './todo.js';
 import { initRun, createRun } from './run.js';
 import { initTable, createTable } from './table.js';
+import { setPty, windowsPty, matchWidths } from './widths.js';
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -139,6 +140,7 @@ try { searchOptions = { ...searchOptions, ...JSON.parse(localStorage.getItem('cy
 async function init() {
   const loaded = await invoke('app_config');
   config = loaded.config;
+  setPty(loaded.pty); // 터미널이 글자 칸 수와 크기 변경을 세션의 가상 터미널에 맞추는 데 쓴다.
   if (loaded.error) setStatus(`설정 파일 오류(기본값으로 동작): ${loaded.error}`);
   // 기본 폴더는 사용자 폴더다. 세션이 시작될 폴더는 워크스페이스마다 정한다(워크스페이스를 만들 때, 또는 워크스페이스 오른쪽 클릭 → 워크스페이스 폴더 정하기).
   folder = await invoke('home_dir');
@@ -154,7 +156,7 @@ async function init() {
   $('new-buttons').append(groupButton);
 
   initExtras({
-    invoke, make, ask, setStatus, newSession, label, runsClaude,
+    invoke, make, ask, setStatus, newSession, label, runsClaude, restartApp,
     getActive: () => active,
     getFolder: () => folder,
     focusActive: () => focusItem(active),
@@ -289,11 +291,7 @@ async function init() {
   // 창을 닫으려 하면 앱이 바로 닫지 않고 알려 준다(창이 닫힐 때는 위의 beforeunload가 불리지 않는다).
   // 자동 저장을 기다리던 글(메모·요청 파일·마인드맵)과 배치를 저장한 뒤에 닫게 한다.
   listen('app-closing', async () => {
-    const saving = [...sessions.values()].map((s) => { try { return s.view?.flush?.(); } catch { return undefined; } });
-    // 저장이 멈춰 있어도 닫히기는 해야 한다(앱도 3초 뒤에는 그냥 닫는다).
-    await Promise.race([Promise.allSettled(saving), new Promise((resolve) => setTimeout(resolve, 2500))]);
-    writeState();
-    closing = true;
+    await saveBeforeClose();
     invoke('app_close');
   });
 
@@ -309,6 +307,26 @@ async function init() {
   // 되살릴 항목이 없어도 사이드바는 그린다: 항목 없이 남아 있는 워크스페이스의 머리(세션·항목을 만드는 길은 그 머리의 +뿐이다)와,
   // 워크스페이스가 하나도 없을 때의 안내 줄이 여기서 나온다.
   render();
+}
+
+/** 창이 닫히기 전에 쓰던 것을 저장한다: 자동 저장을 기다리던 글(메모·요청 파일·마인드맵)과 배치. 그 뒤로는 상태를 적지 않는다. */
+async function saveBeforeClose() {
+  const saving = [...sessions.values()].map((s) => { try { return s.view?.flush?.(); } catch { return undefined; } });
+  // 저장이 멈춰 있어도 닫히기는 해야 한다(앱도 3초 뒤에는 그냥 닫는다).
+  await Promise.race([Promise.allSettled(saving), new Promise((resolve) => setTimeout(resolve, 2500))]);
+  writeState();
+  closing = true;
+}
+
+/** 업데이트를 설치한 뒤 새 버전으로 다시 시작한다(쓰던 것을 저장하고, 새 실행 파일을 띄우고, 이 창을 닫는다). */
+async function restartApp() {
+  await saveBeforeClose();
+  try {
+    await invoke('update_restart');
+  } catch (err) {
+    closing = false; // 새 버전을 띄우지 못했다: 이 창은 계속 쓴다.
+    throw err;
+  }
 }
 
 /** 창 상단 메뉴(도구·설정·도움말)에서 고른 항목을 실행한다. 항목 번호는 앱 쪽 메뉴 정의와 맞춘다. */
@@ -333,6 +351,7 @@ function runMenu(id) {
     'claude-memory': () => openClaudeFile('memory'),
     help: showHelp,
     engine: showEngine,
+    update: showUpdate,
   };
   actions[id]?.();
 }
@@ -504,7 +523,7 @@ async function newSession(profileId, opts = {}) {
   const look = currentLook();
   const term = new Terminal({
     fontFamily: look.termFamily, fontSize: look.termPixels, theme: look.termTheme, minimumContrastRatio: look.contrast,
-    cursorBlink: true, scrollback: config.session.scrollback, allowProposedApi: true,
+    cursorBlink: true, scrollback: config.session.scrollback, allowProposedApi: true, windowsPty: windowsPty(),
     // 매트릭스 테마에서는 터미널 뒤로 흐르는 글자가 비치게 한다. 터미널을 만들 때만 정할 수 있고(나중에 못 바꾼다)
     // 글자가 조금 덜 또렷해지므로, 그 테마로 흐르는 글자를 켜 둔 동안에 만드는 터미널에만 켠다.
     allowTransparency: look.rain,
@@ -539,6 +558,9 @@ async function newSession(profileId, opts = {}) {
   sessions.set(s.key, s);
   ensureGroup(s.group);
   if (!opts.restoring) rememberFolder(cwd);
+  // 글자의 칸 수를 가상 터미널(conhost)과 같게 센다. 다르면 화면이 한 줄씩 밀린다.
+  // Claude Code와 가상 터미널이 서로 다르게 세는 글자가 찍히면 알려 오고, 그때는 응답이 끝난 뒤 화면을 다시 맞춘다(realign).
+  matchWidths(term, () => noteSkew(s));
   wirePane(s);
   wireTerminal(s);
   // 찾기 결과의 개수와 지금 몇 번째인지를 찾기 줄에 보여 준다.
@@ -573,15 +595,19 @@ async function startProcess(s, worktree = null) {
     if (!s.paused && s.queued > FLOW_HIGH) setPaused(s, true);
     s.lastOutput = performance.now();
   };
+  const size = { cols: term.cols, rows: term.rows };
   try {
     s.id = await invoke('session_create', {
-      profile: s.profile.id, cwd: s.startCwd, cols: term.cols, rows: term.rows,
+      profile: s.profile.id, cwd: s.startCwd, cols: size.cols, rows: size.rows,
       resume: resumeOf(s) || null, worktree: worktree || null, onOutput: channel,
       // 기본 Claude 프로필은 사용자가 정해 둔 실행 명령으로 띄운다.
       command: s.profile.id === 'claude' && claudeCommand ? claudeCommand : null,
     });
     // 띄우는 사이에 사용자가 이미 닫았으면, 방금 뜬 프로세스를 끝내고 손을 뗀다.
     if (!sessions.has(s.key)) { invoke('session_close', { id: s.id }); return; }
+    // 띄우는 사이에 창 크기가 바뀌었으면(그때는 알릴 프로세스가 없었다) 지금 크기를 알린다.
+    s.ptySize = sizeKey(size);
+    syncSize(s);
     flush(s); // 띄우는 동안 눌린 키를 보낸다.
   } catch (err) {
     if (!sessions.has(s.key)) return;
@@ -1246,6 +1272,8 @@ function onHook({ id, event, kind, message, agent, agent_type: agentType, backgr
   if (force) s.agents.clear(); // 한참 조용했으니 남아 있던 서브에이전트 표시는 끝난 것으로 본다.
   s.waiting = event === 'Stop' ? 'done' : 'approval';
   if (event === 'Stop') diffRefreshFor(s);
+  // 응답에 Claude Code와 가상 터미널이 칸 수를 다르게 세는 글자가 있었으면, 끝난 지금 화면을 다시 맞춘다.
+  if (event === 'Stop') realignIfSkewed(s);
   render();
   const title = label(s);
   const body = event === 'Stop'
@@ -2312,6 +2340,7 @@ function paletteEntries() {
     command('Claude 공통 설정 열기 (settings.json)', () => runMenu('claude-settings'), '설정'),
     command('Claude 공통 지침 열기 (CLAUDE.md)', () => runMenu('claude-memory'), '설정'),
     command('단축키 보기', showHelp, '도움말 · F1'),
+    command('Cypher 업데이트…', showUpdate, '도움말 · 단추를 눌렀을 때만 확인'),
     ...(viewedGroup() ? [command(`워크스페이스 "${viewedGroup()}"의 폴더 정하기…`, () => pickGroupFolder(viewedGroup()), `폴더 · 지금: ${groupFolderOf(viewedGroup()) || '정하지 않음'}`)] : []),
   ];
   return [...items, ...commands];
@@ -2396,6 +2425,7 @@ function sessionMenu(s, ev) {
         action: () => newSession(s.profile.id, { ...besideOf(s), show: visible.includes(s) ? 'split' : 'replace' }),
       },
       { label: '변경 내용 보기', action: () => { activate(s); toggleDiff(true); } },
+      ...(s.exited || s.dormant ? [] : [{ label: '화면 다시 맞추기 (글자가 어긋나 보일 때)', action: () => realign(s) }]),
       { label: '출력 저장…', action: () => exportText(s) },
       { label: '기억 내보내기·가져오기', action: () => showMemory(s) },
     ] : []),
@@ -2806,7 +2836,8 @@ function httpFolders(s) {
 
 // ───────────────────────── Claude 세션이 만든 파일 ─────────────────────────
 // Claude 세션이 Write 도구로 새 파일을 만들면 앱이 알려 온다(session-file). 그 파일을 종류에 맞는 항목으로
-// 그 세션의 묶음에 놓는다: 문서(.md, .txt) → 문서 항목, 그림 → 이미지 항목, 요청 파일(.http) → HTTP 항목.
+// 그 세션의 묶음에 놓는다: 문서(.md, .txt) → 문서 항목, 그림 → 이미지 항목, 요청 파일(.http) → HTTP 항목,
+// 표 파일(.csv, .tsv) → 표 항목, HTML 파일(.html, .htm) → 사이트 항목(그 파일을 브라우저로 연다).
 // 보던 화면은 바꾸지 않고 사이드바에만 놓으며, 알림으로 알려 준다. 설정의 [session] show_created로 끄거나 넓힌다.
 
 const MAX_PLACED = 8;           // 요청 하나에서 사이드바에 놓는 파일 수
@@ -2816,6 +2847,10 @@ const withRootSlash = (dir) => (/^[A-Za-z]:$/.test(dir) ? `${dir}\\` : dir);
 const dirName = (path) => withRootSlash(path.replace(/[\\/][^\\/]*$/, ''));
 /** 요청 파일을 보여 줄 HTTP 항목의 폴더: 파일이 `<폴더>\http`나 `<폴더>\.cypher\http`에 있으면 그 `<폴더>`. */
 const httpHome = (path) => { const dir = dirName(path); const m = /^(.+?)[\\/](?:\.cypher[\\/]http|http)$/i.exec(dir); return m ? withRootSlash(m[1]) : dir; };
+/** 이 컴퓨터의 파일을 사이트 항목으로 열 때의 주소(`file:///C:/…`). 이름의 빈칸·한글·# 같은 글자는 주소에 맞게 바꾼다. */
+const fileUrl = (path) => `file:///${path.replace(/\\/g, '/').split('/').map((part, i) => (i === 0 ? part : encodeURIComponent(part))).join('/')}`;
+/** 두 주소가 같은 파일을 가리키는지(주소에 맞게 바꾼 글자와 대/소문자 차이는 무시). */
+const sameFileUrl = (a, b) => { try { return decodeURI(a).toLowerCase() === decodeURI(b).toLowerCase(); } catch { return a === b; } };
 /** 경로를 견줄 때 쓰는 모양(구분자와 대/소문자를 맞춘 것). */
 const pathKey = (path) => path.replace(/\//g, '\\').toLowerCase();
 
@@ -2842,7 +2877,8 @@ function shouldPlace(s, path, kind) {
   // 그 묶음에 이미 이 파일을 보여 주는 항목이 있으면 더 놓지 않는다.
   const shows = (other) => ((other.kind === 'reader' || other.kind === 'table') && samePath(other.view.path(), path))
     || (other.kind === 'http' && samePath(other.view.state().file || '', path))
-    || (other.kind === 'memo' && samePath(other.view.state().path || '', path));
+    || (other.kind === 'memo' && samePath(other.view.state().path || '', path))
+    || (other.kind === 'site' && kind === 'html' && sameFileUrl(other.view.url() || '', fileUrl(path)));
   if ([...sessions.values()].some((other) => groupKey(other) === groupKey(s) && shows(other))) return false;
   // 한 요청에서 파일을 많이 만들면 사이드바가 넘치므로 몇 개까지만 놓고, 넘친 것은 한 번만 알린다.
   if ((s.placed || 0) >= MAX_PLACED) {
@@ -2858,13 +2894,15 @@ function shouldPlace(s, path, kind) {
   return true;
 }
 
-/** 종류에 맞는 항목으로 놓는다: 그림 → 이미지 항목, 요청 파일 → HTTP 항목, 그 밖의 글 → 문서 항목. 놓은(또는 다시 읽게 한) 항목을 돌려준다. */
+/** 종류에 맞는 항목으로 놓는다: 그림 → 이미지 항목, 표 파일 → 표 항목, HTML 파일 → 사이트 항목, 요청 파일 → HTTP 항목, 그 밖의 글 → 문서 항목. 놓은(또는 다시 읽게 한) 항목을 돌려준다. */
 async function placeCreated(s, path, kind) {
   if (kind === 'image') {
     const [image] = await addImages([await invoke('image_import', { path })], { ...besideOf(s), source: path });
     return image;
   }
   if (kind === 'table') return newItem('table', { ...besideOf(s), saved: { path }, show: 'hidden' });
+  // HTML 파일은 그 파일을 여는 사이트 항목으로 놓는다(웹뷰는 사용자가 그 항목을 처음 볼 때 뜬다).
+  if (kind === 'html') return newItem('site', { ...besideOf(s), saved: { url: fileUrl(path), title: baseName(path) }, show: 'hidden' });
   // 요청 파일은 그 폴더를 보는 HTTP 항목으로 놓는다. 워크스페이스가 없는 세션은 자기 폴더 묶음에만 놓을 수 있으므로,
   // 요청 파일이 다른 폴더의 것이면(남의 폴더 묶음에 끼어들게 된다) 문서 항목으로 보여 준다.
   const home = kind === 'http' ? httpHome(path) : '';
@@ -3197,7 +3235,16 @@ function initComposer() {
     if (!recalling) promptAt = -1; // 직접 고치기 시작하면 기록을 넘기던 자리를 잊는다.
     if (composerFor) { composerFor.draft = $text.value; saveState(); }
   });
+  // 클립보드에 그림만 있을 때의 붙여넣기(Ctrl+V): 터미널에 붙여넣을 때와 같게 한다. 글자가 있으면 평소대로 글자를 넣는다.
+  let plainPaste = false; // Ctrl+Shift+V로 붙여넣는 중인지(그림을 파일 경로로 넣는다)
+  $text.addEventListener('paste', (ev) => {
+    const items = [...(ev.clipboardData?.items || [])];
+    if (items.some((item) => item.type === 'text/plain') || !items.some((item) => item.type.startsWith('image/'))) return;
+    ev.preventDefault();
+    pasteImageInComposer(plainPaste);
+  });
   $text.addEventListener('keydown', (ev) => {
+    if (ev.ctrlKey && ev.key.toLowerCase() === 'v') plainPaste = ev.shiftKey;
     if (ev.ctrlKey && !ev.shiftKey && ev.key === 'Enter') { ev.preventDefault(); sendPrompt(); }
     else if (ev.altKey && !ev.ctrlKey && (ev.key === 'ArrowUp' || ev.key === 'ArrowDown')) { ev.preventDefault(); recallPrompt(ev.key === 'ArrowUp' ? 1 : -1); }
     else if (ev.key === 'Escape') focusItem(composerFor);
@@ -3220,6 +3267,32 @@ function initComposer() {
     document.addEventListener('mouseup', stop);
   };
   grip.ondblclick = () => localStorage.setItem('cypher.composer.height', String(setHeight(COMPOSER_HEIGHT)));
+}
+
+/**
+ * 프롬프트 편집기에서 클립보드의 그림을 붙여넣는다. 터미널에 붙여넣을 때(paste)와 같다.
+ * - Claude 세션: 그 세션에 Alt+V 신호를 보내 Claude Code가 클립보드의 그림을 입력창에 붙이게 한다([Image #n]).
+ *   편집기의 글은 [프롬프트]를 누를 때 그 뒤에 들어간다.
+ * - 그 밖의 세션, 또는 Ctrl+Shift+V: PNG 파일로 저장하고 그 경로를 편집기의 커서 자리에 넣는다.
+ */
+async function pasteImageInComposer(forceFile) {
+  const s = composerFor, $text = $('composer-text');
+  if (!s) return;
+  try {
+    const clip = await invoke('clipboard_read');
+    if (clip.kind === 'empty') return;
+    const asText = () => { $text.focus(); document.execCommand('insertText', false, clip.text); };
+    if (clip.kind !== 'image') return asText();
+    if (runsClaude(s) && !forceFile && !s.exited) {
+      send(s, '\x1bv');
+      setStatus('그림을 세션 입력창에 붙였습니다. 편집기에 쓴 글은 [프롬프트]를 누르면 그 뒤에 들어갑니다. (Ctrl+Shift+V: 파일 경로로 넣기)');
+    } else {
+      asText();
+    }
+    addShot(s, clip);
+  } catch (err) {
+    setStatus(`붙여넣기 실패: ${err}`);
+  }
 }
 
 /** 화면 상태에 맞춰 프롬프트 편집기를 보이거나 숨기고, 세션이 바뀌면 그 세션이 쓰던 글로 바꾼다. */
@@ -3451,12 +3524,88 @@ async function flush(s) {
   s.sending = false;
 }
 
+// ───────────────────────── 화면 다시 맞추기 ─────────────────────────
+// Claude Code는 화면 아래쪽(쓰고 있는 응답, 입력창)을 "몇 줄 위로 올라가 다시 그리는" 식으로 고친다. 그런데 국기 🇰🇷·키캡 1️⃣·
+// 이어 붙인 이모지·결합 글자는 Claude Code와 Windows의 가상 터미널(conhost)이 칸 수를 다르게 세서, 그런 글자가 든 줄이
+// 가상 터미널에서 한 줄 더 차지하면 Claude Code가 줄 수를 잘못 알게 되고 구분선·입력창이 겹쳐 남는다. 화면 쪽에서는 이 차이를
+// 없앨 수 없으므로, 그런 글자가 찍힌 세션은 응답이 끝났을 때 Claude Code가 화면을 처음부터 다시 그리게 한다.
+// 다시 그리게 하는 방법은 창 크기 변경이다: 줄 수를 한 줄 줄였다가 되돌리면 Claude Code가 화면을 지우고 전부 다시 그린다.
+
+const REALIGN_HOLD_MS = 450;   // 한 줄 줄인 채로 두는 시간(프로그램이 크기 변경을 알아채고 다시 그릴 틈)
+const REALIGN_QUIET_MS = 2500; // 다시 맞춘 뒤 이 시간 동안 찍힌 글자는 다시 그리느라 나온 것이므로 세지 않는다
+
+/**
+ * 어긋날 만한 글자가 이 세션에 찍혔다. 적어만 두고, 다시 맞추는 것은 응답이 끝났을 때 한다(realignIfSkewed).
+ * Claude가 도는지는 여기서 가리지 않는다: 대화를 이어 열 때는 Claude가 뜬 것을 알기도 전에 지난 대화가 찍힌다.
+ * 셸만 도는 세션은 완료 신호가 오지 않으므로 다시 맞추는 일이 없다.
+ */
+function noteSkew(s) {
+  if (s.skewed || performance.now() < (s.realignedAt || 0) + REALIGN_QUIET_MS) return;
+  s.skewed = true;
+}
+
+/** 어긋날 만한 글자가 찍힌 세션이면 화면을 다시 맞춘다. 응답이 끝났을 때 부른다. */
+function realignIfSkewed(s) {
+  if (!s?.skewed || s.exited) return;
+  // 지난 출력을 올려 보고 있으면 건드리지 않는다(다시 그리면 보던 자리를 잃는다). 다음 응답이 끝날 때 다시 본다.
+  const buffer = s.term.buffer.active;
+  if (buffer.viewportY < buffer.baseY) return;
+  realign(s);
+}
+
+/**
+ * 세션의 화면을 다시 맞춘다: 터미널을 한 줄 줄였다가 되돌려, 세션의 프로그램이 화면을 처음부터 다시 그리게 한다.
+ * 다시 그리지 않는 프로그램(셸)이라도 가상 터미널이 자기 화면을 통째로 다시 보내므로 화면 쪽이 어긋난 것은 바로잡힌다.
+ */
+function realign(s) {
+  if (!s?.term || s.id == null || s.exited || s.realigning) return;
+  const { cols, rows } = s.term;
+  if (rows < 3) return;
+  s.realigning = true;
+  s.skewed = false;
+  s.realignedAt = performance.now() + REALIGN_HOLD_MS; // 되돌린 뒤까지 조용한 시간으로 친다
+  s.term.resize(cols, rows - 1);
+  setTimeout(() => {
+    s.realigning = false;
+    if (!sessions.has(s.key)) return;
+    // 그 사이에 창 크기가 바뀌었으면(터미널이 이미 새 크기다) 그대로 두고, 아니면 원래 줄 수로 되돌린다.
+    if (s.term.cols === cols && s.term.rows === rows - 1) {
+      if (visible.includes(s)) { try { s.fitAddon.fit(); } catch { s.term.resize(cols, rows); } } else s.term.resize(cols, rows);
+    }
+    s.realignedAt = performance.now();
+    s.skewed = false;
+  }, REALIGN_HOLD_MS);
+}
+
+const sizeKey = ({ cols, rows }) => `${cols}x${rows}`;
+
+/**
+ * 터미널의 지금 크기를 세션의 가상 터미널에 알린다. 둘의 크기가 다르면 화면이 어긋난다(가상 터미널은 화면을
+ * 줄바꿈으로 이어 그려 보내므로, 줄 수가 다르면 그만큼 밀려 찍힌다).
+ * 한 번에 하나씩 보내고, 보내는 사이에 또 바뀌었으면 마지막 크기를 이어서 보낸다(늦게 보낸 것이 먼저 닿아 옛 크기로 남지 않게).
+ * `again`이면 이미 알린 크기라도 다시 알린다.
+ */
+function syncSize(s, again = false) {
+  if (!s.term || s.id == null || s.exited) return;
+  if (again) s.ptySize = '';
+  if (s.sizing) return;
+  const size = { cols: s.term.cols, rows: s.term.rows };
+  if (s.ptySize === sizeKey(size)) return;
+  const id = s.id;
+  s.sizing = true;
+  invoke('session_resize', { id, ...size }).then(
+    () => { s.sizing = false; if (s.id === id) { s.ptySize = sizeKey(size); syncSize(s); } },
+    () => { s.sizing = false; }, // 끝난 세션 등. 다음 크기 변경 때 다시 알린다.
+  );
+}
+
 function wireTerminal(s) {
   const { term } = s;
   term.onData((data) => send(s, data));
-  term.onResize(({ cols, rows }) => {
-    if (s.id != null && !s.exited) invoke('session_resize', { id: s.id, cols, rows });
-  });
+  term.onResize(() => syncSize(s));
+  // 이 터미널로 돌아올 때 크기를 한 번 더 알린다. 세션 안의 프로그램이 콘솔 크기를 바꿔 놓았어도(`mode con …`) 제 크기로 돌아오고,
+  // 가상 터미널이 화면을 통째로 다시 그려 보내므로 어긋나 있던 화면도 바로잡힌다.
+  term.textarea?.addEventListener('focus', () => syncSize(s, true));
   term.onTitleChange((title) => { s.title = title; render(); });
   term.onBell(() => { if (s !== active) { s.attention = true; render(); } });
   term.textarea?.addEventListener('focus', () => { s.focusedAt = performance.now(); });
@@ -3780,7 +3929,7 @@ window.cypher = {
   onHook, onStatus, nextWaiting, writeState, rename, sendPrompt, text: sessionText, addImages, onCaptured, captureBrowser,
   setLook, currentLook, mcpAction, handoffSite, onMcpRequest, setMark, jumpToMark, markedItem, textToClaude, runFinished,
   showPalette, paletteEntries, showClosed, reopenLast, restartSession, placeInOrder, inSidebarOrder, cycle, find, recallPrompt, createGroup, newGroup, adoptGroup, groupFor,
-  onCreatedFile, onTool, wake, wakeGroup, restore, runsClaude, askClaudeCommand, setGroupFolder, groupFolderOf, groupContext, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
+  onCreatedFile, onTool, realign, wake, wakeGroup, restore, runsClaude, askClaudeCommand, setGroupFolder, groupFolderOf, groupContext, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
   get visible() { return visible; },
   get active() { return active; },
 };

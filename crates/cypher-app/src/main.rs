@@ -9,6 +9,7 @@ mod commands;
 mod created;
 mod drops;
 mod engine;
+mod update;
 mod extras;
 mod http;
 mod image;
@@ -232,6 +233,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
     let help = SubmenuBuilder::new(app, "도움말")
         .item(&item("help", "단축키\tF1")?)
         .item(&item("engine", "브라우저 엔진 정보·업데이트 확인")?)
+        .item(&item("update", "Cypher 업데이트…")?)
         .build()?;
     MenuBuilder::new(app).items(&[&tools, &settings, &help]).build()
 }
@@ -285,6 +287,7 @@ fn main() {
             let status_port = status::start(app.handle().clone(), token.clone())?;
             clipboard::clean_old_pastes();
             clean_old_settings();
+            update::clean_leftovers();
             memo::clean_closed();
             mindmap::clean_closed();
             erd::clean_closed();
@@ -411,6 +414,10 @@ fn main() {
             commands::ui_zoom,
             engine::browser_engine_info,
             engine::browser_latest_version,
+            update::update_current,
+            update::update_check,
+            update::update_install,
+            update::update_restart,
         ])
         .run(tauri::generate_context!())
         .expect("Cypher를 실행하지 못했습니다");
