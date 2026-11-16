@@ -195,18 +195,27 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
   );
   const $list = make('div', 'todo-list');
   $list.tabIndex = 0;
-  // 할 일이 하나도 없는 동안의 빈 영역: 아래 칸에 적거나, 체크 목록이 든 파일을 끌어다 놓거나 골라 그 내용으로 채운다.
+  // 할 일이 하나도 없는 동안의 빈 영역: 맨 아래 칸에 적거나, 체크 목록이 든 파일을 끌어다 놓거나 골라 그 내용으로 채운다.
+  // 할 일을 적는 칸은 이 창의 맨 아래에 있다. 빈 영역 가운데의 칸은 파일 경로를 적는 칸이라 헷갈리기 쉬우므로,
+  // 어디에 적는지를 제목·단추·아래 칸 바로 위의 안내 줄로 거듭 알려 준다.
   const zone = emptyZone(make, {
-    title: '할 일이 없습니다',
-    hint: '아래 칸에 할 일을 적고 Enter를 누르면 목록에 들어갑니다. 같은 워크스페이스의 Claude 세션에게 "할 일 목록을 만들어 줘"라고 해도 됩니다. 체크 목록이 든 Markdown·글자 파일을 여기에 끌어다 놓거나 고르면 그 내용으로 채웁니다(원본 파일은 바뀌지 않습니다).',
+    title: '할 일은 이 창 맨 아래의 입력 칸에 적습니다 ↓',
+    hint: '맨 아래 칸에 할 일을 적고 Enter를 누르면 목록에 들어갑니다(아래 단추를 누르면 그 칸으로 갑니다). 같은 워크스페이스의 Claude 세션에게 "할 일 목록을 만들어 줘"라고 해도 됩니다. 체크 목록이 든 Markdown·글자 파일을 여기에 끌어다 놓거나 고르면 그 내용으로 채웁니다(원본 파일은 바뀌지 않습니다).',
     pick: { label: '파일에서 가져오기…', tip: '체크 목록이 든 Markdown·글자 파일 고르기', action: () => pickFile() },
-    path: { placeholder: '또는 파일 경로를 적고 Enter', action: (given) => takeFile(given) },
+    path: { placeholder: '가져올 파일의 경로를 적고 Enter (할 일은 맨 아래 칸에)', action: (given) => takeFile(given) },
   });
   const $empty = zone.node;
   const $add = make('input', 'todo-add');
   Object.assign($add, { placeholder: '할 일을 적고 Enter (목록 끝에 더하기)', spellcheck: false, autocomplete: 'off' });
+  // 빈 영역의 첫 단추: 맨 아래 입력 칸으로 간다.
+  const $write = make('button', 'todo-write', '할 일 적기 ↓');
+  $write.title = '맨 아래의 입력 칸으로 가기';
+  $write.onclick = () => $add.focus();
+  $empty.querySelector('.empty-actions')?.prepend($write);
+  // 할 일이 없는 동안 입력 칸 바로 위에 보이는 안내 줄.
+  const $addHint = make('div', 'todo-add-hint', '↓ 여기에 할 일을 적고 Enter를 누르세요');
   const $listView = make('div', 'todo-view');
-  $listView.append($empty, $list, $add);
+  $listView.append($empty, $list, $addHint, $add);
   const $code = make('textarea', 'todo-code');
   Object.assign($code, { spellcheck: false, autocomplete: 'off' });
   $code.placeholder = '# 제목\n- [ ] 할 일\n  - [ ] 하위 일\n- [x] 끝낸 일';
@@ -262,6 +271,9 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
     if (editing) return; // 고치는 중에는 입력칸이 사라지지 않게 목록을 그대로 둔다(끝나면 다시 그린다).
     const shown = model.rows.filter((row) => !(hideDone && row.kind === 'task' && row.done));
     $empty.hidden = model.rows.length > 0;
+    // 할 일이 없는 동안에는 맨 아래 입력 칸을 눈에 띄게 한다.
+    $addHint.hidden = model.rows.length > 0;
+    $add.classList.toggle('first', model.rows.length === 0);
     if (selected >= 0 && !shown.some((row) => row.line === selected && row.kind === 'task')) selected = -1;
     $list.replaceChildren(...shown.map(drawRow));
   }

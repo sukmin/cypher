@@ -25,7 +25,7 @@ const MAIN: &[&str] = &[
     "erd_read", "erd_write", "erd_remove",
     "todo_read", "todo_write", "todo_remove", "run_start", "run_pick", "table_pick",
     "store_dirs", "ui_zoom", "closed_restore",
-    "update_current", "update_check", "update_install", "update_restart",
+    "update_current", "update_check", "update_install", "update_restart", "app_ready",
     "http_files", "http_read", "http_save", "http_run_at",
 ];
 

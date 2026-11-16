@@ -15,7 +15,7 @@ use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
-use tauri::{AppHandle, Manager};
+use tauri::{AppHandle, Emitter, Manager};
 
 const LATEST_URL: &str = "https://api.github.com/repos/sukmin/cypher/releases/latest";
 /// 묶음은 이 저장소의 릴리즈에서만 받는다.
@@ -163,8 +163,21 @@ fn blocked(release: &Release) -> Option<String> {
     }
 }
 
-/// 묶음을 받아 `to`에 저장한다. 받으면서 SHA-256을 구해 `asset`의 것과 견준다.
-fn download(asset: &Asset, to: &Path) -> Result<(), String> {
+/// 설치가 어디까지 왔는지 화면에 알리는 내용(`update-progress`).
+#[derive(Clone, Serialize)]
+struct Progress {
+    /// `check`(릴리즈 확인) · `download`(내려받기) · `unpack`(풀기) · `replace`(파일 바꾸기)
+    stage: &'static str,
+    /// 내려받은 바이트와 전체 바이트(내려받기에서만 뜻이 있다).
+    done: u64,
+    total: u64,
+}
+
+/// 설치의 단계를 알리는 함수: (단계, 받은 바이트, 전체 바이트).
+type Report<'a> = &'a dyn Fn(&'static str, u64, u64);
+
+/// 묶음을 받아 `to`에 저장한다. 받으면서 SHA-256을 구해 `asset`의 것과 견준다. 받는 양은 1%가 바뀔 때마다 알린다.
+fn download(asset: &Asset, to: &Path, report: Report) -> Result<(), String> {
     let expected = asset.sha256.as_deref().ok_or("묶음의 확인값이 없습니다")?;
     let response = agent(300).get(&asset.url).set("User-Agent", "Cypher").call().map_err(|e| format!("묶음을 내려받지 못했습니다: {e}"))?;
     let mut reader = response.into_reader().take(MAX_SIZE + 1);
@@ -172,10 +185,15 @@ fn download(asset: &Asset, to: &Path) -> Result<(), String> {
     let mut hasher = Sha256::new();
     let mut total = 0u64;
     let mut buf = vec![0u8; 64 * 1024];
+    let percent = |total: u64| total.saturating_mul(100) / asset.size.max(1);
+    report("download", 0, asset.size);
     loop {
         let read = reader.read(&mut buf).map_err(|e| format!("묶음을 내려받다가 끊겼습니다: {e}"))?;
         if read == 0 {
             break;
+        }
+        if percent(total + read as u64) != percent(total) {
+            report("download", total + read as u64, asset.size);
         }
         total += read as u64;
         hasher.update(&buf[..read]);
@@ -290,6 +308,19 @@ static INSTALLED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None)
 
 /// 지난 업데이트가 남긴 것을 치운다: 이름을 바꿔 둔 옛 파일과 내려받은 묶음. 시작할 때 부른다.
 pub fn clean_leftovers() {
+    clean_old_files();
+    if let Some(dir) = crate::data_dir() {
+        let _ = std::fs::remove_dir_all(dir.join("update"));
+    }
+    // "다시 시작"으로 떴으면 앞선 창이 아직 떠 있어 옛 실행 파일이 지워지지 않는다. 그 창이 닫혔을 즈음 한 번 더 치운다.
+    std::thread::spawn(|| {
+        std::thread::sleep(Duration::from_secs(30));
+        clean_old_files();
+    });
+}
+
+/// 실행 파일 폴더에서 업데이트가 이름을 바꿔 둔 옛 파일을 지운다.
+fn clean_old_files() {
     if let Ok(dir) = install_dir() {
         for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             if is_leftover(&entry.file_name().to_string_lossy()) && entry.path().is_file() {
@@ -297,19 +328,18 @@ pub fn clean_leftovers() {
             }
         }
     }
-    if let Some(dir) = crate::data_dir() {
-        let _ = std::fs::remove_dir_all(dir.join("update"));
-    }
 }
 
-/// 묶음을 받아 확인하고 `dir`의 파일을 바꾼다.
-fn install(asset: &Asset, dir: &Path, work: &Path) -> Result<Vec<String>, String> {
+/// 묶음을 받아 확인하고 `dir`의 파일을 바꾼다. 단계가 바뀔 때마다 `report`로 알린다.
+fn install(asset: &Asset, dir: &Path, work: &Path, report: Report) -> Result<Vec<String>, String> {
     let _ = std::fs::remove_dir_all(work);
     std::fs::create_dir_all(work).map_err(|e| e.to_string())?;
     let zip = work.join(&asset.name);
-    download(asset, &zip)?;
+    download(asset, &zip, report)?;
+    report("unpack", asset.size, asset.size);
     let unpacked = work.join("unpacked");
     unzip(&zip, &unpacked)?;
+    report("replace", asset.size, asset.size);
     let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0).to_string();
     let placed = replace_files(&package_dir(&unpacked)?, dir, &stamp)?;
     let _ = std::fs::remove_dir_all(work);
@@ -340,9 +370,21 @@ pub async fn update_check() -> Result<UpdateInfo, String> {
 }
 
 /// 최신 릴리즈를 내려받아 설치한다. 설치한 버전을 돌려준다(다시 시작해야 그 버전으로 뜬다).
-/// 받을 주소는 화면에서 받지 않고 여기서 다시 확인한다.
+/// 받을 주소는 화면에서 받지 않고 여기서 다시 확인한다. 진행은 `update-progress`로 화면에 알린다.
 #[tauri::command]
-pub async fn update_install() -> Result<String, String> {
+pub async fn update_install(app: AppHandle) -> Result<String, String> {
+    // 내려받기는 오래 걸릴 수 있다(느린 회선이면 몇 분). 다른 명령의 답이 밀리지 않게 따로 떼어 돌린다.
+    tauri::async_runtime::spawn_blocking(move || {
+        install_latest(&|stage, done, total| {
+            let _ = app.emit_to("main", "update-progress", Progress { stage, done, total });
+        })
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+fn install_latest(report: Report) -> Result<String, String> {
+    report("check", 0, 0);
     let release = latest()?;
     if !is_newer(&release.version, VERSION) {
         return Err(format!("이미 최신 버전입니다({VERSION})."));
@@ -361,7 +403,7 @@ pub async fn update_install() -> Result<String, String> {
     if INSTALLING.swap(true, Ordering::SeqCst) {
         return Err("이미 내려받아 설치하고 있습니다. 잠시 뒤에 다시 확인하세요.".into());
     }
-    let outcome = install(asset, &target, &work);
+    let outcome = install(asset, &target, &work, report);
     INSTALLING.store(false, Ordering::SeqCst);
     outcome?;
     *INSTALLED.lock().unwrap() = Some(release.version.clone());
@@ -369,17 +411,95 @@ pub async fn update_install() -> Result<String, String> {
     Ok(release.version)
 }
 
-/// 새 버전으로 다시 시작한다: 새 실행 파일을 띄우고 이 창을 닫는다. 화면은 쓰던 것을 저장한 뒤에 부른다.
+/// 다시 시작으로 띄운 프로세스에 넘기는 표시(환경 변수). 받은 쪽은 화면이 준비될 때까지 창을 숨겨 둔다.
+const RESTART_MARK: &str = "CYPHER_RESTARTED";
+/// 새 프로세스의 창이 뜨기를 기다리는 시간. 넘으면 이 창을 그냥 닫는다(새 프로세스는 돌고 있다).
+const NEW_WINDOW_WAIT: Duration = Duration::from_secs(60);
+/// 다시 시작으로 뜬 창을 화면이 준비되지 않아도 보여 주는 시간(화면이 뜨지 못해도 창은 보여야 한다).
+const HIDDEN_START_LIMIT: Duration = Duration::from_secs(8);
+
+/// 다시 시작으로 떠서 본창을 숨겨 둔 채인지.
+static HIDDEN_START: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// 이 프로세스가 "다시 시작"으로 띄워졌는지. 시작할 때 한 번 부른다(표시는 지워서 세션이 물려받지 않게 한다).
+/// 그렇게 떴으면 본창을 숨긴 채 만들고 화면이 준비됐을 때 보여 준다: 창이 먼저 뜨면 화면이 그려질 때까지 하얗게 보인다.
+pub fn take_restart_mark() -> bool {
+    let marked = std::env::var_os(RESTART_MARK).is_some();
+    std::env::remove_var(RESTART_MARK);
+    HIDDEN_START.store(marked, std::sync::atomic::Ordering::SeqCst);
+    marked
+}
+
+/// 숨겨 둔 본창을 보여 준다(한 번만).
+fn reveal(app: &AppHandle) {
+    if HIDDEN_START.swap(false, std::sync::atomic::Ordering::SeqCst) {
+        if let Some(window) = app.get_window("main") {
+            let _ = window.show();
+            let _ = window.set_focus();
+        }
+    }
+}
+
+/// 숨긴 채 띄웠으면, 화면이 준비됐다고 알려 오지 않아도 얼마 뒤에는 창을 보여 준다. 시작할 때 부른다.
+pub fn reveal_later(app: &AppHandle) {
+    if HIDDEN_START.load(std::sync::atomic::Ordering::SeqCst) {
+        let app = app.clone();
+        std::thread::spawn(move || {
+            std::thread::sleep(HIDDEN_START_LIMIT);
+            reveal(&app);
+        });
+    }
+}
+
+/// 화면이 그려질 준비가 됐다: 다시 시작으로 떠서 숨겨 둔 본창을 보여 준다(평소에는 할 일이 없다).
 #[tauri::command]
-pub fn update_restart(app: AppHandle) -> Result<(), String> {
-    let exe = install_dir()?.join("cypher.exe");
-    let mut launch = Command::new(&exe);
+pub fn app_ready(app: AppHandle) {
+    reveal(&app);
+}
+
+/// 새 실행 파일을 띄우고 그 창이 보일 때까지 기다린다.
+///
+/// 새 실행 파일을 처음 띄울 때 Windows(백신)가 그 파일을 검사하느라 띄우는 일 자체가 수십 초 걸릴 수 있다.
+/// 창 스레드에서 하면 그동안 창이 답하지 않고 하얗게 된다. 그래서 따로 떼어 돌리고, 이 창은 안내를 띄운 채 기다린다.
+/// `spawned`는 새 프로세스가 만들어진 직후(그 창이 뜨기 전)에 한 번 부른다.
+fn launch_new(exe: &Path, folder: Option<PathBuf>, spawned: impl FnOnce()) -> Result<(), String> {
+    let mut launch = Command::new(exe);
+    launch.env(RESTART_MARK, "1");
     // 본창의 저장소를 환경 변수로 돌려 띄운 경우, 그 변수는 본창을 만든 뒤 이 프로세스에서 지워 두었다.
     // 새 프로세스에는 다시 넘겨야 같은 저장소(로그인·저장된 배치)로 뜬다.
-    if let Some(folder) = crate::site::data_folder_override() {
+    if let Some(folder) = folder {
         launch.env("WEBVIEW2_USER_DATA_FOLDER", folder);
     }
-    launch.spawn().map_err(|e| format!("새 버전을 띄우지 못했습니다({}): {e}", exe.display()))?;
+    let mut child = launch.spawn().map_err(|e| format!("새 버전을 띄우지 못했습니다({}): {e}", exe.display()))?;
+    spawned();
+    let started = std::time::Instant::now();
+    while started.elapsed() < NEW_WINDOW_WAIT {
+        if crate::magnet::has_visible_window(child.id()) {
+            return Ok(());
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            return Err(format!("새 버전이 뜨지 못하고 끝났습니다({status}). 이 창은 계속 쓸 수 있습니다."));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(())
+}
+
+/// 새 버전으로 다시 시작한다: 새 실행 파일을 띄우고, 그 창이 뜨면 이 창을 닫는다. 화면은 쓰던 것을 저장한 뒤에 부른다.
+/// 새 버전이 뜨지 못하면 오류를 돌려주고 이 창은 그대로 둔다.
+#[tauri::command]
+pub async fn update_restart(app: AppHandle) -> Result<(), String> {
+    use tauri_plugin_window_state::{AppHandleExt, StateFlags};
+    let exe = install_dir()?.join("cypher.exe");
+    let folder = crate::site::data_folder_override();
+    // 새 창은 뜨자마자 저장된 창 위치·크기를 읽는다. 이 창은 그 뒤에야 닫히므로(위치는 닫힐 때 저장된다),
+    // 지금 것을 먼저 적어 둔다. 그러지 않으면 새 창이 이번 실행을 시작할 때의 자리·크기로 뜬다.
+    let _ = app.save_window_state(StateFlags::all());
+    // 새 실행 파일을 띄우는 데 오래 걸리면(검사) 그사이에 화면이 바뀔 수 있다(세션이 만든 파일이 항목으로 놓이는 등).
+    // 새 프로세스가 만들어진 직후에 화면에 알려, 새 화면이 읽기 전에 배치를 한 번 더 적게 한다.
+    let notify = app.clone();
+    let launch = move || launch_new(&exe, folder, || drop(notify.emit_to("main", "restart-spawned", ())));
+    tauri::async_runtime::spawn_blocking(launch).await.map_err(|e| e.to_string())??;
     if let Some(window) = app.get_window("main") {
         let _ = window.destroy();
     }
@@ -568,7 +688,14 @@ mod tests {
         std::fs::create_dir_all(&app).unwrap();
         // 옛 본체 자리에는 진짜 실행 파일(이 시험 프로그램의 사본)을 둔다. 내용이 실행 파일이 아닌 `.exe`는 만들지 않는다.
         std::fs::copy(std::env::current_exe().unwrap(), app.join("cypher.exe")).unwrap();
-        let placed = install(&asset, &app, &root.join("work")).unwrap();
+        // 내려받는 동안 받은 양을 알려 오고, 마지막에는 전체 크기와 같아야 한다.
+        let seen = std::cell::RefCell::new(Vec::new());
+        let report = |stage: &'static str, done: u64, total: u64| seen.borrow_mut().push((stage, done, total));
+        let placed = install(&asset, &app, &root.join("work"), &report).unwrap();
+        let seen = seen.into_inner();
+        assert_eq!(seen.first(), Some(&("download", 0, asset.size)));
+        assert!(seen.contains(&("download", asset.size, asset.size)), "{:?}", seen.last());
+        assert_eq!(seen[seen.len() - 2..].iter().map(|step| step.0).collect::<Vec<_>>(), ["unpack", "replace"]);
         assert!(placed.iter().any(|name| name == "cypher.exe") && placed.iter().any(|name| name == "cypher-bridge.exe"), "{placed:?}");
         assert!(std::fs::metadata(app.join("cypher.exe")).unwrap().len() > 1_000_000);
         assert!(std::fs::read_dir(&app).unwrap().flatten().any(|entry| entry.file_name().to_string_lossy().starts_with("cypher.exe.old-")));
@@ -576,7 +703,7 @@ mod tests {
         let wrong = Asset { sha256: Some("0".repeat(64)), ..asset };
         let other = root.join("app2");
         std::fs::create_dir_all(&other).unwrap();
-        assert!(install(&wrong, &other, &root.join("work2")).unwrap_err().contains("확인값"));
+        assert!(install(&wrong, &other, &root.join("work2"), &|_, _, _| {}).unwrap_err().contains("확인값"));
         assert!(std::fs::read_dir(&other).unwrap().next().is_none());
         done(&root);
     }

@@ -1,7 +1,7 @@
 // Cypher 화면: 세션 목록, 나란히 보는 터미널 창, 링크·붙여넣기·알림.
 // 빌드 단계 없이 그대로 실행 파일에 들어간다.
 import {
-  initExtras, showSnippets, showHelp, showEngine, showUpdate, showMemory, showMenu, toggleDiff, showDiff, diffRefreshFor, openPopup,
+  initExtras, showSnippets, showHelp, showEngine, showUpdate, showAbout, showMemory, showMenu, toggleDiff, showDiff, diffRefreshFor, openPopup,
 } from './extras.js';
 import { initHttp, createHttp } from './http.js';
 import { initMemo, createMemo } from './memo.js';
@@ -147,6 +147,8 @@ async function init() {
   storeDirs = await invoke('store_dirs').catch(() => ({}));
   // 테마·글꼴·글자 크기를 적용한다. 바뀔 때마다 열려 있는 터미널과 항목 화면을 맞춘다.
   initLook({ invoke, make, openPopup, config, onChange: applyLook });
+  // 화면이 그려질 준비가 됐다. 업데이트 뒤 "다시 시작"으로 뜬 창은 여기까지 숨겨져 있다(하얀 창이 먼저 보이지 않게).
+  invoke('app_ready').catch(() => {});
 
   // 사이드바 맨 위에는 "+ 워크스페이스"만 둔다. 세션과 항목은 워크스페이스 밖(루트)에 만들 수 없고, 워크스페이스 머리의 +로 그 워크스페이스 안에 만든다.
   // (맨 위에 "+ Claude" 같은 단추가 있으면 어느 워크스페이스에 생길지 눈에 보이지 않아 엉뚱한 워크스페이스에 세션이 생긴다.)
@@ -156,7 +158,7 @@ async function init() {
   $('new-buttons').append(groupButton);
 
   initExtras({
-    invoke, make, ask, setStatus, newSession, label, runsClaude, restartApp,
+    invoke, listen, make, ask, setStatus, newSession, label, runsClaude, restartApp,
     getActive: () => active,
     getFolder: () => folder,
     focusActive: () => focusItem(active),
@@ -291,6 +293,14 @@ async function init() {
   });
   // 창을 닫으려 하면 앱이 바로 닫지 않고 알려 준다(창이 닫힐 때는 위의 beforeunload가 불리지 않는다).
   // 자동 저장을 기다리던 글(메모·요청 파일·마인드맵)과 배치를 저장한 뒤에 닫게 한다.
+  // 다시 시작: 새 프로세스가 막 만들어졌다. 새 실행 파일을 띄우는 데 오래 걸렸으면(Windows의 검사) 그사이 화면이 바뀌었을 수
+  // 있으므로, 새 화면이 배치를 읽기 전에 한 번 더 적는다. 그 뒤로는 적지 않는다(새 창이 적는 것을 덮지 않게).
+  listen('restart-spawned', () => {
+    if (!closing) return;
+    closing = false;
+    writeState();
+    closing = true;
+  });
   listen('app-closing', async () => {
     await saveBeforeClose();
     invoke('app_close');
@@ -319,13 +329,24 @@ async function saveBeforeClose() {
   closing = true;
 }
 
-/** 업데이트를 설치한 뒤 새 버전으로 다시 시작한다(쓰던 것을 저장하고, 새 실행 파일을 띄우고, 이 창을 닫는다). */
+/**
+ * 업데이트를 설치한 뒤 새 버전으로 다시 시작한다(쓰던 것을 저장하고, 새 실행 파일을 띄우고, 새 창이 뜨면 이 창을 닫는다).
+ * 새 실행 파일을 처음 띄울 때는 Windows가 그 파일을 검사하느라 오래 걸릴 수 있다. 그동안 기다려 달라는 안내로 창을 덮어 둔다.
+ */
 async function restartApp() {
+  const wait = $('restarting');
+  let waiting = true;
+  wait.oncancel = (ev) => ev.preventDefault(); // Esc로 닫히지 않게 한다.
+  // Esc를 거듭 누르면 막지 못하고 닫히는 수가 있다. 기다리는 동안에는 다시 띄운다(이미 저장을 멈춘 창을 쓰게 두지 않는다).
+  wait.onclose = () => { if (waiting) wait.showModal(); };
+  if (!wait.open) wait.showModal();
   await saveBeforeClose();
   try {
     await invoke('update_restart');
   } catch (err) {
     closing = false; // 새 버전을 띄우지 못했다: 이 창은 계속 쓴다.
+    waiting = false;
+    wait.close();
     throw err;
   }
 }
@@ -353,6 +374,7 @@ function runMenu(id) {
     help: showHelp,
     engine: showEngine,
     update: showUpdate,
+    about: showAbout,
   };
   actions[id]?.();
 }
@@ -2397,6 +2419,7 @@ function paletteEntries() {
     command('Claude 공통 지침 열기 (CLAUDE.md)', () => runMenu('claude-memory'), '설정'),
     command('단축키 보기', showHelp, '도움말 · F1'),
     command('Cypher 업데이트…', showUpdate, '도움말 · 단추를 눌렀을 때만 확인'),
+    command('Cypher 정보', showAbout, '도움말 · 버전·GitHub 주소'),
     ...(viewedGroup() ? [command(`워크스페이스 "${viewedGroup()}"의 폴더 정하기…`, () => pickGroupFolder(viewedGroup()), `폴더 · 지금: ${groupFolderOf(viewedGroup()) || '정하지 않음'}`)] : []),
   ];
   return [...items, ...commands];

@@ -218,8 +218,74 @@ fn merge_repeated(headers: Vec<(String, String)>) -> Vec<(String, String)> {
     merged
 }
 
+/// 본문에 넣어 보낼 파일들의 크기 한도(합계).
+const MAX_UPLOAD_BYTES: usize = 100 << 20;
+
+/// 본문의 한 줄이 "이 파일의 내용을 보내라"는 줄(`< 경로`, IntelliJ .http 형식)이면 그 경로.
+fn file_line(line: &str) -> Option<&str> {
+    let path = line.strip_prefix("< ")?.trim();
+    let path = path.strip_prefix('"').and_then(|rest| rest.strip_suffix('"')).unwrap_or(path);
+    (!path.is_empty()).then_some(path)
+}
+
+/// `< 경로`에 적힌 파일의 자리. 요청 파일이 있는 폴더(`base`) 기준으로 찾고, 거기 없으면 항목의 폴더에서 찾는다:
+/// 요청 파일은 흔히 `<폴더>\.cypher\http`나 `<폴더>\http`에 있고, 보낼 파일은 그 `<폴더>`(프로젝트 폴더)에 있다.
+fn upload_path(base: &Path, given: &str) -> PathBuf {
+    let direct = base.join(given); // 전체 경로면 그 경로 그대로가 된다.
+    if direct.exists() || Path::new(given).is_absolute() {
+        return direct;
+    }
+    let named = |dir: &Path, name: &str| dir.file_name().is_some_and(|found| found.eq_ignore_ascii_case(name));
+    let project = Some(base).filter(|dir| named(dir, "http")).and_then(Path::parent).map(|outer| {
+        if named(outer, ".cypher") { outer.parent().unwrap_or(outer) } else { outer }
+    });
+    project.map(|dir| dir.join(given)).filter(|path| path.exists()).unwrap_or(direct)
+}
+
+/// 실제로 보낼 본문을 바이트로 만든다. 글 그대로 보내면 되는 본문(대부분)은 None.
+///
+/// - `< 경로` 줄은 그 파일의 내용으로 바꾼다(경로는 요청 파일이 있는 폴더나 항목의 폴더 기준, 전체 경로도 된다).
+/// - `multipart/…` 본문은 줄 끝을 CRLF로 보낸다(규격이 그렇고, LF만 보내면 받지 않는 서버가 있다).
+///
+/// 화면의 요청 원문과 기록에는 파일 내용이 아니라 `< 경로` 줄이 그대로 남는다.
+fn payload(request: &HttpRequest, headers: &[(String, String)], base: &Path) -> Result<Option<Vec<u8>>, String> {
+    let multipart = headers.iter().any(|(key, value)| {
+        key.eq_ignore_ascii_case("Content-Type") && value.trim_start().to_ascii_lowercase().starts_with("multipart/")
+    });
+    let has_file = request.body.split('\n').any(|line| file_line(line).is_some());
+    if request.body.is_empty() || !(multipart || has_file) {
+        return Ok(None);
+    }
+    let newline: &[u8] = if multipart { b"\r\n" } else { b"\n" };
+    let mut bytes = Vec::with_capacity(request.body.len());
+    let mut uploaded = 0usize;
+    for (index, line) in request.body.split('\n').enumerate() {
+        if index > 0 {
+            bytes.extend_from_slice(newline);
+        }
+        let line = line.trim_end_matches('\r');
+        match file_line(line) {
+            Some(given) => {
+                let path = upload_path(base, given);
+                let content = fs::read(&path).map_err(|e| format!("보낼 파일을 읽지 못했습니다({}): {e}", path.display()))?;
+                uploaded += content.len();
+                if uploaded > MAX_UPLOAD_BYTES {
+                    return Err(format!("보낼 파일이 너무 큽니다(합쳐서 {}MB까지): {}", MAX_UPLOAD_BYTES >> 20, path.display()));
+                }
+                bytes.extend_from_slice(&content);
+            }
+            None => bytes.extend_from_slice(line.as_bytes()),
+        }
+    }
+    if multipart {
+        bytes.extend_from_slice(newline); // 마지막 경계 줄도 줄 끝으로 닫는다.
+    }
+    Ok(Some(bytes))
+}
+
 /// 보낸 요청을 HTTP 원문 모양으로 적는다. Host·Accept-Encoding·Content-Length는 전송 계층이 붙이는 값이다.
-fn raw_request(request: &HttpRequest, headers: &[(String, String)]) -> String {
+/// `length`는 실제로 나가는 본문의 바이트 수(파일을 넣어 보내면 적힌 글의 길이와 다르다).
+fn raw_request(request: &HttpRequest, headers: &[(String, String)], length: usize) -> String {
     let (target, host) = match tauri::Url::parse(&request.url) {
         Ok(url) => {
             let mut target = url.path().to_string();
@@ -241,7 +307,7 @@ fn raw_request(request: &HttpRequest, headers: &[(String, String)]) -> String {
         lines.push("Accept-Encoding: gzip".into());
     }
     if (!request.body.is_empty() || sends_length(&request.method)) && !has_header(headers, "Content-Length") {
-        lines.push(format!("Content-Length: {}", request.body.len()));
+        lines.push(format!("Content-Length: {length}"));
     }
     lines.push(String::new());
     lines.push(request.body.clone());
@@ -288,14 +354,17 @@ fn sends_length(method: &str) -> bool {
 }
 
 /// 요청을 보내고 응답을 받는다. 4xx·5xx도 오류가 아니라 응답으로 돌려준다.
-fn send(request: &HttpRequest, headers: &[(String, String)]) -> Result<Sent, String> {
+/// `payload`는 `payload()`가 만든 본문(파일을 넣었거나 multipart일 때). 없으면 적힌 글을 그대로 보낸다.
+fn send(request: &HttpRequest, headers: &[(String, String)], payload: Option<&[u8]>) -> Result<Sent, String> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(60)).redirects(5).build();
     let mut call = agent.request(&request.method, &request.url);
     for (key, value) in headers {
         call = call.set(key, value);
     }
     let started = Instant::now();
-    let result = if !request.body.is_empty() {
+    let result = if let Some(bytes) = payload {
+        call.send_bytes(bytes)
+    } else if !request.body.is_empty() {
         call.send_string(&request.body)
     } else if sends_length(&request.method) {
         call.send_bytes(&[]) // 길이를 아는 빈 본문: `Content-Length: 0`이 나간다.
@@ -483,8 +552,9 @@ fn execute(file: &Path, request: &HttpRequest) -> Result<HttpResponse, String> {
         return Err(format!("요청을 보내지 않았습니다. 값을 채우지 못한 곳이 있습니다:\n{}", request.problems.join("\n")));
     }
     let sent_headers = wire_headers(request);
-    let raw = raw_request(request, &sent_headers);
-    let Sent { code, status, headers, body, elapsed_ms, final_url, truncated } = send(request, &sent_headers)?;
+    let payload = payload(request, &sent_headers, file.parent().unwrap_or(Path::new(".")))?;
+    let raw = raw_request(request, &sent_headers, payload.as_ref().map_or(request.body.len(), Vec::len));
+    let Sent { code, status, headers, body, elapsed_ms, final_url, truncated } = send(request, &sent_headers, payload.as_deref())?;
     let body = pretty(&body);
 
     let history = file.with_file_name(HISTORY);
@@ -980,8 +1050,56 @@ mod tests {
         let (port, server) = echo_server();
         let request = http::parse(&format!("POST http://127.0.0.1:{port}/logout\n")).remove(0);
         let headers = wire_headers(&request);
-        assert!(raw_request(&request, &headers).contains("Content-Length: 0"));
-        send(&request, &headers).unwrap();
+        assert!(raw_request(&request, &headers, 0).contains("Content-Length: 0"));
+        send(&request, &headers, None).unwrap();
         assert!(server.join().unwrap().to_ascii_lowercase().contains("content-length: 0"));
+    }
+
+    #[test]
+    fn 본문의_파일_줄은_그_파일의_내용으로_보낸다() {
+        let dir = test_dir("cypher-http-upload-test");
+        fs::write(dir.join("첨부 글.txt"), "첫 줄\n둘째 줄").unwrap();
+        let file = dir.join("requests.http");
+
+        // multipart: 줄 끝은 CRLF로 나가고, `< 경로` 줄은 파일 내용으로 바뀐다(파일 안의 줄 끝은 그대로).
+        let (port, server) = echo_server();
+        let text = format!(
+            "### 올리기\nPOST http://127.0.0.1:{port}/upload\nContent-Type: multipart/form-data; boundary=b1\n\n--b1\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\n\n< ./첨부 글.txt\n--b1--\n"
+        );
+        fs::write(&file, &text).unwrap();
+        let response = run_at(&file, 1).unwrap();
+        let expected = "--b1\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.txt\"\r\n\r\n첫 줄\n둘째 줄\r\n--b1--\r\n";
+        let received = server.join().unwrap();
+        assert!(received.ends_with(&format!("\n{expected}")), "{received:?}");
+        assert!(received.to_ascii_lowercase().contains(&format!("content-length: {}", expected.len())), "{received:?}");
+        // 화면의 요청 원문에는 파일 내용이 아니라 적은 줄이 남고, 길이는 실제로 나간 바이트 수다.
+        assert!(response.request.contains("< ./첨부 글.txt") && !response.request.contains("둘째 줄"), "{}", response.request);
+        assert!(response.request.contains(&format!("Content-Length: {}", expected.len())), "{}", response.request);
+
+        // 파일 하나를 통째로 본문으로: 줄 끝을 바꾸지 않는다. 전체 경로와 따옴표도 받는다.
+        let (port, server) = echo_server();
+        fs::write(&file, format!("POST http://127.0.0.1:{port}/raw\nContent-Type: text/plain\n\n< \"{}\"\n", dir.join("첨부 글.txt").display())).unwrap();
+        run_at(&file, 0).unwrap();
+        assert!(server.join().unwrap().ends_with("\n첫 줄\n둘째 줄"));
+
+        // 요청 파일이 `<폴더>\.cypher\http`에 있으면 `<폴더>`의 파일도 찾는다(요청 파일 옆의 것이 먼저다).
+        let inner = dir.join(".cypher").join("http");
+        fs::create_dir_all(&inner).unwrap();
+        assert_eq!(upload_path(&inner, "./첨부 글.txt"), dir.join("./첨부 글.txt"));
+        assert_eq!(upload_path(&dir.join("http"), "첨부 글.txt"), dir.join("첨부 글.txt"));
+        assert_eq!(upload_path(&inner, "없는 것.txt"), inner.join("없는 것.txt"));
+        fs::write(inner.join("첨부 글.txt"), "옆의 것").unwrap();
+        assert_eq!(upload_path(&inner, "첨부 글.txt"), inner.join("첨부 글.txt"));
+
+        // 없는 파일이면 보내지 않고 알린다.
+        fs::write(&file, "POST http://127.0.0.1:9/raw\n\n< ./없는 파일.bin\n").unwrap();
+        assert!(run_at(&file, 0).err().unwrap_or_default().contains("보낼 파일을 읽지 못했습니다"));
+
+        // 파일 줄이 없고 multipart도 아닌 본문은 적힌 글 그대로 보낸다(따로 만든 본문이 없다).
+        let plain = http::parse("POST http://127.0.0.1:9/x\nContent-Type: application/json\n\n{\"a\": \"< b\"}\n").remove(0);
+        assert_eq!(payload(&plain, &wire_headers(&plain), &dir).unwrap(), None);
+        assert_eq!(file_line("< ./a b.txt "), Some("./a b.txt"));
+        assert_eq!((file_line("<./a.txt"), file_line("< "), file_line("<> 응답")), (None, None, None));
+        let _ = fs::remove_dir_all(&dir);
     }
 }

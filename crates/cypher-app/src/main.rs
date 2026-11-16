@@ -243,6 +243,8 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         .item(&item("help", "단축키\tF1")?)
         .item(&item("engine", "브라우저 엔진 정보·업데이트 확인")?)
         .item(&item("update", "Cypher 업데이트…")?)
+        .separator()
+        .item(&item("about", "Cypher 정보 (버전·GitHub 주소)")?)
         .build()?;
     MenuBuilder::new(app).items(&[&tools, &settings, &help]).build()
 }
@@ -261,9 +263,21 @@ fn app_close(app: tauri::AppHandle) {
 }
 
 fn main() {
+    use tauri_plugin_window_state::StateFlags;
+    // "다시 시작"(업데이트 뒤)으로 떴으면 본창을 숨긴 채 만들고, 화면이 준비됐다고 알려 올 때 보여 준다.
+    // 창이 먼저 뜨면 화면이 그려질 때까지 하얀 창이 보인다. 앞선 창은 이 창이 보일 때까지 안내를 띄운 채 기다린다.
+    let hidden = update::take_restart_mark();
+    let mut context = tauri::generate_context!();
+    if hidden {
+        for window in context.config_mut().app.windows.iter_mut().filter(|window| window.label == "main") {
+            window.visible = false;
+        }
+    }
+    // 창 위치를 되살리는 쪽이 창을 바로 보여 주지 않게, 숨긴 채 띄울 때는 "보이는지"를 다루지 않게 한다.
+    let state_flags = if hidden { StateFlags::all() - StateFlags::VISIBLE } else { StateFlags::all() };
     tauri::Builder::default()
         .plugin(tauri_plugin_notification::init())
-        .plugin(tauri_plugin_window_state::Builder::default().build())
+        .plugin(tauri_plugin_window_state::Builder::default().with_state_flags(state_flags).build())
         // 본창을 닫으면 앱을 끝낸다.
         .on_window_event(|window, event| {
             if window.label() != "main" {
@@ -291,7 +305,7 @@ fn main() {
                 _ => {}
             }
         })
-        .setup(|app| {
+        .setup(move |app| {
             let token = random_token();
             let status_port = status::start(app.handle().clone(), token.clone())?;
             clipboard::clean_old_pastes();
@@ -308,6 +322,13 @@ fn main() {
             if let Some(main) = app.get_webview_window("main") {
                 let _ = main.set_title(concat!("Cypher ", env!("CARGO_PKG_VERSION")));
                 main.set_menu(build_menu(app.handle())?)?;
+                // 메뉴 줄을 붙이면 창 안쪽이 그 높이만큼 줄어든다. 창 크기는 메뉴가 없을 때 되살려졌으므로 메뉴를 붙인 뒤에
+                // 크기만 한 번 더 되살린다. 그러지 않으면 닫을 때 줄어든 안쪽 크기가 저장되어, 켤 때마다 창이 메뉴 높이만큼 작아진다.
+                // 최대화된 창은 건드리지 않는다(크기를 맞추면 최대화가 한 번 풀렸다 다시 걸려 창이 깜빡인다).
+                use tauri_plugin_window_state::WindowExt;
+                if !main.is_maximized().unwrap_or(false) {
+                    let _ = main.restore_state(StateFlags::SIZE);
+                }
             }
             // 메뉴에서 고른 항목은 본창 화면이 실행한다.
             app.on_menu_event(|app, event| {
@@ -332,6 +353,7 @@ fn main() {
             });
             // 워크스페이스별 브라우저 프로필이 한 폴더로 합쳐지지 않게 한다(본창의 웹뷰가 만들어진 뒤여야 한다).
             site::adopt_data_folder_override(app.handle());
+            update::reveal_later(app.handle());
             monitor::start(app.handle().clone());
             drops::watch(app.handle());
             Ok(())
@@ -427,8 +449,9 @@ fn main() {
             update::update_check,
             update::update_install,
             update::update_restart,
+            update::app_ready,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .expect("Cypher를 실행하지 못했습니다");
 }
 

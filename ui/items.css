@@ -753,6 +753,11 @@ li.tone-fail .dot.kind, li.tone-fail .sub { color: var(--dead); }
 .todo-head.level-3 { font-size: 12px; border-bottom: none; }
 .todo-note { padding: 2px 6px; font-size: 12px; line-height: 1.5; color: var(--dim); overflow-wrap: anywhere; user-select: text; }
 .todo-add { flex: none; margin: 0 10px 10px; height: 28px; padding: 0 8px; font: 13px var(--ui-font); }
+/* 할 일이 하나도 없는 동안: 맨 아래 입력 칸을 눈에 띄게 하고, 바로 위에 어디에 적는지 알려 주는 줄을 둔다. */
+.todo-add.first { height: 34px; border-color: var(--accent); box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 30%, transparent); }
+.todo-add-hint { flex: none; margin: 0 10px 6px; font-size: 12px; font-weight: bold; color: var(--accent); }
+.todo-add-hint[hidden] { display: none; }
+.todo-write { color: var(--accent); border-color: var(--accent); }
 .todo-code {
   flex: 1;
   min-height: 0;

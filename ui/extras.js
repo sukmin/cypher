@@ -23,6 +23,11 @@ export function initExtras(given) {
     hideMenu();
   }, true);
   window.addEventListener('blur', hideMenu);
+  // 업데이트 설치의 진행(내려받은 양, 단계). 업데이트 창이 열려 있으면 그 창이 그린다.
+  api.listen?.('update-progress', ({ payload }) => {
+    lastProgress = payload;
+    progressSink?.(payload);
+  });
 }
 
 // ───────────────────────── 떠 있는 창 ─────────────────────────
@@ -221,13 +226,72 @@ export async function showEngine() {
   };
 }
 
-export function showHelp() {
+/** Cypher의 저장소(소스·릴리즈·문의). */
+const REPO = 'https://github.com/sukmin/cypher';
+
+/** 웹 주소를 기본 브라우저로 연다. */
+const openWeb = (url) => api.invoke('link_open', { target: url, cwd: '', openFile: false, line: null, col: null }).catch((err) => api.setStatus(String(err)));
+
+/** 지금 버전과 GitHub 주소를 보여 주는 줄들(단축키 창의 맨 위와 정보 창에 쓴다). 주소는 누르면 기본 브라우저로 연다. */
+async function aboutRows() {
+  const { invoke, make } = api;
+  const row = (key, value) => {
+    const line = make('div', 'row help');
+    line.append(make('kbd', '', key), value);
+    return line;
+  };
+  const link = (url) => {
+    const button = make('button', 'web-link', url);
+    button.title = '기본 브라우저로 열기';
+    button.onclick = () => openWeb(url);
+    return button;
+  };
+  const version = await invoke('update_current').catch(() => '');
+  return [
+    row('버전', make('span', '', version ? `Cypher ${version}` : '알 수 없음')),
+    row('GitHub', link(REPO)),
+  ];
+}
+
+/** 라이선스 줄(정보 창). 글은 저장소의 LICENSE 파일에 있다. */
+function licenseRow() {
   const { make } = api;
-  openPopup('단축키', HELP.map(([key, what]) => {
-    const row = make('div', 'row help');
-    row.append(make('kbd', '', key), make('span', '', what));
-    return row;
-  }));
+  const line = make('div', 'row help');
+  const link = make('button', 'web-link', 'MIT 라이선스');
+  link.title = '라이선스 글을 기본 브라우저로 열기';
+  link.onclick = () => openWeb(`${REPO}/blob/master/LICENSE`);
+  line.append(make('kbd', '', '라이선스'), link);
+  return line;
+}
+
+export async function showHelp() {
+  const { make } = api;
+  openPopup('단축키', [
+    ...await aboutRows(),
+    make('hr', 'popup-rule'),
+    ...HELP.map(([key, what]) => {
+      const row = make('div', 'row help');
+      row.append(make('kbd', '', key), make('span', '', what));
+      return row;
+    }),
+  ]);
+}
+
+/** Cypher 정보: 지금 버전, GitHub 주소, 릴리즈 페이지. 인터넷에 나가지 않는다(주소를 눌렀을 때 기본 브라우저가 연다). */
+export async function showAbout() {
+  const { make } = api;
+  const releases = make('button', 'row add', '릴리즈 페이지 열기 (기본 브라우저)');
+  releases.onclick = () => openWeb(`${REPO}/releases`);
+  const update = make('button', 'row add', 'Cypher 업데이트…');
+  update.onclick = () => showUpdate();
+  openPopup('Cypher 정보', [
+    ...await aboutRows(),
+    licenseRow(),
+    releases, update,
+    make('p', 'note', 'Cypher는 MIT 라이선스로 공개되어 있어 누구나 쓰고, 고치고, 다시 배포할 수 있습니다. '
+      + '소스 코드와 릴리즈(내려받기·바뀐 내용)는 위 GitHub 주소에 있습니다. 주소를 누르면 기본 브라우저로 엽니다. '
+      + '이 창은 인터넷에 나가지 않습니다. 새 버전이 있는지는 "Cypher 업데이트…"에서 단추를 눌러 확인합니다.'),
+  ]);
 }
 
 /**
@@ -236,6 +300,12 @@ export function showHelp() {
  */
 /** 이번 실행에서 설치를 마친 버전(다시 시작해야 그 버전으로 뜬다). 업데이트 창을 닫았다 다시 열어도 기억한다. */
 let installedVersion = '';
+/** 설치가 돌고 있으면 그 약속(설치한 버전으로 끝난다). 업데이트 창을 닫아도 설치는 계속되므로 창 밖에 둔다. */
+let installing = null;
+/** 설치가 마지막으로 알려 온 진행. 창을 다시 열었을 때 이어서 보여 준다. */
+let lastProgress = null;
+/** 진행을 그리는 함수(열려 있는 업데이트 창의 것). */
+let progressSink = null;
 
 export async function showUpdate() {
   const { invoke, make, setStatus } = api;
@@ -250,6 +320,13 @@ export async function showUpdate() {
   const verdict = make('p', 'note', '');
   const notes = make('pre', 'note update-notes', '');
   notes.hidden = true;
+  // 설치하는 동안: 진행 막대와 기다려 달라는 안내.
+  const bar = make('progress', 'update-bar');
+  bar.hidden = true;
+  const wait = make('p', 'note update-wait',
+    '설치가 끝날 때까지 Cypher를 끄지 말고 기다려 주세요. 회선에 따라 몇 초에서 몇 분 걸립니다. '
+    + '그동안 세션은 그대로 쓸 수 있고, 이 창을 닫아도 설치는 계속됩니다.');
+  wait.hidden = true;
   const check = make('button', 'row add', '업데이트 확인 (인터넷에서 GitHub의 최신 릴리즈를 읽어 옵니다)');
   const install = make('button', 'row add', '');
   install.hidden = true;
@@ -259,7 +336,7 @@ export async function showUpdate() {
   restart.hidden = true;
   openPopup('Cypher 업데이트', [
     row('지금 버전', current || '알 수 없음'),
-    latest, verdict, notes, check, install, restart, page,
+    latest, verdict, bar, wait, notes, check, install, restart, page,
     make('p', 'note', 'Cypher는 스스로 버전을 확인하러 나가지 않습니다. 위 단추를 눌렀을 때만 GitHub(api.github.com, github.com)에 접속하고, 보내는 정보는 없습니다. '
       + '내려받은 묶음은 GitHub가 알려 주는 확인값(SHA-256)과 견준 뒤에 설치합니다. 설정·메모·워크스페이스는 그대로 둡니다.'),
   ]);
@@ -291,23 +368,49 @@ export async function showUpdate() {
     }
     check.disabled = false;
   };
-  install.onclick = async () => {
+  // 설치의 진행을 막대와 글로 보여 준다. 내려받기는 받은 양을 알 수 있고, 나머지 단계는 움직이는 막대로만 보여 준다.
+  const showProgress = ({ stage, done, total }) => {
+    if (stage === 'download' && total > 0) {
+      bar.max = total;
+      bar.value = done;
+      verdict.textContent = `내려받는 중… ${megabytes(done)} / ${megabytes(total)} (${Math.floor((done * 100) / total)}%)`;
+    } else {
+      bar.removeAttribute('value');
+      verdict.textContent = stage === 'check' ? '최신 릴리즈를 확인하는 중…'
+        : stage === 'unpack' ? '내려받은 묶음을 확인하고 푸는 중…'
+        : '실행 파일을 바꾸는 중…';
+    }
+  };
+  progressSink = showProgress;
+  /** 돌고 있는 설치를 이 창에서 따라간다(창을 닫았다 다시 열었을 때도 쓴다). */
+  const follow = async (work) => {
     install.disabled = check.disabled = true;
+    bar.hidden = wait.hidden = false;
+    bar.removeAttribute('value');
     verdict.textContent = '내려받아 설치하는 중…';
+    if (lastProgress) showProgress(lastProgress);
     try {
-      const version = await invoke('update_install');
-      installedVersion = version;
+      const version = await work;
       verdict.textContent = `${version}을(를) 설치했습니다. Cypher를 다시 시작하면 새 버전으로 뜹니다.`;
       install.hidden = true;
-      install.disabled = false; // 더 새 버전이 나오면 다시 쓸 수 있게 풀어 둔다.
       restart.hidden = false;
-      setStatus(`Cypher ${version}을(를) 설치했습니다. 다시 시작하면 적용됩니다.`);
     } catch (err) {
       verdict.textContent = `설치하지 못했습니다: ${err}`;
-      install.disabled = false;
     }
+    bar.hidden = wait.hidden = true;
+    install.disabled = false; // 더 새 버전이 나오면(또는 실패한 뒤 다시 하려면) 쓸 수 있게 풀어 둔다.
     check.disabled = false;
   };
+  install.onclick = () => {
+    lastProgress = null;
+    installing = invoke('update_install').then((version) => {
+      installedVersion = version;
+      setStatus(`Cypher ${version}을(를) 설치했습니다. 다시 시작하면 적용됩니다.`);
+      return version;
+    }).finally(() => { installing = null; lastProgress = null; });
+    follow(installing);
+  };
+  if (installing) follow(installing);
   restart.onclick = async () => {
     restart.disabled = true;
     try { await api.restartApp(); } catch (err) { verdict.textContent = String(err); restart.disabled = false; }

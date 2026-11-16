@@ -116,6 +116,24 @@ unsafe fn peer_windows() -> Vec<Hwnd> {
         .collect()
 }
 
+/// 그 프로세스가 화면에 보이는 창(도움말 풍선 같은 작은 것은 빼고)을 띄웠는지.
+/// 업데이트 뒤 새 버전의 창이 떴는지 볼 때 쓴다.
+pub fn has_visible_window(pid: u32) -> bool {
+    unsafe {
+        let mut all: Vec<Hwnd> = Vec::new();
+        EnumWindows(collect, &mut all as *mut Vec<Hwnd> as isize);
+        all.into_iter().any(|hwnd| {
+            if IsWindowVisible(hwnd) == 0 {
+                return false;
+            }
+            let mut owner = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut owner);
+            let rect = window_rect(hwnd);
+            owner == pid && rect.right - rect.left >= MIN_PEER_SIZE && rect.bottom - rect.top >= MIN_PEER_SIZE
+        })
+    }
+}
+
 #[link(name = "comctl32")]
 extern "system" {
     fn SetWindowSubclass(hwnd: Hwnd, proc: SubclassProc, id: usize, data: usize) -> i32;

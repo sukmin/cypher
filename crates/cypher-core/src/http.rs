@@ -62,12 +62,15 @@ const MAX_RECORD_BODY: usize = 20_000;
 
 /// 처음 만들어 주는 요청 파일.
 pub const TEMPLATE: &str = r#"# HTTP 요청 파일 (IntelliJ .http 형식)
-# - 요청은 '###'으로 구분하고, 그 뒤 글자가 요청 이름입니다.
+# - 요청은 '###'으로 구분하고, 그 뒤 글자가 요청 이름입니다. 커서가 있는 요청을 ▶ 또는 Ctrl+Enter로 보냅니다.
 # - '@이름 = 값'으로 변수를 정하고 '{{이름}}'으로 씁니다.
 # - 실행하면 요청과 응답이 같은 폴더의 history.http에 기록됩니다.
 # - Claude 세션은 http_list / http_run 도구로 이 파일의 요청을 바로 실행할 수 있습니다.
-# - 서명(HMAC)이 필요한 API는 맨 아래 "서명(HMAC) 예시"처럼 내장 값을 씁니다.
-#   ({{$timestamp}}, {{$uuid}}, {{$method}}, {{$pathQuery}}, {{$body}}, {{$env 이름}}, {{$hash …}}, {{$hmac …}}. README의 "HTTP 요청 파일" 참고)
+# - 아래는 자주 쓰는 모양을 모은 예시입니다(조회, JSON·폼 전송, 고치기·지우기, 인증, 내장 값, 파일 올리기, 서명).
+#   모두 httpbin.org(받은 요청을 그대로 돌려주는 시험용 서버)로 보내므로 바로 눌러 볼 수 있습니다.
+#   필요 없는 예시는 지우고, 주소와 값을 바꿔 쓰세요.
+# - 내장 값: {{$timestamp}}, {{$uuid}}, {{$method}}, {{$pathQuery}}, {{$body}}, {{$env 이름}}, {{$base64 …}}, {{$hash …}}, {{$hmac …}}
+#   (README의 "HTTP 요청 파일" 참고)
 
 @host = https://httpbin.org
 
@@ -82,6 +85,65 @@ Content-Type: application/json
 {
   "message": "안녕하세요"
 }
+
+### 폼 전송 예시 (application/x-www-form-urlencoded)
+POST {{host}}/post
+Content-Type: application/x-www-form-urlencoded
+
+name=kim&city=seoul&memo=hello%20world
+
+### 고치기 예시 (PUT · 일부만 고칠 때는 PATCH)
+PUT {{host}}/put
+Content-Type: application/json
+
+{
+  "id": 1,
+  "name": "새 이름"
+}
+
+### 지우기 예시 (DELETE)
+DELETE {{host}}/delete?id=1
+
+### 인증 예시: Bearer 토큰
+# 실제 토큰은 파일에 적지 말고 환경 변수에서 읽으세요:  @token = {{$env MY_API_TOKEN}}
+@token = sample-token
+GET {{host}}/bearer
+Authorization: Bearer {{token}}
+
+### 인증 예시: Basic (아이디:비밀번호를 Base64로)
+GET {{host}}/basic-auth/kim/pass1234
+Authorization: Basic {{$base64 "kim:pass1234"}}
+
+### 내장 값 예시: 요청마다 달라지는 값
+# 같은 요청을 두 번 처리하지 않게 하는 키(멱등 키)나 요청 시각을 넣을 때 씁니다.
+POST {{host}}/post
+Content-Type: application/json
+Idempotency-Key: {{$uuid}}
+X-Request-Time: {{$isoTimestamp}}
+
+{
+  "orderId": "{{$uuid}}",
+  "createdAt": {{$timestamp}}
+}
+
+### 파일 올리기 예시 (multipart/form-data)
+# 본문에서 '< 경로'로 시작하는 줄은 그 파일의 내용으로 바뀌어 나갑니다.
+# 경로는 이 요청 파일이 있는 폴더나 이 항목의 폴더(프로젝트 폴더) 기준으로 적고, 전체 경로도 됩니다.
+# 아래 "file" 부분의 글 한 줄을 '< ./보낼파일.png'처럼 바꾸면 그 파일이 올라갑니다(그림 같은 이진 파일도 됩니다).
+# multipart가 아닌 요청에서 본문에 '< 경로' 한 줄만 두면 그 파일이 통째로 본문이 됩니다.
+POST {{host}}/post
+Content-Type: multipart/form-data; boundary=cypher-boundary
+
+--cypher-boundary
+Content-Disposition: form-data; name="title"
+
+보고서
+--cypher-boundary
+Content-Disposition: form-data; name="file"; filename="hello.txt"
+Content-Type: text/plain
+
+이 줄을 '< ./hello.txt'처럼 바꾸면 그 파일의 내용이 올라갑니다.
+--cypher-boundary--
 
 ### 서명(HMAC) 예시
 # 서명할 글(message)을 "시각.메서드.경로와 쿼리.본문"으로 만들고, 비밀키(secret)로 HMAC-SHA256 서명을 붙입니다.
@@ -716,10 +778,25 @@ mod tests {
     #[test]
     fn 기본_요청_파일을_읽는다() {
         let requests = parse_at(TEMPLATE, Now(1_794_470_400_000));
-        assert_eq!(requests.len(), 3);
+        let names: Vec<&str> = requests.iter().map(|r| r.name.split(' ').next().unwrap()).collect();
+        assert_eq!(names, ["조회", "전송", "폼", "고치기", "지우기", "인증", "인증", "내장", "파일", "서명(HMAC)"]);
         assert!(requests.iter().all(|r| r.problems.is_empty()), "{requests:?}");
+        // 예시는 모두 바로 보낼 수 있어야 한다: 없는 환경 변수나 없는 파일에 기대지 않는다.
+        assert!(!TEMPLATE.lines().any(|line| !is_comment(line) && (line.contains("{{$env") || line.starts_with("< "))));
+        let by = |start: &str| requests.iter().find(|r| r.name.starts_with(start)).unwrap();
+        assert_eq!(by("폼").body, "name=kim&city=seoul&memo=hello%20world");
+        assert_eq!((by("고치기").method.as_str(), by("지우기").method.as_str()), ("PUT", "DELETE"));
+        assert_eq!(by("인증 예시: Bearer").headers[0], ("Authorization".to_string(), "Bearer sample-token".to_string()));
+        assert_eq!(by("인증 예시: Basic").headers[0].1, "Basic a2ltOnBhc3MxMjM0");
+        // 내장 값: 헤더와 본문의 UUID는 서로 다른 값이고, 시각은 정해 준 시각이다.
+        let stamped = by("내장 값");
+        assert!(stamped.body.contains("\"createdAt\": 1794470400"), "{}", stamped.body);
+        assert!(!stamped.body.contains("{{") && stamped.headers.iter().all(|(_, value)| !value.contains("{{")), "{stamped:?}");
+        // 파일 올리기: 경계 줄로 시작하고 끝나는 multipart 본문.
+        let upload = by("파일 올리기");
+        assert!(upload.body.starts_with("--cypher-boundary\n") && upload.body.ends_with("\n--cypher-boundary--"), "{}", upload.body);
         // 서명 예시: 시각.메서드.경로와 쿼리.본문을 비밀키로 서명한다.
-        let signed = &requests[2];
+        let signed = requests.last().unwrap();
         assert_eq!((signed.name.as_str(), signed.url.as_str()), ("서명(HMAC) 예시", "https://httpbin.org/post?demo=hmac"));
         let message = format!("1794470400.POST./post?demo=hmac.{}", signed.body);
         let signature = signed.headers.iter().find(|(key, _)| key == "X-Signature").unwrap();
@@ -786,7 +863,7 @@ mod tests {
         assert_eq!(index_at(&requests, 0), Some(0)); // 맨 위 설명 부분
         assert_eq!(index_at(&requests, first + 1), Some(0));
         assert_eq!(index_at(&requests, second), Some(1));
-        assert_eq!(index_at(&requests, lines.len() - 1), Some(2));
+        assert_eq!(index_at(&requests, lines.len() - 1), Some(requests.len() - 1));
         assert_eq!(index_at(&requests, 999), None); // 파일 밖의 줄
         assert_eq!(index_at(&[], 3), None);
     }
