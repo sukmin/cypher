@@ -1351,6 +1351,8 @@ function onHook({ id, event, kind, message, agent, agent_type: agentType, backgr
   if (event === 'Stop') diffRefreshFor(s);
   // 응답에 Claude Code와 가상 터미널이 칸 수를 다르게 세는 글자가 있었으면, 끝난 지금 화면을 다시 맞춘다.
   if (event === 'Stop') realignIfSkewed(s);
+  // 큰 창(승인 창 등)이 접히면서 입력창 아래에 빈 공간이 남았으면 메운다.
+  if (event === 'Stop') closeGapSoon(s);
   render();
   const title = label(s);
   const body = event === 'Stop'
@@ -1501,6 +1503,7 @@ function refreshActivity() {
       // 승인·질문 창이 떠 있던 요청은 오래 조용해도 끝난 것으로 보지 않는다(Esc로 그만둔 경우만 본다).
       if (sinceKey > INTERRUPT_MS ? quiet > INTERRUPT_QUIET_MS : (!s.interruptAt && !s.agents.size && !s.asked && quiet > STALLED_MS)) {
         endWork(s);
+        closeGapSoon(s);
         changed = true;
       } else if (sinceKey > INTERRUPT_MS) {
         s.interruptAt = 0; // 누른 뒤에도 계속 출력한다: 중단이 아니었다.
@@ -1511,7 +1514,9 @@ function refreshActivity() {
     // 오래 도는 도구에 걸린 시간도 같은 식으로 그 칸만 고친다.
     if (s.toolEl?.isConnected) { const running = currentTool(s); if (running) s.toolEl.textContent = toolText(s, running); }
     if (busy === s.busy) continue;
-    if (!busy && s !== active) s.attention = true;
+    // 화면을 다시 맞추느라 나온 출력은 새 소식이 아니다.
+    if (!busy && s !== active && now > (s.realignedAt || 0) + REALIGN_QUIET_MS) s.attention = true;
+    if (!busy) closeGapSoon(s); // 조용해졌다: 메뉴를 닫은 뒤처럼 아래에 빈 공간이 남았으면 메운다.
     s.busy = busy;
     changed = true;
   }
@@ -3696,23 +3701,208 @@ function realignIfSkewed(s) {
  * 다시 그리지 않는 프로그램(셸)이라도 가상 터미널이 자기 화면을 통째로 다시 보내므로 화면 쪽이 어긋난 것은 바로잡힌다.
  */
 function realign(s) {
-  if (!s?.term || s.id == null || s.exited || s.realigning) return;
+  if (!s?.term || s.id == null || s.exited || s.realigning || s.settling) return;
   const { cols, rows } = s.term;
   if (rows < 3) return;
   s.realigning = true;
+  s.settling = true;
   s.skewed = false;
   s.realignedAt = performance.now() + REALIGN_HOLD_MS; // 되돌린 뒤까지 조용한 시간으로 친다
+  // 다시 그린 뒤에 겹친 줄을 지우고 보던 자리를 되찾을 수 있게, 지금 화면의 윗줄과 보던 자리를 적어 둔다(settleRepaint).
+  const buffer = s.term.buffer.active;
+  const before = {
+    top: topLines(s.term),
+    mark: buffer.type === 'normal' ? s.term.registerMarker(-buffer.cursorY) : null, // 지금 화면의 맨 윗줄
+    atEnd: seesEnd(s.term),
+    viewY: buffer.viewportY,
+    gap: gapBelow(s.term),
+  };
   s.term.resize(cols, rows - 1);
   setTimeout(() => {
     s.realigning = false;
-    if (!sessions.has(s.key)) return;
-    // 그 사이에 창 크기가 바뀌었으면(터미널이 이미 새 크기다) 그대로 두고, 아니면 원래 줄 수로 되돌린다.
-    if (s.term.cols === cols && s.term.rows === rows - 1) {
-      if (visible.includes(s)) { try { s.fitAddon.fit(); } catch { s.term.resize(cols, rows); } } else s.term.resize(cols, rows);
+    if (!sessions.has(s.key)) { s.settling = false; before.mark?.dispose(); return; }
+    try {
+      // 그 사이에 창 크기가 바뀌었으면(터미널이 이미 새 크기다) 그대로 두고, 아니면 원래 줄 수로 되돌린다.
+      if (s.term.cols === cols && s.term.rows === rows - 1) {
+        if (visible.includes(s)) { try { s.fitAddon.fit(); } catch { s.term.resize(cols, rows); } } else s.term.resize(cols, rows);
+      }
+    } finally {
+      s.realignedAt = performance.now();
+      s.skewed = false;
+      settleRepaint(s, before);
     }
-    s.realignedAt = performance.now();
-    s.skewed = false;
   }, REALIGN_HOLD_MS);
+}
+
+// ───────────────────────── 아래에 남은 빈 공간 메우기 ─────────────────────────
+// Claude Code는 화면 아래쪽의 움직이는 부분(승인 창, 메뉴, 진행 목록)이 길어지면 그만큼 지난 출력을 위로 밀어 올리고, 그 부분이
+// 접히면 그 줄들을 지우기만 한다. 터미널은 위로 올라간 줄을 도로 끌어내릴 수 없으므로 입력창 아래가 다음 출력이 채울 때까지
+// 빈 채로 남는다(창이 클수록 크다). 그때 화면이 맨 아래를 따라가지 않고 있었으면 입력창은 바닥에 보이는데 스크롤은 그 빈 줄만큼
+// 더 내려간다.
+// Claude Code는 터미널의 줄 수가 줄면 화면을 맨 위부터 대화의 끝부분으로 다시 채워 그린다. 그래서 쉬고 있는 Claude 세션의
+// 아래에 큰 빈 공간이 남아 있으면 화면을 다시 맞춘다(realign). 이때 위로 올라가 있던 줄이 화면에 한 번 더 그려지므로,
+// 지난 출력의 끝에 겹쳐 남은 줄은 지운다(dropRepeated).
+
+const GAP_MIN_ROWS = 10;     // 빈 줄이 이만큼은 돼야 메운다(자동 완성 목록을 닫은 정도의 작은 틈으로 화면을 다시 그리지 않는다)
+const GAP_SHARE = 0.2;       // 그리고 화면 줄 수의 이 비율은 돼야 한다
+const GAP_SETTLE_MS = 800;   // 메울지 살피기 전에 기다리는 시간
+const REPAINT_MIN_MS = 500;  // 줄 수를 되돌린 뒤 프로그램이 다시 그릴 때까지 적어도 이만큼 기다린다
+const REPAINT_QUIET_MS = 300; // 그 뒤 이만큼 출력이 없으면 다 그린 것으로 본다
+const REPAINT_WAIT_MS = 3000; // 그래도 이만큼 지나면 더 기다리지 않는다
+const TOP_LINES = 3;         // 화면이 얼마나 내려왔는지 알아볼 때 견주는 윗줄 수
+
+const lineText = (buffer, y) => buffer.getLine(y)?.translateToString(true) ?? '';
+
+/** 화면(스크롤 맨 아래의 한 화면)에서 커서와 마지막 글자 아래에 남은 빈 줄 수. */
+function gapBelow(term) {
+  const buffer = term.buffer.active;
+  const bottom = buffer.baseY + term.rows - 1;
+  let last = bottom;
+  while (last > buffer.baseY + buffer.cursorY && !lineText(buffer, last)) last--;
+  return bottom - last;
+}
+
+const gapLeast = (term) => Math.max(GAP_MIN_ROWS, Math.floor(term.rows * GAP_SHARE));
+
+/** 내용의 끝(커서가 있는 줄)이 지금 보이는가. 맨 아래를 보고 있거나, 아래 빈 공간만큼 위를 보고 있을 때다. */
+function seesEnd(term) {
+  const buffer = term.buffer.active;
+  return buffer.viewportY + term.rows > buffer.baseY + buffer.cursorY;
+}
+
+/** 지금 화면의 윗줄 몇 개의 글자. */
+function topLines(term) {
+  const buffer = term.buffer.active;
+  const lines = [];
+  for (let i = 0; i < Math.min(TOP_LINES, term.rows); i++) lines.push(lineText(buffer, buffer.baseY + i));
+  return lines;
+}
+
+/** 조금 뒤에 이 세션의 아래 빈 공간을 메울지 살핀다. 여러 번 불러도 한 번만 살핀다. */
+function closeGapSoon(s) {
+  if (s.gapTimer || !isTerm(s) || !aliveClaude(s)) return;
+  s.gapTimer = setTimeout(() => { s.gapTimer = 0; closeGap(s); }, GAP_SETTLE_MS);
+}
+
+/**
+ * 쉬고 있는 Claude 세션의 아래에 큰 빈 공간이 남아 있으면 화면을 다시 맞춰 메운다.
+ * 일하는 중이거나 승인을 기다리는 중이면(곧 출력이 채우거나 창이 떠 있다), 지난 출력을 올려 보고 있으면, 글자를 골라 둔
+ * 상태면 건드리지 않는다. 메워지지 않는 빈 공간(대화가 한 화면보다 짧은 경우)은 한 번만 해 보고 그만둔다.
+ */
+function closeGap(s) {
+  if (!sessions.has(s.key) || !aliveClaude(s) || s.id == null || s.realigning || s.settling) return;
+  if (s.workStart || s.heldStop || s.waiting === 'approval') return;
+  if (performance.now() - s.lastOutput < BUSY_MS) return; // 조용해지면 다시 살핀다(refreshActivity)
+  const buffer = s.term.buffer.active;
+  if (buffer.type !== 'normal' || buffer.baseY === 0 || s.term.hasSelection()) return;
+  const gap = gapBelow(s.term);
+  if (gap < gapLeast(s.term)) { forgetStuck(s); return; }
+  if (stillStuck(s, gap)) return;                // 이미 해 봤는데 메워지지 않은 빈 공간이다
+  if (!seesEnd(s.term)) return;                  // 지난 출력을 올려 보고 있다. 내려오면 다시 살핀다
+  realign(s);
+}
+
+/**
+ * 다시 맞춘 뒤에도 남은 빈 공간은 메울 수 없는 것이다(대화를 비운 직후처럼 대화가 한 화면보다 짧을 때). 적어 두고,
+ * 빈 공간이 더 커지거나 화면의 줄이 위로 더 올라가기 전에는(stillStuck) 다시 해 보지 않는다.
+ */
+function noteStuck(s) {
+  forgetStuck(s);
+  const buffer = s.term.buffer.active;
+  const gap = gapBelow(s.term);
+  if (buffer.type !== 'normal' || gap < gapLeast(s.term)) return;
+  const mark = s.term.registerMarker(0); // 커서가 있는 줄. 줄이 위로 올라가면 화면에서의 자리(row)가 줄어든다.
+  s.gapStuck = { gap, mark, row: mark ? mark.line - buffer.baseY : 0 };
+}
+
+function forgetStuck(s) {
+  s.gapStuck?.mark?.dispose();
+  s.gapStuck = null;
+}
+
+/** 해 봤는데 메워지지 않은 그 빈 공간 그대로인가. 그 뒤로 새 출력이 줄을 위로 밀어 올렸으면 메울 수 있게 됐을 수 있다. */
+function stillStuck(s, gap) {
+  const stuck = s.gapStuck;
+  if (!stuck || gap > stuck.gap || !stuck.mark || stuck.mark.isDisposed) return false;
+  return stuck.mark.line - s.term.buffer.active.baseY >= stuck.row;
+}
+
+/**
+ * 화면을 다시 맞춘 뒤의 정리: 프로그램이 다 그리기를 기다렸다가, 지난 출력의 끝에 겹쳐 남은 줄을 지우고,
+ * 내용의 끝을 보고 있었으면 다시 맨 아래를 보게 한다.
+ */
+function settleRepaint(s, before) {
+  const started = performance.now();
+  const finish = () => {
+    s.settling = false;
+    try {
+      if (!sessions.has(s.key)) return;
+      const buffer = s.term.buffer.active;
+      // 기다리는 사이에 사용자가 스크롤을 움직였으면 보는 자리를 건드리지 않는다.
+      const stayed = buffer.viewportY === buffer.baseY || Math.abs(buffer.viewportY - before.viewY) <= 1;
+      // 겹친 줄은 화면을 다시 채워 그리는 프로그램(Claude Code)에서만 생긴다. 셸의 화면은 그대로 둔다.
+      if (runsClaude(s)) dropRepeated(s, before);
+      if (before.atEnd && stayed) s.term.scrollToBottom();
+      noteStuck(s);
+    } finally {
+      before.mark?.dispose();
+    }
+  };
+  const wait = () => {
+    const now = performance.now();
+    if (sessions.has(s.key) && now - started < REPAINT_WAIT_MS && now - s.lastOutput < REPAINT_QUIET_MS) return void setTimeout(wait, 100);
+    finish();
+  };
+  setTimeout(wait, REPAINT_MIN_MS);
+}
+
+/**
+ * 화면을 다시 그리게 한 뒤, 지난 출력(스크롤 위쪽)에 화면 윗부분과 똑같이 겹쳐 남은 줄을 지운다.
+ *
+ * 프로그램이 화면을 맨 위부터 다시 채워 그리면 내용이 아래로 내려오면서, 이미 위로 올라가 있던 줄이 화면 위쪽에 한 번 더
+ * 그려진다. 몇 줄이 겹쳤는지는 다시 그리기 전 화면의 윗줄(before.top)이 그 자리(before.mark)에서 몇 줄 아래로 내려와 있는지로
+ * 안다. 겹친 두 덩이는 다시 그릴 때 화면이 시작되던 줄을 사이에 두고 위아래로 붙어 있으므로, 그 줄 수만큼의 위아래 덩이가
+ * 글자까지 똑같은 곳을 찾아 위쪽(지난 출력 쪽) 덩이를 지운다. 그런 곳이 없으면 아무것도 지우지 않는다.
+ * 자리를 마커로 잡으므로 다시 그리는 사이에 새 출력이 와서 줄이 더 올라가도 맞는다. 지운 줄 수를 돌려준다.
+ */
+function dropRepeated(s, before) {
+  const { term } = s;
+  const buffer = term.buffer.active;
+  if (buffer.type !== 'normal' || !before.mark || before.mark.isDisposed || !before.top.some(Boolean)) return 0;
+  // 글자를 골라 둔 동안에는 지우지 않는다(xterm.js가 고른 자리를 따라 옮겨 주지 않는다).
+  if (term.hasSelection()) return 0;
+  const from = before.mark.line; // 다시 그리기 전에 화면 맨 윗줄이던 자리
+  const base = buffer.baseY;
+  const most = Math.min(term.rows, from);
+  const topAt = (y) => before.top.every((text, i) => lineText(buffer, y + i) === text);
+  // 윗줄이 내려온 줄 수: 빈 공간이 줄어든 만큼을 먼저 본다(똑같은 줄이 되풀이되는 출력에서는 가까운 데부터 찾으면 0줄로 잡힌다).
+  // 그사이 줄이 위로 올라갔으면(새 출력이 왔다) 빈 공간이 줄어든 까닭이 그것일 수 있으니 이 짐작은 쓰지 않는다.
+  let moved = 0;
+  const filled = base === from ? before.gap - gapBelow(term) : 0;
+  if (filled > 0 && filled <= most && topAt(from + filled)) moved = filled;
+  else for (let d = 0; d <= most; d++) if (topAt(from + d)) { moved = d; break; }
+  if (moved <= 0) return 0;
+  const same = (a, b) => {
+    for (let i = 0; i < moved; i++) if (lineText(buffer, a + i) !== lineText(buffer, b + i)) return false;
+    return true;
+  };
+  let edge = -1; // 겹친 두 덩이 사이: 다시 그릴 때 화면이 시작되던 줄
+  for (let y = from; y <= Math.min(from + moved, base) && edge < 0; y++) {
+    if (y - moved >= 0 && same(y - moved, y)) edge = y;
+  }
+  if (edge < 0) return 0;
+  // xterm.js에는 지난 출력의 가운데 줄을 지우는 공개 기능이 없어 안쪽 버퍼를 직접 고친다(같이 넣어 둔 판에 맞춘 것).
+  const inner = term._core?.buffers?.normal;
+  if (!inner?.lines?.splice || inner.ybase !== base) return 0;
+  const start = edge - moved;
+  const shift = (y) => (y >= edge ? y - moved : Math.min(y, start)); // 지운 줄 아래는 그만큼 올라오고, 지운 줄 안은 그 자리로
+  inner.lines.splice(start, moved);
+  inner.ybase -= moved;
+  inner.ydisp = shift(inner.ydisp);
+  inner.savedY = shift(inner.savedY);
+  term._core.viewport?.syncScrollArea(true);
+  term.refresh(0, term.rows - 1);
+  return moved;
 }
 
 const sizeKey = ({ cols, rows }) => `${cols}x${rows}`;
@@ -3747,6 +3937,8 @@ function wireTerminal(s) {
   term.onTitleChange((title) => { s.title = title; render(); });
   term.onBell(() => { if (s !== active) { s.attention = true; render(); } });
   term.textarea?.addEventListener('focus', () => { s.focusedAt = performance.now(); });
+  // 지난 출력을 보다가 내용의 끝으로 내려왔을 때, 그 아래에 빈 공간이 남아 있으면 메운다.
+  s.pane.querySelector('.xterm-viewport')?.addEventListener('scroll', () => closeGapSoon(s), { passive: true });
 
   // 셸이 알려 주는 현재 폴더(OSC 9;9 경로, OSC 7 file://…)를 따라간다.
   term.parser.registerOscHandler(9, (data) => {
@@ -4069,7 +4261,7 @@ window.cypher = {
   onHook, onStatus, nextWaiting, writeState, rename, sendPrompt, text: sessionText, addImages, onCaptured, captureBrowser,
   setLook, currentLook, mcpAction, handoffSite, onMcpRequest, setMark, jumpToMark, markedItem, textToClaude, runFinished,
   showPalette, paletteEntries, showClosed, reopenLast, restartSession, placeInOrder, inSidebarOrder, cycle, find, recallPrompt, createGroup, newGroup, adoptGroup, groupFor,
-  onCreatedFile, onEditedFile, onTool, realign, wake, wakeGroup, restore, runsClaude, askClaudeCommand, setGroupFolder, groupFolderOf, groupContext, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
+  onCreatedFile, onEditedFile, onTool, realign, closeGap, gapBelow, wake, wakeGroup, restore, runsClaude, askClaudeCommand, setGroupFolder, groupFolderOf, groupContext, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
   get visible() { return visible; },
   get active() { return active; },
 };
