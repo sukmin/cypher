@@ -261,7 +261,12 @@ export function createRun(item, host, saved = {}, onChange = () => {}) {
   function output(max = 80) {
     const buffer = term.buffer.active;
     const lines = [];
-    for (let i = 0; i < buffer.length; i += 1) lines.push(buffer.getLine(i).translateToString(true));
+    for (let i = 0; i < buffer.length; i += 1) {
+      const line = buffer.getLine(i);
+      const words = line.translateToString(true);
+      // 터미널 너비를 넘어 접힌 줄은 앞 줄에 이어 붙인다(긴 경로나 오류 글이 너비마다 끊겨 넘어가지 않게. 글을 골라 복사할 때와 같다).
+      if (line.isWrapped && lines.length) lines[lines.length - 1] += words; else lines.push(words);
+    }
     while (lines.length && !lines[lines.length - 1].trim()) lines.pop();
     return (Number.isFinite(max) ? lines.slice(-max) : lines).join('\n');
   }
@@ -369,6 +374,19 @@ export function createRun(item, host, saved = {}, onChange = () => {}) {
     takeFile,
     state: () => ({ command }),
     close: () => Promise.resolve(true),
+    /**
+     * 숨겨졌다 다시 보일 때(또는 배치가 다시 지어질 때) 스크롤 막대를 터미널이 기억하는 자리에 다시 맞춘다.
+     * 숨긴 동안 브라우저가 막대를 맨 위로 되돌려 두어, 그대로 두면 휠을 굴릴 때 출력 맨 위로 튄다(세션 터미널과 같은 처리).
+     */
+    resync: () => {
+      if (disposed) return;
+      const buffer = term.buffer.active;
+      const bar = $term.querySelector('.xterm-viewport');
+      if (!bar || buffer.viewportY === 0 || bar.scrollTop > 0) return; // 어긋나지 않았다
+      const y = buffer.viewportY;
+      term.scrollLines(-1);
+      if (y >= buffer.baseY) term.scrollToBottom(); else term.scrollToLine(y);
+    },
     dispose: () => {
       disposed = true;
       clearInterval(clockTimer);

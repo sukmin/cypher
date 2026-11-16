@@ -211,7 +211,8 @@ function linkText(html) {
 }
 
 const isUrl = (text) => /^https?:\/\/\S+$/i.test(text.trim());
-const dirName = (path) => path.replace(/[\\/][^\\/]*$/, '');
+// 드라이브 맨 위의 파일(`C:\a.http`)의 폴더는 `C:\`다. `C:`만 남기면 "그 드라이브의 지금 폴더"를 뜻하게 된다.
+const dirName = (path) => path.replace(/[\\/][^\\/]*$/, '').replace(/^([A-Za-z]:)$/, '$1\\');
 const stem = (name) => name.replace(/\.[^.]*$/, '');
 
 /** 놓인 것을 사이드바 항목으로 만든다. */

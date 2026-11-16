@@ -65,7 +65,13 @@ const clamp = (value, low, high, fallback) => {
   const n = Number(value);
   return Number.isFinite(n) && n > 0 ? Math.min(high, Math.max(low, n)) : fallback;
 };
-const quoted = (name) => (/^[\w-]+$/.test(name) ? name : `"${name.replace(/"/g, '')}"`);
+// CSS에 적을 글꼴 이름. 식별자 꼴(글자로 시작)일 때만 그대로 적고, 나머지는 따옴표로 감싼다. 숫자로 시작하는 이름
+// (`0xProto`, `3270`)은 식별자가 아니라서, 그대로 적으면 글꼴 지정이 통째로 무효가 된다.
+const quoted = (name) => (/^[A-Za-z_][\w-]*$/.test(name) ? name : `"${name.replace(/["\\]/g, '')}"`);
+/** 이 컴퓨터에 그 글꼴이 있는지. 알아볼 수 없는 이름이면 없는 것으로 본다(여기서 오류가 나면 모양 창이 열리지 않는다). */
+const hasFont = (name) => {
+  try { return document.fonts.check(`12px ${quoted(name)}`); } catch { return false; }
+};
 
 /** 지금 적용된 모양. */
 export function currentLook() {
@@ -205,7 +211,7 @@ export function showLook() {
     Object.assign(sample.style, {
       color: look.termTheme.foreground, fontFamily: look.termFamily, fontSize: `${look.termPixels}px`,
     });
-    const missing = [look.uiFont, look.termFont].filter((name) => name && !document.fonts.check(`12px ${quoted(name)}`));
+    const missing = [look.uiFont, look.termFont].filter((name) => name && !hasFont(name));
     note.textContent = missing.length
       ? `이 컴퓨터에 없는 글꼴입니다: ${missing.join(', ')} (대신 기본 글꼴로 보입니다)`
       : look.theme === 'dark' ? ''

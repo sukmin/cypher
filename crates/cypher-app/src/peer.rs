@@ -23,6 +23,23 @@ extern "system" {
     fn OpenProcess(access: u32, inherit: i32, pid: u32) -> Handle;
     fn CloseHandle(handle: Handle) -> i32;
     fn GetProcessTimes(process: Handle, creation: *mut u64, exit: *mut u64, kernel: *mut u64, user: *mut u64) -> i32;
+    fn GetExitCodeProcess(process: Handle, code: *mut u32) -> i32;
+}
+
+/// 그 번호의 프로세스가 지금 돌고 있는지. 볼 수 없는 프로세스는 없는 것으로 친다.
+pub fn is_running(pid: u32) -> bool {
+    const STILL_ACTIVE: u32 = 259;
+    // SAFETY: 받은 손잡이는 널이 아닐 때만 쓰고, 끝에 닫는다.
+    unsafe {
+        let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+        if process.is_null() {
+            return false;
+        }
+        let mut code = 0u32;
+        let known = GetExitCodeProcess(process, &mut code);
+        CloseHandle(process);
+        known != 0 && code == STILL_ACTIVE
+    }
 }
 
 #[link(name = "ntdll")]

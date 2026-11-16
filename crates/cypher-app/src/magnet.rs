@@ -46,6 +46,74 @@ extern "system" {
     fn IsWindowVisible(hwnd: Hwnd) -> i32;
     fn IsIconic(hwnd: Hwnd) -> i32;
     fn GetKeyState(key: i32) -> i16;
+    fn EnumWindows(each: unsafe extern "system" fn(Hwnd, isize) -> i32, data: isize) -> i32;
+    fn GetWindowThreadProcessId(hwnd: Hwnd, pid: *mut u32) -> u32;
+}
+
+#[link(name = "kernel32")]
+extern "system" {
+    fn OpenProcess(access: u32, inherit: i32, pid: u32) -> *mut c_void;
+    fn CloseHandle(handle: *mut c_void) -> i32;
+    fn QueryFullProcessImageNameW(process: *mut c_void, flags: u32, name: *mut u16, size: *mut u32) -> i32;
+}
+
+const PROCESS_QUERY_LIMITED_INFORMATION: u32 = 0x1000;
+/// 이보다 작은 창(도움말 풍선 같은 것)에는 붙지 않는다.
+const MIN_PEER_SIZE: i32 = 120;
+
+/// 그 프로세스의 실행 파일 이름(폴더는 뺀다). 볼 수 없으면 None.
+unsafe fn program_name(pid: u32) -> Option<String> {
+    let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+    if process.is_null() {
+        return None;
+    }
+    let mut buffer = [0u16; 1024];
+    let mut len = buffer.len() as u32;
+    let read = QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut len);
+    CloseHandle(process);
+    if read == 0 {
+        return None;
+    }
+    let path = String::from_utf16_lossy(&buffer[..(len as usize).min(buffer.len())]);
+    path.rsplit(['\\', '/']).next().map(str::to_string)
+}
+
+unsafe extern "system" fn collect(hwnd: Hwnd, list: isize) -> i32 {
+    // SAFETY: `list`는 `peer_windows`가 넘긴, 이 부름 동안 살아 있는 Vec의 주소다.
+    (*(list as *mut Vec<Hwnd>)).push(hwnd);
+    1
+}
+
+/// 다른 Cypher 창들: 이 프로그램과 이름이 같은 실행 파일의 다른 프로세스가 띄운, 화면에 보이는 최상위 창.
+/// Cypher는 프로세스마다 창이 하나라서, 붙을 "다른 Cypher 창"은 늘 다른 프로세스의 창이다.
+unsafe fn peer_windows() -> Vec<Hwnd> {
+    let ours = std::env::current_exe().ok().and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()));
+    let Some(ours) = ours else { return Vec::new() };
+    let mut all: Vec<Hwnd> = Vec::new();
+    EnumWindows(collect, &mut all as *mut Vec<Hwnd> as isize);
+    let me = std::process::id();
+    // 프로세스마다 한 번만 이름을 알아본다(창이 여럿인 프로그램이 많다).
+    let mut known: Vec<(u32, bool)> = Vec::new();
+    all.into_iter()
+        .filter(|&hwnd| {
+            if IsWindowVisible(hwnd) == 0 || IsIconic(hwnd) != 0 {
+                return false;
+            }
+            let mut pid = 0u32;
+            GetWindowThreadProcessId(hwnd, &mut pid);
+            if pid == 0 || pid == me {
+                return false;
+            }
+            match known.iter().find(|(seen, _)| *seen == pid) {
+                Some(&(_, same)) => same,
+                None => {
+                    let same = program_name(pid).is_some_and(|name| name.eq_ignore_ascii_case(&ours));
+                    known.push((pid, same));
+                    same
+                }
+            }
+        })
+        .collect()
 }
 
 #[link(name = "comctl32")]
@@ -68,6 +136,8 @@ struct Drag {
     size: (i32, i32),
     /// 창 사각형과 눈에 보이는 테두리의 차이(보이지 않는 크기 조절 여백).
     inset: Rect,
+    /// 끌기 시작할 때 떠 있던 다른 Cypher 창들(다른 프로세스의 창).
+    peers: Vec<Hwnd>,
 }
 
 #[derive(Default)]
@@ -118,17 +188,21 @@ unsafe fn begin(state: &mut State, hwnd: Hwnd) {
             right: window.right - frame.right,
             bottom: window.bottom - frame.bottom,
         },
+        peers: peer_windows(),
     });
 }
 
 /// Windows가 제안한 위치(`proposed`)를 자석 위치로 고친다.
 unsafe fn adjust(state: &mut State, hwnd: Hwnd, proposed: &mut Rect) {
     let distance = state.distance;
+    let peers = state.drag.as_ref().map(|drag| drag.peers.as_slice()).unwrap_or_default();
     let others: Vec<Rect> = state
         .windows
         .iter()
+        .chain(peers)
         .filter(|&&other| other != hwnd && IsWindowVisible(other) != 0 && IsIconic(other) == 0)
         .map(|&other| frame_rect(other))
+        .filter(|rect| rect.right - rect.left >= MIN_PEER_SIZE && rect.bottom - rect.top >= MIN_PEER_SIZE)
         .collect();
     let Some(drag) = state.drag.as_mut().filter(|d| d.hwnd == hwnd) else { return };
     let mouse = cursor();
@@ -189,5 +263,22 @@ pub fn attach(hwnd: Hwnd, distance: u32) {
     // SAFETY: 살아 있는 우리 창에, 창 스레드에서, 프로그램이 끝날 때까지 유효한 함수를 단다.
     unsafe {
         SetWindowSubclass(hwnd, subclass, SUBCLASS_ID, 0);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn 프로세스의_실행_파일_이름을_읽고_다른_cypher_창을_찾는다() {
+        let ours = std::env::current_exe().unwrap().file_name().unwrap().to_string_lossy().into_owned();
+        // SAFETY: 읽기만 하는 Windows 함수들이다.
+        unsafe {
+            assert_eq!(program_name(std::process::id()), Some(ours));
+            assert_eq!(program_name(0xffff_fff0), None);
+            // 시험 프로그램과 이름이 같은 다른 프로세스의 창은 없다(창을 모으다 죽지 않는 것도 본다).
+            assert!(peer_windows().is_empty());
+        }
     }
 }

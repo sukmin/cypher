@@ -26,7 +26,8 @@ export function initTodo(given) {
 /** 할 일 줄: 들여쓰기, 목록 표시(- * + 1.), 체크 칸([ ] [x], 없어도 된다), 글. */
 const TASK = /^(\s*)([-*+]|\d+[.)])\s+(?:\[([ xX])\](?:\s+|$))?(.*)$/;
 /** 제목 줄: # 제목, ## 구역 */
-const HEAD = /^(#{1,6})\s+(.*?)\s*#*\s*$/;
+// 닫는 `#`는 앞에 빈칸이 있어야 한다(`# C#`의 `#`는 제목의 글자다).
+const HEAD = /^(#{1,6})\s+(.*?)(?:\s+#+)?\s*$/;
 const MAX_UNDO = 100;
 
 /** 들여쓴 너비(빈칸 하나 1, 탭 하나 2). */
@@ -388,10 +389,11 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
   // ── 그 자리에서 고치기 ──
 
   function edit(line, fresh = false) {
+    // 고치던 것을 먼저 반영한다. 반영하면 목록을 다시 그리므로, 줄의 요소는 그 뒤에 찾아야 화면에 있는 것을 얻는다.
+    finishEdit();
     const row = rowAt(line);
     const node = $list.querySelector(`.todo-row[data-line="${line}"]`);
     if (row?.kind !== 'task' || !node) return;
-    finishEdit();
     const input = make('input', 'todo-edit');
     Object.assign(input, { value: row.text, spellcheck: false, autocomplete: 'off' });
     node.querySelector('.todo-text').replaceWith(input);
@@ -455,6 +457,20 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
     draw();
   }
 
+  /**
+   * 고치던 것이 있으면 반영하고, 그 바람에 줄 번호가 달라졌으면 `line`(눌린 줄)을 맞춘다.
+   * 고치던 줄을 비워 지우면 그 할 일과 하위 줄들이 함께 사라지고 아래 줄들의 번호가 당겨진다. → 눌린 줄이 사라졌으면 -1.
+   */
+  function settleEdit(line) {
+    if (!editing) return line;
+    const edited = editing.line, before = lines().length;
+    finishEdit();
+    const removed = before - lines().length;
+    $list.focus({ preventScroll: true });
+    if (!removed || line < edited) return line;
+    return line < edited + removed ? -1 : line - removed;
+  }
+
   // ── 마우스·키보드 ──
 
   // 고치는 중에 목록의 다른 곳을 누르면 입력칸이 초점을 잃으면서 목록을 다시 그리는데, 누름과 뗌 사이에 줄이 새것으로
@@ -465,16 +481,7 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
   $list.addEventListener('click', (ev) => {
     const node = ev.target.closest('.todo-row');
     if (ev.target.closest('.todo-edit')) return;
-    let line = node ? Number(node.dataset.line) : -1;
-    if (editing) {
-      // 고치던 줄을 비워 지웠으면 그 아래 줄들의 번호가 당겨진다.
-      const edited = editing.line, before = lines().length;
-      finishEdit();
-      const removed = before - lines().length;
-      if (removed && line === edited) line = -1;
-      else if (removed && line > edited) line -= removed;
-      $list.focus({ preventScroll: true });
-    }
+    const line = settleEdit(node ? Number(node.dataset.line) : -1);
     if (line < 0 || rowAt(line)?.kind !== 'task') return undefined;
     if (ev.target.matches('input[type="checkbox"]')) { ev.preventDefault(); return toggle(line); }
     const act = ev.target.closest('[data-act]')?.dataset.act;
@@ -490,8 +497,11 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
     const node = ev.target.closest('.todo-row');
     if (!node) return;
     ev.preventDefault();
-    const line = Number(node.dataset.line);
+    // 고치는 중에는 입력칸이 초점을 잃지 않아(위의 mousedown) 고치던 것이 그대로 남아 있다. 먼저 반영하지 않으면
+    // 메뉴의 지우기·옮기기가 줄 번호를 바꾼 뒤에, 고치던 글이 옛 줄 번호의 엉뚱한 할 일을 덮어쓴다.
+    const line = settleEdit(Number(node.dataset.line));
     const row = rowAt(line);
+    if (row?.kind !== 'task') return;
     select(line, { scroll: false });
     showMenu(ev, [
       { label: row.done ? '체크 풀기  (Space)' : '끝냄으로 체크  (Space)', action: () => toggle(line) },
@@ -606,7 +616,13 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
     if (!unread && text !== base) return; // 여기서 고치는 중인 글은 덮어쓰지 않는다.
     let found = null;
     try { found = await invoke('todo_read', { id }); } catch { return; }
-    if (disposed || found == null) return;
+    if (disposed) return;
+    if (found == null) {
+      // 저장소에 파일이 없다. 처음 읽기에 실패해 저장을 막아 두었던 것이면, 덮어쓸 것이 없으니 저장을 푼다
+      // (풀지 않으면 파일이 영영 생기지 않아, 여기 적은 내용이 한 번도 저장되지 않는다).
+      if (unread) { unread = false; stored = ''; if (text !== stored) scheduleSave(); }
+      return;
+    }
     found = found.replace(/\r\n?/g, '\n');
     if (unread) {
       unread = false;
@@ -624,6 +640,14 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
   function settle() {
     finishEdit();
     unread = false;
+  }
+
+  /**
+   * 저장소를 읽지 못한 동안에는 지금 내용에 덧붙이거나 일부를 고치는 일을 받지 않는다: 화면의 글은 저장된 목록이
+   * 아니라 빈 글이라서, 거기에 덧붙여 저장하면 읽지 못했던 원래 목록을 덮어쓴다(통째로 바꾸는 `setText`는 받는다).
+   */
+  function refuseUnread() {
+    if (unread) throw new Error('이 할 일 항목은 저장된 내용을 아직 읽지 못했습니다. 잠시 뒤에 다시 하거나, 목록을 통째로 바꾸세요(mode: replace).');
   }
 
   /** 비어 있어 파일의 내용으로 채울 수 있는지(저장소를 읽지 못한 동안에는 받지 않는다). */
@@ -709,6 +733,7 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
     },
     /** 목록 끝에 덧붙인다. */
     append: (source) => {
+      refuseUnread();
       settle();
       const more = String(source ?? '').replace(/\r\n?/g, '\n').replace(/^\n+|\n+$/g, '');
       const body = text.replace(/\n+$/, '');
@@ -720,6 +745,7 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
      * → { changed(바꾼 수), already(이미 그 상태이던 수), problems: [찾지 못한 것의 설명] }
      */
     check: (refs, done) => {
+      refuseUnread();
       settle();
       const all = lines();
       const problems = [];
@@ -745,6 +771,7 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
     insert: (given) => {
       const words = String(given ?? '').split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
       if (!words.length) return;
+      if (unread) { setStatus('할 일의 저장된 내용을 아직 읽지 못해 넣지 않았습니다.'); return; }
       settle();
       const body = text.replace(/\n+$/, '');
       commit(`${body}${body ? '\n' : ''}${words.map((line) => (TASK.test(line) ? line : `- [ ] ${line}`)).join('\n')}\n`);
@@ -752,7 +779,13 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
     setCode: (shown) => showCode(!!shown),
     /** 자동 저장소의 번호(파일 이름). */
     store: () => id,
-    close: async () => { finishEdit(); await flush(); return true; },
+    close: async () => {
+      finishEdit();
+      await flush();
+      // 마지막 저장이 실패했으면 그대로 닫지 않는다(닫으면 다시 저장하지 않고, 저장소의 옛 내용만 보관된다).
+      return unread || text === stored
+        || confirm('할 일의 마지막으로 고친 내용을 저장하지 못했습니다. 그래도 닫을까요?\n(닫으면 마지막으로 저장된 내용만 30일 동안 보관됩니다)');
+    },
     dispose: () => {
       disposed = true;
       clearTimeout(saveTimer);

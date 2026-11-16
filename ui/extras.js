@@ -234,6 +234,9 @@ export function showHelp() {
  * Cypher 업데이트: GitHub의 최신 릴리즈를 확인하고, 새 버전이면 내려받아 설치한다.
  * Cypher는 스스로 확인하러 나가지 않는다. 이 창의 단추를 눌렀을 때만 인터넷에 나간다(로그인·토큰은 필요 없다).
  */
+/** 이번 실행에서 설치를 마친 버전(다시 시작해야 그 버전으로 뜬다). 업데이트 창을 닫았다 다시 열어도 기억한다. */
+let installedVersion = '';
+
 export async function showUpdate() {
   const { invoke, make, setStatus } = api;
   const row = (key, value) => {
@@ -272,6 +275,10 @@ export async function showUpdate() {
       page.hidden = false;
       if (!found.newer) {
         verdict.textContent = '최신 버전을 쓰고 있습니다.';
+      } else if (found.latest === installedVersion) {
+        // 이미 설치했다. 실행 중인 것은 아직 옛 버전이라 "새 버전"으로 보이지만, 다시 설치할 것은 없다.
+        verdict.textContent = `${installedVersion}을(를) 설치했습니다. Cypher를 다시 시작하면 새 버전으로 뜹니다.`;
+        restart.hidden = false;
       } else {
         verdict.textContent = found.blocked ? `새 버전이 있습니다. ${found.blocked}` : '새 버전이 있습니다.';
         notes.textContent = found.notes.length > 4000 ? `${found.notes.slice(0, 4000)}\n…` : found.notes;
@@ -289,8 +296,10 @@ export async function showUpdate() {
     verdict.textContent = '내려받아 설치하는 중…';
     try {
       const version = await invoke('update_install');
+      installedVersion = version;
       verdict.textContent = `${version}을(를) 설치했습니다. Cypher를 다시 시작하면 새 버전으로 뜹니다.`;
       install.hidden = true;
+      install.disabled = false; // 더 새 버전이 나오면 다시 쓸 수 있게 풀어 둔다.
       restart.hidden = false;
       setStatus(`Cypher ${version}을(를) 설치했습니다. 다시 시작하면 적용됩니다.`);
     } catch (err) {

@@ -97,15 +97,21 @@ pub(crate) fn write_safely(path: &Path, bytes: &[u8]) -> Result<(), String> {
     let mut temp = path.as_os_str().to_owned();
     temp.push(".cypher-tmp");
     let temp = PathBuf::from(temp);
-    let written = fs::File::create(&temp).and_then(|mut file| {
-        use std::io::Write;
-        file.write_all(bytes)?;
-        file.sync_all() // 바꿔치기 전에 디스크까지 내려 쓴다.
-    });
-    if let Err(e) = written {
-        let _ = fs::remove_file(&temp);
+    let mut file = match fs::File::create(&temp) {
+        Ok(file) => file,
         // 임시 파일을 만들 수 없는 곳(쓰기 금지 폴더 안의 쓸 수 있는 파일 등)이면 직접 쓴다.
-        return if path.exists() { fs::write(path, bytes).map_err(err) } else { Err(err(e)) };
+        Err(e) => return if path.exists() { fs::write(path, bytes).map_err(err) } else { Err(err(e)) },
+    };
+    let written = {
+        use std::io::Write;
+        file.write_all(bytes).and_then(|()| file.sync_all()) // 바꿔치기 전에 디스크까지 내려 쓴다.
+    };
+    drop(file);
+    if let Err(e) = written {
+        // 쓰다가 실패했으면(디스크가 가득 참 등) 원래 파일에 직접 쓰지 않는다. 직접 써도 같은 까닭으로 실패하고,
+        // 그때는 원래 파일이 잘린 채로 남는다.
+        let _ = fs::remove_file(&temp);
+        return Err(err(e));
     }
     let done = if path.exists() { replace_file(path, &temp) } else { fs::rename(&temp, path).is_ok() };
     if done {

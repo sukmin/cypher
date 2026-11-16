@@ -151,7 +151,11 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
 
   // 즐겨찾기는 모든 사이트 항목이 함께 쓴다.
   function bookmarks() {
-    try { return JSON.parse(localStorage.getItem(BOOKMARKS_KEY) || '[]'); } catch { return []; }
+    // 기록이 깨져 목록이 아니면 빈 목록으로 본다(여기서 오류가 나면 사이트 항목이 아예 열리지 않는다).
+    try {
+      const list = JSON.parse(localStorage.getItem(BOOKMARKS_KEY) || '[]');
+      return Array.isArray(list) ? list.filter((b) => b && typeof b.url === 'string') : [];
+    } catch { return []; }
   }
   function bookmarkMenu(ev) {
     const list = bookmarks();
@@ -316,9 +320,10 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
     url: () => url,
     /**
      * 보던 페이지의 파일이 밖에서(같은 워크스페이스의 Claude 세션 등) 고쳐졌다: 페이지를 새로 고친다.
-     * 웹뷰가 아직 없으면 할 일이 없다(처음 보일 때 지금의 내용으로 뜬다).
+     * 화면에 띄운 적이 없어도 웹뷰는 있을 수 있다(Claude의 브라우저 도구가 화면에 없는 사이트를 열어 둔 경우). 그때도
+     * 새로 고쳐야 다음 browser_read가 옛 페이지를 읽지 않는다. 웹뷰가 아예 없으면 할 일이 없다(처음 보일 때 지금의 내용으로 뜬다).
      */
-    refresh: () => { if (opened) act('reload'); },
+    refresh: () => invoke('site_action', { id, action: 'reload' }).catch((err) => { if (opened) setStatus(String(err)); }),
     /** 이 항목이 써야 하는 프로필을 앱에 알리고, 앱이 알게 될 때까지 기다린다(Claude의 도구가 이 항목을 쓰기 직전에 부른다). */
     assign: (profile) => tell(profile),
     /** 다시 시작할 때 되살릴 내용: 보던 주소와 처음 간 주소. */

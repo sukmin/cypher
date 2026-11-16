@@ -228,7 +228,9 @@ function isTableSep(line) {
   }
 }
 
-const indentOf = (line) => line.length - line.trimStart().length;
+// 줄 앞의 빈칸 수. 일반 빈칸만 센다(줄 앞의 탭은 미리 빈칸으로 바꿔 둔다). 전각 공백 같은 다른 공백 글자까지 세면
+// 그런 글자로 들여쓴 문단이 코드로 보인다.
+const indentOf = (line) => /^ */.exec(line)[0].length;
 /** 그 줄이 코드 울타리를 여는지. 열면 { indent, mark, info }. */
 function fenceOf(line) {
   const m = FENCE.exec(line);
@@ -397,10 +399,19 @@ function blocks(lines, ctx, tight, depth = 0, raw = null) {
     if (QUOTE.test(line)) {
       flush();
       const inner = [];
-      // `>` 없이 이어 쓴 문단 줄도 인용에 넣는다.
-      while (i < lines.length && (QUOTE.test(lines[i])
-        || (lines[i].trim() && inner.length && inner[inner.length - 1].trim() && !startsBlock(lines[i]) && !LIST.test(lines[i])))) {
-        inner.push(lines[i].replace(/^ {0,3}> ?/, ''));
+      let fenced = false; // 인용 안에서 코드 울타리가 열려 있는지
+      // `>` 없이 이어 쓴 문단 줄도 인용에 넣는다. 이어 쓸 수 있는 것은 문단뿐이다: 앞줄이 코드 울타리·제목·가로줄이거나
+      // 울타리가 열려 있으면, `>` 없는 줄은 인용 밖의 글이다.
+      const continues = (next) => {
+        const last = inner[inner.length - 1];
+        return !!next.trim() && inner.length > 0 && !!last.trim() && !fenced
+          && !headingOf(last) && !fenceOf(last) && !RULE.test(last)
+          && !startsBlock(next) && !LIST.test(next);
+      };
+      while (i < lines.length && (QUOTE.test(lines[i]) || continues(lines[i]))) {
+        const body = lines[i].replace(/^ {0,3}> ?/, '');
+        if (QUOTE.test(lines[i]) && FENCE.test(body)) fenced = !fenced;
+        inner.push(body);
         i++;
       }
       const alert = /^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*$/i.exec(inner[0] || '');
@@ -469,7 +480,10 @@ export function renderMarkdown(text) {
   // 줄 앞의 탭은 공백 네 칸으로 센다(들여쓰기를 칸 수로 가리기 위해). 탭을 바꾸기 전의 줄(raw)도 나란히 들고 있다가,
   // 들여쓰지 않은 코드 울타리 안의 줄은 그것으로 보여 준다(복사한 코드에 탭이 살아 있게).
   let raw = clean.split('\n');
-  let lines = clean.replace(/^[ ]*\t[ \t]*/gm, (lead) => lead.replace(/\t/g, '    ')).split('\n');
+  // 목록 표시 바로 뒤의 탭(`-<탭>항목`)은 빈칸 하나로 본다. 그대로 두면 목록으로 읽지 못해 문단이 된다.
+  let lines = clean.replace(/^[ ]*\t[ \t]*/gm, (lead) => lead.replace(/\t/g, '    '))
+    .replace(/^( *(?:[-*+]|\d{1,9}[.)]))\t[ \t]*/gm, '$1 ')
+    .split('\n');
   let out = '';
   // 맨 앞의 머리말(--- 사이의 `이름: 값` 줄들)은 코드처럼 그대로 보여 준다.
   if (lines[0]?.trim() === '---' && /^[A-Za-z_][\w-]*[ \t]*:/.test(lines[1] || '')) {

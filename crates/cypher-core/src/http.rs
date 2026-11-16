@@ -43,12 +43,16 @@ pub struct HttpRequest {
 impl HttpRequest {
     /// 글 속의 비밀 값(환경 변수에서 읽은 값)을 `***`로 가린다.
     pub fn masked(&self, text: &str) -> String {
-        let mut out = text.to_string();
-        for secret in self.secrets.iter().filter(|s| s.len() >= 4) {
-            out = out.replace(secret.as_str(), "***");
-        }
-        out
+        mask(text, &self.secrets)
     }
+}
+
+fn mask(text: &str, secrets: &[String]) -> String {
+    let mut out = text.to_string();
+    for secret in secrets.iter().filter(|s| s.len() >= 4) {
+        out = out.replace(secret.as_str(), "***");
+    }
+    out
 }
 
 const METHODS: [&str; 7] = ["GET", "POST", "PUT", "PATCH", "DELETE", "HEAD", "OPTIONS"];
@@ -239,8 +243,10 @@ fn parse_block(
     let body = scope.expand(&body.join("\n"), 0);
     scope.body = Some(body.clone());
     let headers = header_lines.into_iter().map(|(key, value)| (key, scope.expand(value, 0))).collect();
-    let problems = std::mem::take(&mut scope.problems);
     let secrets = std::mem::take(&mut scope.secrets);
+    // 문제 글에는 값을 채운 주소가 들어갈 수 있다. 환경 변수에서 읽은 값이 오류 글에 실려 나가지 않게 가린다
+    // (이 글은 화면뿐 아니라 Claude 세션의 도구 답으로도 간다).
+    let problems = std::mem::take(&mut scope.problems).iter().map(|problem| mask(problem, &secrets)).collect();
     // 이름 없는 요청의 이름: 시각·무작위 값이 든 주소는 읽을 때마다 달라지므로 적힌 그대로를 이름으로 쓴다.
     let default_name = if target.contains("{{$") { format!("{method} {target}") } else { format!("{method} {url}") };
     Some(HttpRequest {
@@ -932,6 +938,9 @@ mod tests {
         assert_eq!(parse(&text).len(), 1);
         assert!(text.contains("api_key=***") && text.contains("X-Auth-Token: ***"));
         assert_eq!(request.masked("주소 https://a.example/x?api_key=s3cr3t-value"), "주소 https://a.example/x?api_key=***");
+        // 주소가 되지 못했을 때의 문제 글에는 채워진 주소가 들어간다. 거기 든 비밀 값도 가린다.
+        let broken = parse("GET {{hsot}}/x?api_key={{$env CYPHER_TEST_SECRET}}\n").remove(0);
+        assert!(broken.problems[0].contains("api_key=***") && !broken.problems[0].contains("s3cr3t-value"), "{:?}", broken.problems);
     }
 
     #[test]

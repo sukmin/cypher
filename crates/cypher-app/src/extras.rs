@@ -193,7 +193,13 @@ fn revert(root: &Path, path: &str, keep: &Path) -> Result<String, String> {
     }
 
     // 되돌리기 전의 차이를 보관한다(이진 파일도 되살릴 수 있게 --binary).
-    let patch = run_git(root, &["diff", "--no-color", "--binary", "HEAD", "--", path], true)?;
+    // 사용자의 git 설정과 상관없이 `git apply`로 되살릴 수 있는 차이여야 한다: 외부 diff 도구나 글자 변환(textconv)을
+    // 거친 차이, 접두어(`a/`·`b/`)를 뺀 차이는 되살릴 수 없다.
+    let patch = run_git(
+        root,
+        &["diff", "--no-color", "--binary", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", "HEAD", "--", path],
+        true,
+    )?;
     if !patch.status.success() {
         return Err(String::from_utf8_lossy(&patch.stderr).trim().to_string());
     }

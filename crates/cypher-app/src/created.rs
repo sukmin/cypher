@@ -57,7 +57,22 @@ fn skip_roots() -> Vec<PathBuf> {
     let mut roots = vec![crate::user_dir(), std::env::temp_dir()];
     roots.extend(crate::extras::claude_home());
     roots.extend(crate::data_dir());
+    // 환경 변수의 폴더는 짧은 이름(8.3: `C:\Users\LONGNA~1\AppData\Local\Temp`)으로 적혀 있을 수 있고, Claude는
+    // 긴 이름으로 쓴다. 글자로 견주므로 긴 이름 꼴도 함께 넣는다.
+    let long: Vec<PathBuf> = roots.iter().filter_map(|root| long_form(root)).collect();
+    for root in long {
+        if !roots.contains(&root) {
+            roots.push(root);
+        }
+    }
     roots
+}
+
+/// 폴더의 긴 이름 꼴(운영체제가 알려 주는 실제 이름). 없는 폴더거나 이 컴퓨터의 드라이브 경로가 아니면 None.
+fn long_form(dir: &Path) -> Option<PathBuf> {
+    let real = std::fs::canonicalize(dir).ok()?;
+    let text = real.to_str()?.strip_prefix(r"\\?\")?;
+    (!text.starts_with("UNC")).then(|| PathBuf::from(text))
 }
 
 /// 사람이 볼 결과물을 두지 않는 폴더 이름: 숨김 폴더(.git, .claude …), 의존성·빌드 폴더.

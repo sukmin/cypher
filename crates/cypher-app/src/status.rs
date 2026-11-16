@@ -137,6 +137,8 @@ enum Message {
 
 /// 훅 내용 한 번의 크기 한도. Write 도구의 신호에는 쓴 파일의 내용이 통째로 들어 있다.
 const MAX_BODY: u64 = 32 << 20;
+/// 접속 머리의 한 줄(확인값, 세션 번호)에서 읽는 최대 길이.
+const HEAD_LINE_MAX: u64 = 256;
 
 /// 로컬 포트를 열고 받기 스레드를 띄운다. 열린 포트 번호를 돌려준다.
 pub fn start(app: AppHandle, token: String) -> std::io::Result<u16> {
@@ -211,13 +213,14 @@ fn accept(app: AppHandle, token: &str, stream: TcpStream) {
     let Ok(writer) = stream.try_clone() else { return };
     let mut reader = BufReader::new(stream);
     let mut line = String::new();
-    if reader.read_line(&mut line).is_err() || line.trim_end() != token {
+    // 머리의 두 줄(확인값, 세션 번호)은 짧다. 줄바꿈 없이 끝없이 보내는 접속이 메모리를 채우지 못하게 길이를 묶는다.
+    if (&mut reader).take(HEAD_LINE_MAX).read_line(&mut line).is_err() || line.trim_end() != token {
         return; // 확인값이 다르면 아무것도 하지 않는다.
     }
     // 확인값이 맞는 접속만 누가 보냈는지 알아본다(전달 프로그램은 답을 기다리고 있으므로 아직 살아 있다).
     let owner = owner_of(&app, reader.get_ref());
     line.clear();
-    if reader.read_line(&mut line).is_err() {
+    if (&mut reader).take(HEAD_LINE_MAX).read_line(&mut line).is_err() {
         return;
     }
     // 적힌 세션 번호가 접속한 프로세스의 세션과 다르면(다른 세션인 척하거나, 세션 밖의 프로세스) 받지 않는다.

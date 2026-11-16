@@ -92,13 +92,29 @@ pub fn sniff(head: &[u8]) -> Option<&'static str> {
     if head.starts_with(&[0, 0, 1, 0]) {
         return Some("ico");
     }
-    // SVG는 글자 파일이다. 앞쪽에 <svg가 보이면 SVG로 본다.
-    let text = String::from_utf8_lossy(&head[..head.len().min(1024)]).to_ascii_lowercase();
-    let text = text.trim_start_matches('\u{feff}').trim_start();
-    if text.starts_with("<svg") || ((text.starts_with("<?xml") || text.starts_with("<!--") || text.starts_with("<!doctype svg")) && text.contains("<svg")) {
-        return Some("svg");
+    // SVG는 글자 파일이다. 맨 앞의 선언·주석·DOCTYPE을 건너뛴 첫 요소가 <svg이면 SVG로 본다.
+    // (어딘가에 <svg가 보이는 것만으로는 안 된다: 주석으로 시작하고 안에 그림을 넣은 HTML·Markdown, XHTML도 그렇다.)
+    let text = String::from_utf8_lossy(&head[..head.len().min(4096)]).to_ascii_lowercase();
+    is_svg_start(text.trim_start_matches('\u{feff}')).then_some("svg")
+}
+
+fn is_svg_start(text: &str) -> bool {
+    let mut rest = text.trim_start();
+    loop {
+        let close = if rest.starts_with("<?") {
+            "?>"
+        } else if rest.starts_with("<!--") {
+            "-->"
+        } else if rest.starts_with("<!doctype") {
+            // 안에 선언을 적은 DOCTYPE(`<!DOCTYPE svg [ … ]>`)은 `]>`에서 끝난다.
+            if rest.find('[').is_some_and(|open| rest.find('>').is_none_or(|end| open < end)) { "]>" } else { ">" }
+        } else {
+            break;
+        };
+        let Some(end) = rest.find(close) else { return false };
+        rest = rest[end + close.len()..].trim_start();
     }
-    None
+    rest.strip_prefix("<svg").is_some_and(|after| after.is_empty() || after.starts_with(|c: char| c.is_whitespace() || c == '>' || c == '/'))
 }
 
 /// 사이드바에 보일 이름으로 다듬는다(경로 구분자·제어 문자를 빼고 길이를 줄인다).
@@ -363,12 +379,21 @@ fn encode_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, String> {
     Ok(out)
 }
 
+/// 클립보드로 복사할 그림의 픽셀 수 한도.
+const MAX_COPY_PIXELS: u64 = 8192 * 8192;
+
 /// PNG를 풀어 가로·세로와 RGBA 픽셀을 돌려준다.
 fn decode_png(bytes: &[u8]) -> Result<(u32, u32, Vec<u8>), String> {
     let mut decoder = png::Decoder::new(std::io::Cursor::new(bytes));
     // 색상표·16비트·회색조를 8비트 색으로 편다.
     decoder.set_transformations(png::Transformations::EXPAND | png::Transformations::STRIP_16);
     let mut reader = decoder.read_info().map_err(err)?;
+    // 파일은 작아도 픽셀이 아주 많은 PNG가 있다(단색 도표 등). 풀면 가로×세로×4바이트가 한 번에 필요해,
+    // 메모리를 잡지 못하면 앱이 통째로 끝난다. 화면이 줄여 보내는 한도(한 변 8192)를 넘는 것은 받지 않는다.
+    let (width, height) = (reader.info().width as u64, reader.info().height as u64);
+    if width * height > MAX_COPY_PIXELS {
+        return Err(format!("그림이 너무 커서 복사할 수 없습니다({width}×{height})"));
+    }
     let mut buffer = vec![0; reader.output_buffer_size()];
     let frame = reader.next_frame(&mut buffer).map_err(err)?;
     let pixels = &buffer[..frame.buffer_size()];
@@ -465,6 +490,13 @@ mod tests {
         assert_eq!(sniff(b"RIFF\x10\0\0\0WEBPVP8 "), Some("webp"));
         assert_eq!(sniff(b"<?xml version=\"1.0\"?>\n<svg xmlns=\"http://www.w3.org/2000/svg\"/>"), Some("svg"));
         assert_eq!(sniff(b"<svg width=\"1\"/>"), Some("svg"));
+        assert_eq!(sniff("\u{feff}<?xml version=\"1.0\"?>\n<!-- 만든 곳 -->\n<!DOCTYPE svg PUBLIC \"-//W3C//DTD SVG 1.1//EN\" \"x.dtd\">\n<SVG>".as_bytes()), Some("svg"));
+        assert_eq!(sniff(b"<!DOCTYPE svg [ <!ENTITY a \"b\"> ]>\n<svg/>"), Some("svg"));
+        // 주석이나 XML 선언으로 시작해도, 첫 요소가 svg가 아니면 그림이 아니다(안에 그림을 넣은 HTML·Markdown, XHTML).
+        assert_eq!(sniff("<!-- 머리말 -->\n# 문서\n\n<svg width=\"1\"/>".as_bytes()), None);
+        assert_eq!(sniff(b"<?xml version=\"1.0\"?>\n<html><body><svg/></body></html>"), None);
+        assert_eq!(sniff(b"<!-- unclosed <svg>"), None);
+        assert_eq!(sniff(b"<svgfoo>"), None);
         assert_eq!(sniff("그냥 글자".as_bytes()), None);
         assert_eq!(sniff(b"<html><body>svg</body></html>"), None);
     }

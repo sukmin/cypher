@@ -1360,6 +1360,9 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     // 여러 개 고른 것 가운데 하나를 끌지 않고 눌렀다 뗐으면 그 가지만 고른다.
     if (!moved) { if (picked.size > 1) select(node, false); return; }
     if (!node.parent) return;
+    // 끄는 사이에 내용이 통째로 바뀌었으면(같은 워크스페이스의 Claude가 고쳤거나, 밖에서 바뀐 것을 다시 읽었다)
+    // 끌던 가지는 옛 그림의 것이다. 새 그림에 끼워 넣지 않는다.
+    if (![node, ...(moving || [])].every((one) => nodes.includes(one))) return;
     const hit = dropZone(ev);
     if (hit) moveNodes(moving, hit.target, hit.zone, hit.leftOfRoot);
   };
@@ -1863,7 +1866,9 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
       if (codeMode && $codeText.value !== codeApplied
         && !confirm('코드에 오류가 있어 아직 그림에 반영되지 않은 글이 있습니다.\n닫으면 그 글은 사라집니다(마지막으로 올바르던 내용은 30일 동안 보관됩니다). 닫을까요?')) return false;
       await flush();
-      return true;
+      // 마지막 저장이 실패했으면 그대로 닫지 않는다(닫으면 다시 저장하지 않고, 저장소의 옛 내용만 보관된다).
+      return unread || stored === text()
+        || confirm('마인드맵의 마지막으로 고친 내용을 저장하지 못했습니다. 그래도 닫을까요?\n(닫으면 마지막으로 저장된 내용만 30일 동안 보관됩니다)');
     },
     dispose: () => {
       disposed = true;

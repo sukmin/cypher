@@ -341,7 +341,9 @@ export function createImage(item, host, saved = {}, onChange = () => {}) {
 
   /** 그림을 PNG로 바꾼 내용(클립보드에는 PNG로 넣는다). */
   async function pngBytes() {
-    if (image.ext === 'png') return new Uint8Array(await blob.arrayBuffer());
+    // PNG는 그대로 보낸다. 다만 픽셀이 아주 많은 PNG(파일은 작아도 가로·세로가 큰 도표 등)는 풀 때 메모리를 한꺼번에
+    // 많이 쓰므로, 다른 형식처럼 줄여서 보낸다.
+    if (image.ext === 'png' && Math.max(natural.w, natural.h) <= 8192) return new Uint8Array(await blob.arrayBuffer());
     const canvas = document.createElement('canvas');
     // 너무 큰 그림은 줄여서 복사한다(캔버스 한도).
     const ratio = Math.min(1, 8192 / Math.max(natural.w, natural.h));

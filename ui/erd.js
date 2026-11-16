@@ -877,7 +877,13 @@ export function createErd(item, host, saved = {}, onChange = () => {}) {
     if (!unread && $code.value !== base) return; // 여기서 고치는 중인 글은 덮어쓰지 않는다.
     let found = null;
     try { found = await invoke('erd_read', { id }); } catch { return; }
-    if (disposed || found == null) return;
+    if (disposed) return;
+    if (found == null) {
+      // 저장소에 파일이 없다. 처음 읽기에 실패해 저장을 막아 두었던 것이면, 덮어쓸 것이 없으니 저장을 푼다
+      // (풀지 않으면 파일이 영영 생기지 않아, 여기 적은 내용이 한 번도 저장되지 않는다).
+      if (unread) { unread = false; stored = ''; if ($code.value !== stored) scheduleSave(); }
+      return;
+    }
     if (unread) {
       unread = false;
       stored = found;
@@ -1031,7 +1037,12 @@ export function createErd(item, host, saved = {}, onChange = () => {}) {
     setCode: (shown) => showCode(!!shown),
     /** 자동 저장소의 번호(파일 이름). */
     store: () => id,
-    close: async () => { await flush(); return true; },
+    close: async () => {
+      await flush();
+      // 마지막 저장이 실패했으면 그대로 닫지 않는다(닫으면 다시 저장하지 않고, 저장소의 옛 내용만 보관된다).
+      return unread || $code.value === stored
+        || confirm('ERD의 마지막으로 고친 내용을 저장하지 못했습니다. 그래도 닫을까요?\n(닫으면 마지막으로 저장된 내용만 30일 동안 보관됩니다)');
+    },
     dispose: () => {
       disposed = true;
       clearTimeout(saveTimer);

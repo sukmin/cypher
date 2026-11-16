@@ -413,7 +413,8 @@ function setGroupFolder(name, path) {
 
 async function pickGroupFolder(name) {
   const picked = await invoke('pick_folder', { start: groupFolderOf(name) || startFolderHint(), title: `워크스페이스 "${name}"의 세션을 시작할 폴더` });
-  if (picked) setGroupFolder(name, picked);
+  // 고르는 창이 떠 있는 동안에도 앱은 쓸 수 있다. 그사이 그 워크스페이스의 이름이 바뀌거나 지워졌으면 적지 않는다.
+  if (picked && groupList.includes(name)) setGroupFolder(name, picked);
 }
 
 /** 워크스페이스의 폴더 줄의 ▾(또는 경로): 지금 보는 항목의 폴더와 최근에 세션을 시작한 폴더에서 골라 그 워크스페이스의 폴더로 정하거나 푼다. */
@@ -475,18 +476,26 @@ function make(tag, className, text) {
 function ask(title, placeholder = '', value = '') {
   return new Promise((resolve) => {
     const dialog = $('ask'), input = $('ask-input');
+    // 이미 묻고 있는 중이면(이 창이 떠 있어도 창 위쪽의 메뉴는 눌린다) 앞선 물음은 취소로 끝내고 이 창을 넘겨받는다.
+    // 그대로 덮어쓰면 앞선 물음은 영영 답을 받지 못한다.
+    askDone?.(null);
+    askDone = resolve;
     $('ask-title').textContent = title;
     input.value = value;
     input.placeholder = placeholder;
     dialog.returnValue = '';
     dialog.onclose = () => {
+      if (askDone !== resolve) return; // 이 물음은 이미 끝났고, 창은 다른 물음의 것이다.
+      askDone = null;
       resolve(dialog.returnValue === 'ok' ? input.value.trim() : null);
       focusItem(active);
     };
-    dialog.showModal();
+    if (!dialog.open) dialog.showModal();
     input.focus();
   });
 }
+/** 지금 떠 있는 한 줄 입력 창의 답을 받을 곳. */
+let askDone = null;
 
 // ───────────────────────── 세션 ─────────────────────────
 
@@ -579,11 +588,15 @@ async function newSession(profileId, opts = {}) {
 /** 세션의 프로세스를 띄워 터미널에 잇는다. Claude 세션은 이어갈 대화가 있으면 그 대화를 잇는다. */
 async function startProcess(s, worktree = null) {
   const { term } = s;
-  try {
-    const gl = new WebglAddon.WebglAddon();
-    gl.onContextLoss(() => gl.dispose());
-    term.loadAddon(gl);
-  } catch { /* WebGL을 못 쓰면 기본 그리기로 동작한다 */ }
+  // 재개에 실패한 세션은 같은 터미널로 다시 재개해 본다. 그리기 모듈은 한 번만 붙인다.
+  if (!s.webgl) {
+    s.webgl = true;
+    try {
+      const gl = new WebglAddon.WebglAddon();
+      gl.onContextLoss(() => gl.dispose());
+      term.loadAddon(gl);
+    } catch { /* WebGL을 못 쓰면 기본 그리기로 동작한다 */ }
+  }
   fitVisible(); // 띄우기 전에 실제 크기를 재 둔다.
   const channel = new Channel();
   channel.onmessage = (data) => {
@@ -610,6 +623,12 @@ async function startProcess(s, worktree = null) {
     s.ptySize = sizeKey(size);
     syncSize(s);
     flush(s); // 띄우는 동안 눌린 키를 보낸다.
+    // 뜨자마자 끝난 프로그램은 종료 알림이 번호보다 먼저 와 있을 수 있다.
+    if (earlyExits.has(s.id)) {
+      const code = earlyExits.get(s.id);
+      earlyExits.delete(s.id);
+      onExit({ id: s.id, code });
+    }
   } catch (err) {
     if (!sessions.has(s.key)) return;
     term.write(`\x1b[31m세션을 시작하지 못했습니다: ${err}\x1b[0m\r\n`);
@@ -620,16 +639,28 @@ async function startProcess(s, worktree = null) {
 }
 
 /** 쉬는 세션을 재개한다: 프로세스를 띄우고, Claude 세션은 하던 대화를 잇는다. */
-function wake(s) {
+function wake(s, retry = false) {
   if (!s?.dormant || !sessions.has(s.key)) return;
+  // 재개에 실패했던 세션은 사용자가 다시 누를 때만 다시 해 본다(화면 배치가 바뀔 때마다 되풀이하지 않는다).
+  if (s.wakeFailed && !retry) return;
   s.dormant = false;
-  startProcess(s);
+  s.wakeFailed = false;
+  startProcess(s).then(() => {
+    // 재개하지 못했으면(폴더가 든 드라이브가 아직 연결되지 않았다 등) 끝난 세션으로 두지 않고 다시 쉬는 세션으로 둔다.
+    // 끝난 세션은 저장하지 않으므로, 그대로 앱을 끄면 이어 갈 대화가 목록에서 사라진다. 다시 누르면 다시 재개해 본다.
+    if (!sessions.has(s.key) || !s.exited || s.id != null) return;
+    s.exited = false;
+    s.dormant = true;
+    s.wakeFailed = true;
+    render();
+    saveState();
+  });
 }
 
 /** 그 묶음의 쉬는 세션을 모두 재개한다. */
 function wakeGroup(group) {
   const resting = group.list.filter((s) => s.dormant && sessions.has(s.key));
-  for (const s of resting) wake(s);
+  for (const s of resting) wake(s, true);
   if (resting.length) setStatus(`"${group.name}" 워크스페이스의 세션 ${resting.length}개를 재개했습니다.`);
   // 화면이 비어 있으면 그 가운데 첫 세션을 보여 준다.
   if (resting.length && !visible.length) activate(resting[0]);
@@ -679,7 +710,10 @@ async function newItem(kind, opts = {}) {
 
   if (opts.show === 'split' && visible.length < MAX_PANES) placeBeside(s);
   else if (opts.show !== 'hidden') placeInActive(s);
-  layout();
+  // 화면에 놓지 않는 항목(Claude가 놓는 항목 등)은 배치가 바뀌지 않는다. 나란히 보기에서는 배치를 다시 짓지 않는다:
+  // 다시 지으면 모든 창을 떼었다 붙여, 입력하던 창의 초점과 문서 창의 스크롤 자리가 날아간다.
+  // (새 창은 만들 때 이미 보관 칸에 들어가 있다.)
+  if (opts.show !== 'hidden' || visible.length < 2) layout();
   if (opts.show !== 'hidden') activate(s);
   await s.view.ready;
   render();
@@ -795,6 +829,8 @@ function balanced(list, dir = 'row') {
 
 /** 나무대로 창을 배치한다. 화면에 없는 세션의 창은 보이지 않는 보관 칸으로 옮겨 둔다. */
 function layout() {
+  // 창을 떼었다 붙이면 그 안에 있던 초점이 사라진다. 배치를 다시 지은 뒤에 되돌린다.
+  const focused = document.activeElement;
   visible = leavesOf(tree);
   for (const s of sessions.values()) {
     const shown = visible.includes(s);
@@ -827,9 +863,14 @@ function layout() {
       : '왼쪽 위의 [+ 워크스페이스]로 워크스페이스를 만들고, 워크스페이스 머리의 +로 세션이나 항목을 더하세요.';
   syncComposer();
   syncSites(); // 사이트 항목의 웹뷰를 새 창 자리에 맞춘다.
+  if (focused && focused !== document.activeElement && focused !== document.body && $terms.contains(focused)) {
+    focused.focus({ preventScroll: true });
+  }
   requestAnimationFrame(() => {
     fitVisible();
     visible.filter(isTerm).forEach(resyncScroll);
+    // 명령 항목처럼 자기 터미널을 가진 항목도 스크롤 막대를 다시 맞춘다.
+    for (const s of visible) s.view?.resync?.();
   });
   // 쉬는 세션이 화면에 올라왔으면(누르기, 끌어다 놓기, 묶음 나란히 보기) 재개한다.
   for (const s of visible) wake(s);
@@ -916,7 +957,7 @@ function activate(s, { keepFocus = false } = {}) {
     layout();
   }
   active = s;
-  wake(s); // 쉬고 있던 세션이면 여기서 재개한다.
+  wake(s, true); // 쉬고 있던 세션이면 여기서 재개한다.
   s.attention = false;
   s.usedAt = Date.now();
   markRead(s.key); // 이 항목을 열었으니 이 항목이 남긴 알림은 본 것이다.
@@ -991,7 +1032,10 @@ async function closeSession(s, { forget = false } = {}) {
   visible = leavesOf(tree);
   if (active === s) {
     active = null;
-    const next = visible[0] || [...sessions.values()].pop();
+    // 화면에 남은 것이 없으면 다음에 볼 항목을 고른다. 쉬는 세션은 고르지 않는다(고르면 재개된다. 재개는 사용자가
+    // 누른 세션만 한다). 같은 워크스페이스의 것을 먼저 고른다.
+    const awake = [...sessions.values()].filter((other) => !other.dormant);
+    const next = visible[0] || awake.filter((other) => other.group === s.group).pop() || awake.pop();
     if (next) activate(next);
   }
   layout();
@@ -1096,9 +1140,19 @@ function setBroadcast(on) {
 
 const byId = (id) => [...sessions.values()].find((s) => s.id === id);
 
+/**
+ * 누구의 것인지 아직 모르는 종료 알림(번호 → 종료 코드). 세션을 띄우라는 요청의 답(번호)보다 종료 알림이 먼저 닿으면
+ * 그 번호의 세션을 찾지 못한다. 잠깐 받아 두었다가 번호를 받은 쪽이 찾아 쓴다(명령 항목의 종료 알림도 여기를 지나간다).
+ */
+const earlyExits = new Map();
+
 function onExit({ id, code }) {
   const s = byId(id);
-  if (!s) return;
+  if (!s) {
+    earlyExits.set(id, code);
+    setTimeout(() => earlyExits.delete(id), 10000);
+    return;
+  }
   s.exited = true;
   s.agents.clear();
   s.tools.clear();
@@ -2229,7 +2283,8 @@ function initSidebarKeys() {
   });
   $list.addEventListener('keydown', (ev) => {
     if (ev.target !== $list || ev.ctrlKey || ev.altKey) return;
-    const rows = [...$list.querySelectorAll('li[data-key]')].map((li) => sessions.get(Number(li.dataset.key))).filter(Boolean);
+    // 쉬는 세션은 건너뛴다(Ctrl+Tab처럼): 방향키로 지나가기만 해도 재개되면 안 된다. 재개하려면 그 세션을 누른다.
+    const rows = [...$list.querySelectorAll('li[data-key]')].map((li) => sessions.get(Number(li.dataset.key))).filter((s) => s && !s.dormant);
     const at = rows.indexOf(active);
     let next = null;
     if (ev.key === 'ArrowDown') next = rows[at < 0 ? 0 : Math.min(rows.length - 1, at + 1)];
@@ -2388,7 +2443,12 @@ function rename(s) {
 function sessionText(s) {
   const buffer = s.term.buffer.active;
   const lines = [];
-  for (let i = 0; i < buffer.length; i++) lines.push(buffer.getLine(i).translateToString(true));
+  for (let i = 0; i < buffer.length; i++) {
+    const line = buffer.getLine(i);
+    const words = line.translateToString(true);
+    // 터미널 너비를 넘어 접힌 줄은 앞 줄에 이어 붙인다(글을 골라 복사할 때와 같다).
+    if (line.isWrapped && lines.length) lines[lines.length - 1] += words; else lines.push(words);
+  }
   return lines.join('\n').trimEnd();
 }
 
@@ -2700,7 +2760,9 @@ const LATER_NEEDS_GROUP = '이 세션이 워크스페이스에 속해 있지 않
 /** 메모 항목을 만들거나, 있는 메모에 덧붙이거나 통째로 바꾼다. */
 async function memoWrite(s, { item, title, text, replace }) {
   if (item != null) {
-    const target = itemInGroup(s, item, 'memo');
+    let target = itemInGroup(s, item, 'memo');
+    await target.view.ready;
+    target = itemInGroup(s, item, 'memo'); // 기다리는 사이 닫히거나 다른 워크스페이스로 옮겨졌으면 쓰지 않는다.
     const kept = await target.view.write(text, !!replace);
     if (title) target.name = String(title).slice(0, 120);
     saveState();
@@ -2853,7 +2915,9 @@ const fileUrl = (path) => `file:///${path.replace(/\\/g, '/').split('/').map((pa
 /** 두 주소가 같은 파일을 가리키는지(주소에 맞게 바꾼 글자와 대/소문자 차이, 뒤에 붙은 `#자리`·`?값`은 무시). */
 const sameFileUrl = (a, b) => {
   const bare = (url) => url.replace(/[?#].*$/, '');
-  try { return decodeURI(bare(a)).toLowerCase() === decodeURI(bare(b)).toLowerCase(); } catch { return bare(a) === bare(b); }
+  // 글자를 모두 풀어서 견준다. 경로로 만든 주소(fileUrl)는 `&`·`,`·`+` 같은 글자도 %로 바꿔 적지만 웹뷰가 알려 주는
+  // 주소는 그 글자를 그대로 둔다. decodeURI는 이런 글자의 %표기를 풀지 않아 같은 파일을 다르다고 본다.
+  try { return decodeURIComponent(bare(a)).toLowerCase() === decodeURIComponent(bare(b)).toLowerCase(); } catch { return bare(a) === bare(b); }
 };
 /** 경로를 견줄 때 쓰는 모양(구분자와 대/소문자를 맞춘 것). */
 const pathKey = (path) => path.replace(/\//g, '\\').toLowerCase();
@@ -3441,9 +3505,11 @@ function writeState() {
   if (closing || restoring) return; // 창이 닫히는 중의 종료 알림이나, 되살리는 도중의 덜 찬 목록을 적지 않는다.
   if (composerFor && sessions.has(composerFor.key)) composerFor.draft = $('composer-text').value;
   // 쉬는 세션(아직 재개하지 않은 것)도 적어 둔다. 빠뜨리면 다음에 켰을 때 목록에서 사라진다.
-  const live = [...sessions.values()].filter((s) => (isTerm(s) ? s.dormant || (!s.exited && s.id != null) : !!s.view));
+  // 띄우는 중인 세션(번호를 아직 받지 못했다)도 적는다. 재개하는 짧은 사이에 적은 기록에서 빠지면 안 된다.
+  const live = [...sessions.values()].filter((s) => (isTerm(s) ? s.dormant || !s.exited : !!s.view));
   const state = {
-    sessions: live.map((s) => ({ ...describe(s), shown: visible.includes(s) })),
+    // 되살리지 못한 항목의 기록은 그대로 다시 적는다(순번이 배치와 어긋나지 않게 맨 뒤에 둔다).
+    sessions: [...live.map((s) => ({ ...describe(s), shown: visible.includes(s) })), ...unrestored],
     active: live.indexOf(active),
     // 화면 분할 모양. 잎은 세션의 순번({ i }), 가지는 { dir, a, b }.
     layout: (function pack(node) {
@@ -3498,22 +3564,34 @@ function unpack(data, list) {
  * `docsOnly`이면(세션 복원을 꺼 두었거나 바로 시작 모드) 터미널 세션은 되살리지 않고 메모·HTTP 항목만
  * 사이드바에 되살린다. 메모는 사용자가 쓴 글이라, 세션 복원 설정과 무관하게 목록에서 사라지면 안 된다.
  */
+/** 되살리지 못한 항목의 저장 기록. 다음 저장 때 그대로 다시 적는다. */
+let unrestored = [];
+
 async function restore({ docsOnly = false } = {}) {
   docsOnly = docsOnly || !config.session.restore;
   let saved = null;
   try { saved = JSON.parse(localStorage.getItem('cypher.state') || 'null'); } catch { /* 깨진 기록은 버린다 */ }
   if (!saved?.sessions?.length) return;
   const restored = [];
+  unrestored = [];
   // 되살리는 동안에는 상태를 적지 않는다. 도중에 적으면 아직 되살리지 않은 뒤쪽 항목이 기록에서 빠져,
   // 그때 앱이 꺼지면 그 항목(메모 포함)이 목록에서 사라진다.
   restoring = true;
   try {
     for (const item of saved.sessions) {
-      const term = !item.kind || item.kind === 'term';
-      // 터미널 세션은 프로세스를 띄우지 않고 사이드바에만 되살려 둔다(쉬는 세션). 사용자가 누른 것만 재개한다.
-      // 설정의 [session] restore_on_click = false이면 예전처럼 모두 바로 띄운다.
-      const dormant = term && config.session.restore_on_click !== false;
-      restored.push(term && docsOnly ? null : await revive(item, { show: 'hidden', restoring: true, dormant }));
+      // 항목 하나가 되살아나지 못해도(깨진 기록 포함) 뒤의 항목은 되살린다. 여기서 멈추면 뒤의 항목들이 다음 저장 때
+      // 기록에서 사라진다. 되살리지 못한 항목의 기록은 남겨 두었다가 다음에 켤 때 다시 되살려 본다.
+      try {
+        const term = !item.kind || item.kind === 'term';
+        // 터미널 세션은 프로세스를 띄우지 않고 사이드바에만 되살려 둔다(쉬는 세션). 사용자가 누른 것만 재개한다.
+        // 설정의 [session] restore_on_click = false이면 예전처럼 모두 바로 띄운다.
+        const dormant = term && config.session.restore_on_click !== false;
+        restored.push(term && docsOnly ? null : await revive(item, { show: 'hidden', restoring: true, dormant }));
+      } catch (err) {
+        console.error('항목을 되살리지 못했습니다', item, err);
+        restored.push(null);
+        if (item && typeof item === 'object') unrestored.push({ ...item, shown: false });
+      }
     }
   } finally {
     restoring = false;
@@ -3526,10 +3604,13 @@ async function restore({ docsOnly = false } = {}) {
   tree = unpack(saved.layout, alive)
     || balanced(alive.filter((s, index) => s && saved.sessions[index].shown).slice(0, MAX_PANES));
   layout();
-  const target = alive[saved.active] || alive.find(Boolean);
+  // 끌 때 보던 것이 세션이면 지금은 쉬고 있어 고를 수 없다. 그때는 되살린 배치에 있는 것을 고른다
+  // (화면에 없던 항목을 골라 배치에 끼워 넣지 않는다).
+  const target = alive[saved.active] || leavesOf(tree)[0] || alive.find(Boolean);
   if (target) activate(target); else render();
   const resting = restored.filter((s) => s?.dormant).length;
-  if (resting) setStatus(`지난 세션 ${resting}개는 쉬고 있습니다. 사이드바에서 세션을 누르거나 워크스페이스 머리의 ▶를 누르면 재개합니다.`);
+  if (unrestored.length) setStatus(`지난 항목 ${unrestored.length}개를 되살리지 못했습니다. 다음에 켤 때 다시 되살려 봅니다.`);
+  else if (resting) setStatus(`지난 세션 ${resting}개는 쉬고 있습니다. 사이드바에서 세션을 누르거나 워크스페이스 머리의 ▶를 누르면 재개합니다.`);
 }
 
 // ───────────────────────── 입력 ─────────────────────────
@@ -3695,6 +3776,8 @@ function wireTerminal(s) {
   // 오른쪽 클릭: 선택 영역이 있으면 복사, 없으면 붙여넣기.
   s.pane.addEventListener('contextmenu', (ev) => {
     ev.preventDefault();
+    // 터미널 영역에서만 한다. 나란히 보기의 창 제목 줄을 오른쪽 클릭했다고 클립보드를 붙여넣으면 안 된다.
+    if (ev.target.closest('.pane-head')) return;
     if (term.hasSelection()) copy(s); else paste(s, false);
   });
 

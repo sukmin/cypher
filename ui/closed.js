@@ -50,8 +50,21 @@ function when(at) {
   return `${two(d.getMonth() + 1)}/${two(d.getDate())} ${two(d.getHours())}:${two(d.getMinutes())}`;
 }
 
+/** 되살리고 있는 기록들. 되살리기가 끝나기 전에 같은 기록을 또 되살리면 같은 저장 내용을 가리키는 항목이 둘 생긴다. */
+const reopening = new Set();
+
 /** 목록의 그 항목을 되살린다. 되살린 항목을 돌려준다(못 했으면 null). */
 async function reopen(record) {
+  if (reopening.has(record.ref)) return null;
+  reopening.add(record.ref);
+  try {
+    return await reopenOnce(record);
+  } finally {
+    reopening.delete(record.ref);
+  }
+}
+
+async function reopenOnce(record) {
   const { invoke, setStatus, notice } = api;
   const stored = STORED[record.kind]?.(record.saved || {});
   if (stored) {

@@ -83,9 +83,17 @@ pub fn log(text: &str) {
     }
 }
 
-/// 예전 실행이 남긴 연결 설정 파일(`claude-settings-<번호>.json`, `mcp-<번호>.json`)을 치운다.
+/// 연결 설정 파일의 이름(`claude-settings-<프로세스 번호>-<세션>.json`, `mcp-<프로세스 번호>-<세션>.json`)에서
+/// 그 파일을 만든 Cypher의 프로세스 번호를 읽는다. 그런 이름이 아니면 None.
+fn settings_owner(name: &str) -> Option<u32> {
+    let rest = name.strip_prefix("claude-settings-").or_else(|| name.strip_prefix("mcp-"))?.strip_suffix(".json")?;
+    rest.split('-').next()?.parse().ok()
+}
+
+/// 예전 실행이 남긴 연결 설정 파일(`claude-settings-<번호>-<세션>.json`, `mcp-<번호>-<세션>.json`)을 치운다.
 /// 실행마다 파일을 따로 쓰는 것은 여러 창을 동시에 띄워도 서로의 접속 정보를 덮어쓰지 않게 하려는 것이다.
-/// 다른 창이 아직 쓰고 있을 수 있으므로 이틀 넘은 것만 지운다.
+/// 다른 창이 아직 쓰고 있을 수 있으므로 이틀 넘은 것만 지우고, 만든 프로세스가 아직 돌고 있는 것은 두지 않는다:
+/// 파일은 세션을 열 때 한 번만 쓰이므로, 며칠째 떠 있는 창의 세션 파일도 고친 시각은 오래된 것이다.
 fn clean_old_settings() {
     let Some(entries) = data_dir().and_then(|dir| std::fs::read_dir(dir).ok()) else { return };
     let limit = std::time::Duration::from_secs(2 * 24 * 60 * 60);
@@ -98,7 +106,8 @@ fn clean_old_settings() {
             .ok()
             .and_then(|t| std::time::SystemTime::now().duration_since(t).ok())
             .is_some_and(|age| age > limit);
-        if ours && old {
+        let in_use = settings_owner(&name).is_some_and(peer::is_running);
+        if ours && old && !in_use {
             let _ = std::fs::remove_file(entry.path());
         }
     }
@@ -449,5 +458,18 @@ mod tests {
         }
         // 한글·숫자·점·밑줄·붙임표뿐인 경로는 그대로 쓴다.
         assert_eq!(bridge_command(Path::new(r"D:\도구_v1.2-b\cypher-bridge.exe")), "D:/도구_v1.2-b/cypher-bridge.exe");
+    }
+
+    #[test]
+    fn 연결_설정_파일의_주인을_이름에서_읽는다() {
+        assert_eq!(settings_owner("claude-settings-18024-3.json"), Some(18024));
+        assert_eq!(settings_owner("mcp-18024-12.json"), Some(18024));
+        assert_eq!(settings_owner("claude-settings-4321.json"), Some(4321)); // 예전 이름
+        for other in ["mcp.json", "claude-settings-x-1.json", "cypher.log", "mcp-18024-3.txt"] {
+            assert_eq!(settings_owner(other), None, "{other}");
+        }
+        // 돌고 있는 창의 파일은 오래됐어도 치우지 않는다.
+        assert!(peer::is_running(std::process::id()));
+        assert!(!peer::is_running(0xffff_fff0));
     }
 }

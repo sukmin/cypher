@@ -31,7 +31,12 @@ fn forward_status() {
         return;
     }
     if let Some((mut stream, token)) = connect() {
-        if write!(stream, "{token}\n{session}\n{input}").is_ok() {
+        // 본체가 접속만 받고 읽지 못하는 동안에는 큰 신호(Write·Read 도구의 신호에는 파일 내용이 든다)의 쓰기가
+        // 끝없이 막힌다. 쓰기에도 시간 제한을 걸어 Claude Code를 오래 붙잡지 않는다.
+        let _ = stream.set_write_timeout(Some(ACK_WAIT));
+        // 한 덩어리로 만들어 한 번에 보낸다(`write!`는 조각마다 따로 보낸다).
+        let message = format!("{token}\n{session}\n{input}");
+        if stream.write_all(message.as_bytes()).is_ok() {
             // 다 보냈다고 알리고, 본체가 처리한 뒤 연결을 닫을 때까지 잠깐 기다린다. 이렇게 해야
             // (1) 본체가 이 프로세스가 살아 있는 동안 누가 보낸 것인지 확인할 수 있고,
             // (2) 쓰기 직전 신호라면 본체가 "그 파일이 아직 없다"는 것을 Claude Code가 쓰기 전에 본다.

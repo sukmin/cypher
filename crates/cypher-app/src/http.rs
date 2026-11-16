@@ -109,6 +109,13 @@ fn dirs(cwd: &Path) -> [PathBuf; 3] {
     [home_dir(cwd), cwd.join("http"), cwd.to_path_buf()]
 }
 
+/// 요청 파일의 이름인지: 확장자가 `.http`이고 기록 파일이 아니다. Windows의 파일 이름처럼 대소문자를 가리지 않는다
+/// (`API.HTTP`도 요청 파일이고, `History.http`는 기록 파일과 같은 파일이다).
+fn is_request_name(path: &Path) -> bool {
+    path.extension().is_some_and(|e| e.eq_ignore_ascii_case("http"))
+        && path.file_name().is_some_and(|n| !n.eq_ignore_ascii_case(HISTORY))
+}
+
 /// 폴더에서 요청 파일을 찾는다(기록 파일은 뺀다).
 fn find_files(cwd: &Path) -> Vec<PathBuf> {
     let mut found = Vec::new();
@@ -117,8 +124,7 @@ fn find_files(cwd: &Path) -> Vec<PathBuf> {
         let mut files: Vec<PathBuf> = entries
             .flatten()
             .map(|e| e.path())
-            .filter(|p| p.is_file() && p.extension().is_some_and(|e| e == "http"))
-            .filter(|p| p.file_name().is_some_and(|n| n != HISTORY))
+            .filter(|p| p.is_file() && is_request_name(p))
             .collect();
         files.sort();
         found.extend(files);
@@ -191,7 +197,25 @@ fn wire_headers(request: &HttpRequest) -> Vec<(String, String)> {
     if !has_header(&headers, "Accept") {
         headers.push(("Accept".into(), "*/*".into()));
     }
-    headers
+    merge_repeated(headers)
+}
+
+/// 같은 이름의 헤더가 여러 줄이면 한 줄로 합친다(값을 `, `로 잇는다. Cookie는 `; `).
+/// 전송 계층은 같은 이름의 헤더를 마지막 것만 남기고 버리므로(`X-`로 시작하는 것만 예외), 합쳐 두어야
+/// 적은 값이 모두 나가고 화면의 요청 원문과도 같아진다.
+fn merge_repeated(headers: Vec<(String, String)>) -> Vec<(String, String)> {
+    let mut merged: Vec<(String, String)> = Vec::with_capacity(headers.len());
+    for (key, value) in headers {
+        let kept = key.starts_with("x-") || key.starts_with("X-");
+        match merged.iter_mut().find(|(name, _)| !kept && *name == key) {
+            Some((_, joined)) => {
+                joined.push_str(if key.eq_ignore_ascii_case("cookie") { "; " } else { ", " });
+                joined.push_str(&value);
+            }
+            None => merged.push((key, value)),
+        }
+    }
+    merged
 }
 
 /// 보낸 요청을 HTTP 원문 모양으로 적는다. Host·Accept-Encoding·Content-Length는 전송 계층이 붙이는 값이다.
@@ -216,7 +240,7 @@ fn raw_request(request: &HttpRequest, headers: &[(String, String)]) -> String {
     if !has_header(headers, "Accept-Encoding") {
         lines.push("Accept-Encoding: gzip".into());
     }
-    if !request.body.is_empty() && !has_header(headers, "Content-Length") {
+    if (!request.body.is_empty() || sends_length(&request.method)) && !has_header(headers, "Content-Length") {
         lines.push(format!("Content-Length: {}", request.body.len()));
     }
     lines.push(String::new());
@@ -257,6 +281,12 @@ fn body_text(mut bytes: Vec<u8>, truncated: bool) -> String {
         .unwrap_or_else(|| format!("(글자가 아닌 데이터 {}바이트)", other.len()))
 }
 
+/// 본문이 없어도 `Content-Length: 0`을 보내야 하는 메서드인지. 본문을 받는 메서드에 길이가 없으면
+/// `411 Length Required`로 거절하는 서버(IIS 등)가 있다.
+fn sends_length(method: &str) -> bool {
+    ["POST", "PUT", "PATCH"].iter().any(|m| method.eq_ignore_ascii_case(m))
+}
+
 /// 요청을 보내고 응답을 받는다. 4xx·5xx도 오류가 아니라 응답으로 돌려준다.
 fn send(request: &HttpRequest, headers: &[(String, String)]) -> Result<Sent, String> {
     let agent = ureq::AgentBuilder::new().timeout(Duration::from_secs(60)).redirects(5).build();
@@ -265,7 +295,13 @@ fn send(request: &HttpRequest, headers: &[(String, String)]) -> Result<Sent, Str
         call = call.set(key, value);
     }
     let started = Instant::now();
-    let result = if request.body.is_empty() { call.call() } else { call.send_string(&request.body) };
+    let result = if !request.body.is_empty() {
+        call.send_string(&request.body)
+    } else if sends_length(&request.method) {
+        call.send_bytes(&[]) // 길이를 아는 빈 본문: `Content-Length: 0`이 나간다.
+    } else {
+        call.call()
+    };
     let response = match result {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,
         Err(e) => return Err(format!("요청을 보내지 못했습니다: {e}")),
@@ -357,12 +393,64 @@ fn exclude_locally(dir: &Path) {
         .and_then(|mut file| file.write_all(format!("{gap}{rule}\n").as_bytes()));
 }
 
-/// 보기 좋게: JSON이면 들여쓴다.
+/// 보기 좋게: JSON(객체·배열)이면 들여쓴다. 값으로 풀었다가 다시 적지 않고 글자만 옮긴다. 다시 적으면 키가 이름순으로
+/// 바뀌고 숫자 표기가 달라져(`1.10` → `1.1`, 큰 정수 → 지수 표기) 서버가 준 것과 다른 글이 된다.
 fn pretty(body: &str) -> String {
-    match serde_json::from_str::<Value>(body) {
-        Ok(value) if value.is_object() || value.is_array() => serde_json::to_string_pretty(&value).unwrap_or_else(|_| body.to_string()),
-        _ => body.to_string(),
+    let json = body.trim();
+    let shaped = json.starts_with('{') || json.starts_with('[');
+    if !shaped || serde_json::from_str::<serde::de::IgnoredAny>(json).is_err() {
+        return body.to_string();
     }
+    let mut out = String::with_capacity(json.len() + json.len() / 2);
+    let line = |out: &mut String, depth: usize| {
+        out.push('\n');
+        out.extend(std::iter::repeat_n("  ", depth));
+    };
+    let (mut depth, mut quoted, mut escaped) = (0usize, false, false);
+    let mut chars = json.chars().peekable();
+    while let Some(c) = chars.next() {
+        if quoted {
+            out.push(c);
+            match c {
+                _ if escaped => escaped = false,
+                '\\' => escaped = true,
+                '"' => quoted = false,
+                _ => {}
+            }
+            continue;
+        }
+        match c {
+            '"' => {
+                quoted = true;
+                out.push(c);
+            }
+            '{' | '[' => {
+                out.push(c);
+                while chars.next_if(|next| next.is_ascii_whitespace()).is_some() {}
+                // 빈 객체·배열은 한 줄로 둔다.
+                match chars.next_if(|&next| next == '}' || next == ']') {
+                    Some(close) => out.push(close),
+                    None => {
+                        depth += 1;
+                        line(&mut out, depth);
+                    }
+                }
+            }
+            '}' | ']' => {
+                depth = depth.saturating_sub(1);
+                line(&mut out, depth);
+                out.push(c);
+            }
+            ',' => {
+                out.push(c);
+                line(&mut out, depth);
+            }
+            ':' => out.push_str(": "),
+            _ if c.is_ascii_whitespace() => {}
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// 요청 파일에서 이름(또는 1부터 센 번호)으로 고른 요청을 실행하고 기록한다.
@@ -441,14 +529,13 @@ fn save_target(cwd: &Path, file: Option<&str>, name: Option<&str>) -> Result<Pat
         let path = PathBuf::from(file);
         // 폴더는 글자가 아니라 경로 마디로 견준다. `..`가 낀 경로는 요청 폴더 "바로 아래"가 되지 못해 걸러진다.
         let inside = dirs(cwd).iter().any(|dir| path.parent() == Some(dir));
-        let named = path.extension().is_some_and(|e| e == "http")
-            && path.file_name().is_some_and(|n| !n.to_string_lossy().eq_ignore_ascii_case(HISTORY));
+        let named = is_request_name(&path);
         let free = path.is_file() || !path.exists(); // 같은 이름의 폴더 등은 안 된다.
         return if inside && named && free { Ok(path) } else { Err("이 폴더의 요청 파일이 아닙니다".into()) };
     }
     let stem = name.unwrap_or("requests").trim().trim_end_matches(".http");
     let valid = !stem.is_empty()
-        && stem != "history"
+        && !stem.eq_ignore_ascii_case("history")
         && !stem.starts_with('.')
         && stem.chars().all(|c| c.is_alphanumeric() || matches!(c, '-' | '_' | '.' | ' '));
     if !valid {
@@ -842,10 +929,59 @@ mod tests {
         assert!(save_target(cwd, Some(r"C:\Windows\win.ini"), None).is_err());
         assert_eq!(save_target(cwd, None, Some("결제 API")).unwrap(), dir.join("결제 API.http"));
         assert_eq!(save_target(cwd, None, None).unwrap(), dir.join("requests.http"));
-        for bad in ["history", "..\\밖", ".숨김", "a/b", ""] {
+        for bad in ["history", "History", "..\\밖", ".숨김", "a/b", ""] {
             assert!(save_target(cwd, None, Some(bad)).is_err(), "{bad}");
         }
         assert!(readable(cwd, &file) && readable(cwd, &dir.join(HISTORY)));
         assert!(!readable(cwd, Path::new(r"C:\Windows\win.ini")));
+    }
+
+    #[test]
+    fn 요청_파일_이름은_대소문자를_가리지_않는다() {
+        for (name, expected) in [("a.http", true), ("API.HTTP", true), ("history.http", false), ("History.HTTP", false), ("a.rest", false), ("http", false)] {
+            assert_eq!(is_request_name(Path::new(name)), expected, "{name}");
+        }
+    }
+
+    #[test]
+    fn json은_순서와_숫자_표기를_그대로_두고_들여쓴다() {
+        let body = r#" {"b":1.10,"a":[1e2, 12345678901234567890123, {}, [ ]],"글 \"{,:}\\":"a, b: c","빈":{ }} "#;
+        let expected = "{\n  \"b\": 1.10,\n  \"a\": [\n    1e2,\n    12345678901234567890123,\n    {},\n    []\n  ],\n  \"글 \\\"{,:}\\\\\": \"a, b: c\",\n  \"빈\": {}\n}";
+        assert_eq!(pretty(body), expected);
+        assert_eq!(pretty(expected), expected); // 이미 들여쓴 것은 그대로다.
+        assert_eq!(pretty("[]"), "[]");
+        // JSON이 아니거나 객체·배열이 아니면 손대지 않는다.
+        for plain in ["{\"a\":", "<html>{}</html>", "\"글\"", "12", "", "{\"a\":1} 꼬리"] {
+            assert_eq!(pretty(plain), plain);
+        }
+    }
+
+    #[test]
+    fn 같은_이름의_헤더는_한_줄로_합친다() {
+        let pair = |key: &str, value: &str| (key.to_string(), value.to_string());
+        let merged = merge_repeated(vec![
+            pair("Accept", "text/html"),
+            pair("Cookie", "a=1"),
+            pair("X-Tag", "1"),
+            pair("Accept", "application/json"),
+            pair("Cookie", "b=2"),
+            pair("X-Tag", "2"),
+        ]);
+        assert_eq!(
+            merged,
+            vec![pair("Accept", "text/html, application/json"), pair("Cookie", "a=1; b=2"), pair("X-Tag", "1"), pair("X-Tag", "2")]
+        );
+    }
+
+    #[test]
+    fn 본문_없는_post도_길이를_보낸다() {
+        assert!(sends_length("POST") && sends_length("put") && sends_length("Patch"));
+        assert!(!sends_length("GET") && !sends_length("DELETE"));
+        let (port, server) = echo_server();
+        let request = http::parse(&format!("POST http://127.0.0.1:{port}/logout\n")).remove(0);
+        let headers = wire_headers(&request);
+        assert!(raw_request(&request, &headers).contains("Content-Length: 0"));
+        send(&request, &headers).unwrap();
+        assert!(server.join().unwrap().to_ascii_lowercase().contains("content-length: 0"));
     }
 }

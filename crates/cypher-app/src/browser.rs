@@ -42,6 +42,21 @@ fn names_local_file(text: &str) -> bool {
     drive || text.to_ascii_lowercase().starts_with("file:")
 }
 
+/// 글 전체를 감싼 따옴표 한 쌍(`"…"`, `'…'`)을 뗀다.
+fn unquoted(text: &str) -> &str {
+    ['"', '\'']
+        .iter()
+        .find_map(|&quote| text.strip_prefix(quote)?.strip_suffix(quote))
+        .map_or(text, str::trim)
+}
+
+/// Git Bash식 전체 경로(`/c/work/a.html`)를 Windows 경로(`C:\work\a.html`)로 바꾼다. 그런 모양이 아니면 None.
+fn git_bash_path(text: &str) -> Option<String> {
+    let bytes = text.as_bytes();
+    let shaped = bytes.len() > 3 && bytes[0] == b'/' && bytes[1].is_ascii_alphabetic() && bytes[2] == b'/';
+    shaped.then(|| format!("{}:\\{}", (bytes[1] as char).to_ascii_uppercase(), text[3..].replace('/', "\\")))
+}
+
 /// 이 컴퓨터의 파일을 가리키는 글을 그 파일의 주소로 바꾼다. 실제로 있는 HTML 파일만 연다.
 fn local_html(text: &str) -> Result<Url, String> {
     let refused = || format!("이 컴퓨터의 파일은 HTML 파일(.html)만 열 수 있습니다. 파일이 없거나 HTML이 아닙니다: {text}");
@@ -60,7 +75,8 @@ fn local_html(text: &str) -> Result<Url, String> {
 /// 주소창에 친 글자를 실제 주소로 바꾼다. http/https, 그리고 이 컴퓨터에 있는 HTML 파일만 연다.
 /// 주소처럼 생기지 않은 글자는 검색어로 본다.
 pub fn normalize_url(input: &str) -> Result<Url, String> {
-    let text = input.trim();
+    // 탐색기의 "경로로 복사"는 경로를 큰따옴표로 감싼다. 감싼 따옴표는 떼고 본다.
+    let text = unquoted(input.trim());
     let lower = text.to_ascii_lowercase();
     if text.is_empty() || lower == "about:blank" {
         return Url::parse("about:blank").map_err(err);
@@ -68,6 +84,17 @@ pub fn normalize_url(input: &str) -> Result<Url, String> {
     // 이 컴퓨터의 파일을 가리키는 글은 열 수 없어도 검색어로 넘기지 않는다(경로가 검색 사이트로 나간다).
     if names_local_file(text) {
         return local_html(text);
+    }
+    // Git Bash식 경로(`/c/work/a.html`). Claude가 명령 출력에서 본 경로를 그대로 줄 때가 있다.
+    if let Some(path) = git_bash_path(text) {
+        return local_html(&path);
+    }
+    // 네트워크 경로와, 전체 경로가 아닌 HTML 파일 경로도 검색어나 웹 주소로 넘기지 않는다.
+    if text.starts_with("\\\\") || text.starts_with("//") {
+        return Err(format!("네트워크 경로의 파일은 열지 않습니다: {text}"));
+    }
+    if text.contains('\\') && (lower.ends_with(".html") || lower.ends_with(".htm")) {
+        return Err(format!("이 컴퓨터의 HTML 파일은 전체 경로(예: C:\\work\\report.html)로 적어야 엽니다: {text}"));
     }
     if lower.starts_with("http://") || lower.starts_with("https://") {
         return Url::parse(text).map_err(|_| format!("올바르지 않은 주소입니다: {text}"));
@@ -561,6 +588,23 @@ fn wait_loaded(target: &Target) {
     let _ = eval(target, CLEAR_LEAVING_JS);
 }
 
+/// 도구가 방금 만든 웹뷰가 저장된 주소로 넘어갈 때까지(최대 6초) 기다린다.
+/// 뜨자마자는 빈 문서(about:blank)이고 그 문서는 "다 읽힘" 상태라서, 바로 읽으면 빈 페이지가 읽힌다.
+fn wait_first_page(target: &Target, stored: &str) {
+    let stored = stored.trim();
+    if stored.is_empty() || stored.eq_ignore_ascii_case("about:blank") || normalize_url(stored).is_err() {
+        return; // 빈 페이지로 만든 웹뷰다.
+    }
+    let deadline = Instant::now() + Duration::from_secs(6);
+    while Instant::now() < deadline {
+        let arrived = eval(target, "location.href").is_ok_and(|href| href.as_str().is_some_and(|href| href != "about:blank"));
+        if arrived {
+            return;
+        }
+        thread::sleep(Duration::from_millis(100));
+    }
+}
+
 fn text(content: impl Into<String>) -> Vec<Value> {
     vec![json!({ "type": "text", "text": content.into() })]
 }
@@ -583,7 +627,9 @@ const SNAPSHOT_JS: &str = r#"(() => {
   const els = [...document.querySelectorAll(selector)].filter(visible).slice(0, 300);
   window.__cypherRefs = els;
   // SVG 안의 요소는 속성이 글자가 아니라 객체(SVGAnimatedString)이거나 아예 없다(href, innerText 등). 글자일 때만 쓴다.
-  const clean = (s) => (typeof s === 'string' ? s : '').trim().replace(/\s+/g, ' ').slice(0, 80);
+  // 길이를 자르면 이모지 같은 두 단위 글자가 반으로 잘릴 수 있다. 짝 없는 반쪽은 JSON으로 옮길 수 없어 답 전체를
+  // 읽지 못하게 되므로, 자른 끝에 남은 앞쪽 반쪽은 뗀다.
+  const clean = (s) => (typeof s === 'string' ? s : '').trim().replace(/\s+/g, ' ').slice(0, 80).replace(/[\uD800-\uDBFF]$/, '');
   const link = (el) => (typeof el.href === 'string' ? el.href : (el.href?.baseVal || el.getAttribute('href') || ''));
   const items = els.map((el, i) => {
     const tag = el.tagName.toLowerCase();
@@ -710,6 +756,10 @@ fn press_key(target: &Target, name: &str) -> Result<(), String> {
 fn tool_type(target: &Target, args: &Value) -> ToolResult {
     wait_loaded(target);
     let typed = args["text"].as_str().ok_or("text가 필요합니다")?;
+    // ref를 주었는데 번호가 아니면(글자, 음수 등) 지금 초점이 있는 엉뚱한 칸에 입력하지 않고 오류로 끝낸다.
+    if !args["ref"].is_null() && args["ref"].as_u64().is_none() {
+        return Err(format!("ref는 browser_read가 알려 준 요소 번호(0 이상의 정수)여야 합니다(받은 값: {})", args["ref"]));
+    }
     if let Some(reference) = args["ref"].as_u64() {
         // 요소를 실제로 눌러 초점을 준 뒤, 들어 있던 내용을 전부 고른다(새 글자로 바뀌게).
         let (x, y) = element_center(target, reference)?;
@@ -969,9 +1019,18 @@ pub fn call(app: &AppHandle, session: Option<u32>, name: &str, args: &Value) -> 
         plan_dialog(&dialogs, args)?
     } else {
         // 그 사이트 항목의 워크스페이스가 쓰는 프로필로 웹뷰를 만든다(화면이 알려 준다).
-        let webview = crate::site::ensure(app, id, found["url"].as_str().unwrap_or("about:blank"), profile)?;
+        let stored = found["url"].as_str().unwrap_or("about:blank");
+        let fresh = !crate::site::is_open(app, id);
+        let webview = crate::site::ensure(app, id, stored, profile)?;
         // 방금 받은 그 웹뷰만 조작한다(이름으로 다시 찾으면, 그사이 항목이 옮겨져 다시 만들어진 다른 프로필의 웹뷰일 수 있다).
-        crate::site::with_shown_on(&webview, |webview| operate(&Target::Site(Box::new(webview.clone())), &dialogs, name, args))?
+        crate::site::with_shown_on(&webview, |webview| {
+            let target = Target::Site(Box::new(webview.clone()));
+            // 다른 주소로 가라는 요청이면 저장된 주소를 기다릴 까닭이 없다.
+            if fresh && name != "browser_navigate" {
+                wait_first_page(&target, stored);
+            }
+            operate(&target, &dialogs, name, args)
+        })?
     };
     if let Some(note) = found["note"].as_str().filter(|note| !note.is_empty()) {
         content.push(json!({ "type": "text", "text": note }));
@@ -1004,11 +1063,20 @@ mod tests {
         let expected = Url::from_file_path(&page).unwrap();
         // 전체 경로(구분자 둘 다)와 file: 주소를 받는다.
         let path = page.to_string_lossy().into_owned();
-        for input in [path.clone(), path.replace('\\', "/"), expected.to_string()] {
+        // 따옴표로 감싼 경로(탐색기의 "경로로 복사")와 Git Bash식 경로도 받는다.
+        let bash = format!("/{}/{}", path[..1].to_ascii_lowercase(), path[3..].replace('\\', "/"));
+        for input in [path.clone(), path.replace('\\', "/"), expected.to_string(), format!("\"{path}\""), format!(" '{path}' "), bash] {
             let url = normalize_url(&input).unwrap();
             assert_eq!(url, expected, "{input}");
             assert!(is_local_html(&url));
         }
+        // 네트워크 경로, 전체 경로가 아닌 HTML 경로, 따옴표로 감싼 없는 파일도 검색어·웹 주소로 넘기지 않는다.
+        for input in [r"\\nas\team\결과 보고서.html", r"\\nas\team\a.html", "//nas/team/a.html", r"docs\결과 보고서.html", r#""C:\없는 폴더\a.html""#, "/c/없는 폴더/a.html"] {
+            assert!(normalize_url(input).is_err(), "{input}");
+        }
+        // 역슬래시가 든 검색어는 그대로 검색한다.
+        assert_eq!(normalize_url(r"정규식 \d+ 뜻").unwrap().host_str(), Some("www.google.com"));
+        assert_eq!(normalize_url("\"따옴표로 감싼 검색어\"").unwrap().host_str(), Some("www.google.com"));
         // 없는 파일, HTML이 아닌 파일, 네트워크 경로는 열지 않는다. 검색어로 넘기지도 않는다(경로가 밖으로 나간다).
         let other = dir.join("notes.txt").to_string_lossy().into_owned();
         let missing = dir.join("없는 파일.html").to_string_lossy().into_owned();

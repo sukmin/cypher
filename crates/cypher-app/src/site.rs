@@ -109,6 +109,11 @@ pub fn adopt_data_folder_override(app: &AppHandle) {
     }
 }
 
+/// 시작할 때 환경 변수로 받은 본창의 저장소 폴더(`adopt_data_folder_override`가 거두어 둔 것). 평소에는 None.
+pub fn data_folder_override() -> Option<PathBuf> {
+    SHARED_DIR.lock().unwrap().clone()
+}
+
 fn place_of(id: u32) -> Option<Place> {
     PLACES.lock().unwrap().get(&id).copied()
 }
@@ -273,7 +278,15 @@ fn create(app: &AppHandle, id: u32, url: &str, place: Option<Place>, profile: &s
 /// Claude의 브라우저 도구가 쓴다: 그 사이트 항목의 웹뷰가 없으면 화면에 보이지 않는 채로(그 워크스페이스의 프로필로) 만든다.
 /// 그 사이에 항목이 다른 워크스페이스로 옮겨져 프로필이 달라졌으면 거절한다.
 pub fn ensure(app: &AppHandle, id: u32, url: &str, profile: &str) -> Result<tauri::Webview, String> {
+    // 저장된 주소를 열 수 없으면(가리키던 HTML 파일이 지워졌거나 옮겨졌다) 빈 페이지로 만든다. 여기서 오류로 끝내면
+    // 다른 주소로 가라는 요청(browser_navigate)까지 막혀, 그 워크스페이스에서 브라우저 도구를 쓸 수 없게 된다.
+    let url = if crate::browser::normalize_url(url).is_ok() { url } else { "about:blank" };
     create(app, id, url, None, profile)
+}
+
+/// 그 사이트 항목의 웹뷰가 이미 만들어져 있는지.
+pub fn is_open(app: &AppHandle, id: u32) -> bool {
+    app.get_webview(&label(id)).is_some()
 }
 
 /// 사이트를 조작하는 동안 웹뷰가 화면을 그리게 한다. 화면에 없는 사이트는 창 밖 자리에 잠깐 꺼내 놓았다가

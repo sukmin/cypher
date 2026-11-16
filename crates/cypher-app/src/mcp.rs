@@ -270,7 +270,12 @@ fn workspace_call(app: &AppHandle, session: Option<u32>, name: &str, args: &Valu
         "image_add" => local_file(args["path"].as_str()).and_then(|path| {
             // 그림을 저장소로 복사해 넣고, 사이드바에 놓는 일은 화면이 한다.
             let stored = crate::image::import(&path)?;
-            ask("image_add", json!({ "session": session, "stored": stored, "title": args["title"] }))
+            let placed = ask("image_add", json!({ "session": session, "stored": stored, "title": args["title"] }));
+            // 화면이 놓지 못했으면(거절, 시간 초과) 복사해 둔 그림을 치운다. 두면 주인 없는 파일로 남는다.
+            if placed.is_err() {
+                let _ = std::fs::remove_file(&stored.path);
+            }
+            placed
         }),
         "doc_show" => local_file(args["path"].as_str()).and_then(|path| {
             ask("doc_show", json!({ "session": session, "path": path.to_string_lossy(), "title": args["title"] }))

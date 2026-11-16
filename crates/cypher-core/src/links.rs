@@ -52,7 +52,8 @@ static TOKEN: LazyLock<Regex> = LazyLock::new(|| {
     .unwrap()
 });
 static EXT: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"[^.\\/]\.[A-Za-z0-9_]{1,10}$").unwrap());
-static GITBASH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/([A-Za-z])(?:/(.*))?$").unwrap());
+// 드라이브 글자 뒤에 `/`가 있어야 한다. `/c`만으로는 명령 옵션(`cmd /c`, `cd /d`)과 가릴 수 없다.
+static GITBASH: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"^/([A-Za-z])/(.*)$").unwrap());
 
 /// 한 줄에서 링크를 모두 찾는다. 상대경로는 `cwd` 기준으로 해석한다.
 pub fn detect(text: &str, cwd: &Path) -> Vec<LinkSpan> {
@@ -158,8 +159,17 @@ pub fn is_launch_blocked(path: &Path) -> bool {
         "wsh", "msi", "msp", "lnk", "url", "hta", "cpl", "reg", "jar", "py", "pyw", "appref-ms",
         "msc", "dll", "sh",
     ];
-    match path.extension().and_then(|e| e.to_str()) {
-        Some(ext) => BLOCKED.contains(&ext.to_ascii_lowercase().as_str()),
+    let Some(name) = path.file_name() else { return false };
+    let name = name.to_string_lossy();
+    // Windows는 이름 끝의 마침표와 공백을 떼고 연다: `setup.bat.`과 `setup.bat `은 `setup.bat`이다.
+    // 적힌 글자 그대로의 확장자만 보면 이런 이름이 판정을 빠져나간다.
+    let name = name.trim_end_matches(['.', ' ']);
+    // `이름:스트림` 꼴(`x.bat::$DATA`)은 무엇이 열릴지 이름으로 알 수 없으므로 열지 않는다.
+    if name.contains(':') {
+        return true;
+    }
+    match name.rsplit_once('.') {
+        Some((_, ext)) => BLOCKED.contains(&ext.to_ascii_lowercase().as_str()),
         None => false,
     }
 }
@@ -465,5 +475,23 @@ mod tests {
         assert_eq!(classify("src", &cwd), Some(Target::Dir(cwd.join("src"))));
         assert!(is_launch_blocked(Path::new("a\\b.PS1")));
         assert!(!is_launch_blocked(Path::new("a\\b.png")));
+        // Windows가 같은 파일로 여는 이름들: 끝의 마침표·공백, 스트림 이름.
+        for sneaky in ["a\\setup.bat.", "a\\setup.bat ", "a\\setup.cmd. .", "a\\x.bat::$DATA", "a\\글.txt:숨은.exe", "a\\.bat"] {
+            assert!(is_launch_blocked(Path::new(sneaky)), "{sneaky}");
+        }
+        for plain in ["a\\글.txt.", "a\\README", "a\\v1.2.md", "C:\\a\\b.png"] {
+            assert!(!is_launch_blocked(Path::new(plain)), "{plain}");
+        }
+    }
+
+    #[test]
+    fn 명령_옵션은_드라이브_경로가_아니다() {
+        // `/c`, `/d`만으로는 Git Bash식 드라이브 경로로 보지 않는다(`cmd /c dir`, `cd /d …`).
+        assert!(GITBASH.captures("/c").is_none() && GITBASH.captures("/d").is_none());
+        assert_eq!(GITBASH.captures("/c/Users/a").map(|c| (c[1].to_string(), c[2].to_string())), Some(("c".into(), "Users/a".into())));
+        let cwd = fixture("options");
+        let windows = std::env::var("SystemRoot").unwrap();
+        let drive = windows[..1].to_ascii_lowercase();
+        assert_eq!(classify(&format!("/{drive}/"), &cwd), Some(Target::Dir(PathBuf::from(format!("{}:\\", drive.to_uppercase())))));
     }
 }

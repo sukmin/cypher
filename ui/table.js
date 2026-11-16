@@ -151,6 +151,15 @@ export function readTable(text, path, header = true) {
     rows = rows.slice(0, MAX_ROWS);
   }
   columns = Array.from({ length: width }, (_, at) => columns[at] || `열 ${at + 1}`);
+  // 같은 이름의 열이 여럿이면(조인 결과의 id, name 등) 뒤의 것에 번호를 붙여 가린다. 정렬할 열을 이름으로 기억하므로,
+  // 이름이 같으면 뒤 열을 눌러도 앞 열로 정렬된다.
+  const used = new Set();
+  columns = columns.map((name) => {
+    let unique = name;
+    for (let n = 2; used.has(unique); n += 1) unique = `${name} (${n})`;
+    used.add(unique);
+    return unique;
+  });
   rows = rows.map((row) => Array.from({ length: width }, (_, at) => row[at] ?? ''));
   // 숫자 열: 빈 칸이 아닌 값이 모두 숫자(쉼표 자릿수 포함)인 열. 오른쪽으로 붙이고 크기로 정렬한다.
   const sample = rows.slice(0, 2000);
@@ -331,7 +340,8 @@ export function createTable(item, host, saved = {}, onChange = () => {}) {
     // 보던 자리까지는 이어서 그려 둔다(화면에 없어 높이를 잴 수 없을 때는 하지 않는다).
     while ($scroll.clientHeight > 0 && drawn < order.length && $table.offsetHeight < scroll + $scroll.clientHeight) drawMore();
     $scroll.scrollTop = scroll;
-    if (picked && !order.includes(picked.row)) choose(null);
+    // 고른 칸: 줄이나 열이 사라졌으면 풀고, 남아 있으면 아래 칸의 값을 새 내용으로 맞춘다(파일을 다시 읽었을 수 있다).
+    if (picked) choose(order.includes(picked.row) && picked.col < table.columns.length ? picked : null, false);
     refreshBar();
   }
 
@@ -351,14 +361,14 @@ export function createTable(item, host, saved = {}, onChange = () => {}) {
   }
 
   /** 칸을 고른다(null이면 고른 것을 푼다). 고른 칸의 전체 값을 아래에 보여 준다. */
-  function choose(next) {
+  function choose(next, reveal = true) {
     picked = next;
     for (const cell of $body.querySelectorAll('td.sel')) cell.classList.remove('sel');
     if (!next) { $detail.hidden = true; return; }
     const row = $body.querySelector(`tr[data-row="${next.row}"]`);
     const cell = row?.children[next.col + 1];
     cell?.classList.add('sel');
-    cell?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    if (reveal) cell?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
     $detail.replaceChildren(make('b', '', `${table.columns[next.col]} · ${next.row + 1}번째 줄`), make('span', '', table.rows[next.row][next.col] || '(빈 칸)'));
     $detail.hidden = false;
   }

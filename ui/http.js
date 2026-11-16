@@ -57,6 +57,7 @@ export function createHttp(item, host, saved = {}, onChange = () => {}) {
   let unreadable = ''; // 열어 둔 파일을 읽지 못한 까닭. 비어 있지 않으면 편집·저장을 막는다(읽지 못한 파일을 덮어쓰지 않게).
   let conflict = false; // 파일이 다른 곳에서 바뀐 것을 알고 사용자의 선택을 기다리는 중(자동 저장을 멈춘다).
   let autosave = 0;
+  let reloadedUnderCursor = false; // 편집기에 커서를 둔 채로 디스크의 내용을 다시 읽어 들였다(다음 Ctrl+Enter는 확인을 받는다).
   let saving = Promise.resolve(); // 저장은 한 번에 하나씩 한다.
   let runs = 0;        // 실행 순번(늦게 온 옛 응답이 새 응답을 덮지 않게 한다)
   const sending = new Set(); // 보내는 중인 요청의 줄 번호들
@@ -169,9 +170,16 @@ export function createHttp(item, host, saved = {}, onChange = () => {}) {
       }
       const reopened = !!unreadable;
       const scroll = $editor.scrollTop;
+      const caret = [$editor.selectionStart, $editor.selectionEnd];
       setUnreadable('');
       fill(read.text, read.stamp);
+      // 값을 통째로 넣으면 커서가 글 끝으로 간다. 그대로 두면 Ctrl+Enter가 파일의 마지막 요청을 보내고, 치는 글자는
+      // 파일 끝에 들어간다. 있던 자리로 되돌린다.
+      const end = $editor.value.length;
+      $editor.setSelectionRange(Math.min(caret[0], end), Math.min(caret[1], end));
       $editor.scrollTop = scroll;
+      // 커서를 둔 채로 내용이 바뀌었다. 같은 자리가 이제 다른 요청일 수 있으니 다음 Ctrl+Enter는 한 번 확인을 받는다.
+      if (document.activeElement === $editor) reloadedUnderCursor = true;
       if (reopened) hint('파일을 다시 읽었습니다.');
       await load(false);
       return true;
@@ -223,6 +231,14 @@ export function createHttp(item, host, saved = {}, onChange = () => {}) {
       const name = await ask('새 요청 파일 이름', '예: 결제 API');
       if (!name) return renderPicker(); // 취소: 고르던 것으로 되돌린다.
       const fileName = name.endsWith('.http') ? name : `${name}.http`;
+      // 받지 않는 이름은 여기서 알린다. 저장할 때에야 거절되면, 고친 뒤로는 저장도 다른 파일로 옮기기도 되지 않는다.
+      const stem = fileName.slice(0, -'.http'.length).trim();
+      if (!/^[\p{L}\p{N} ._-]+$/u.test(stem) || stem.startsWith('.') || stem.toLowerCase() === 'history') {
+        setStatus(stem.toLowerCase() === 'history'
+          ? '"history"는 보낸 기록 파일의 이름이라 쓸 수 없습니다.'
+          : '파일 이름에는 글자·숫자·공백·`-`·`_`·`.`만 쓸 수 있습니다.');
+        return renderPicker();
+      }
       // 같은 이름의 파일이 이미 있으면 새로 만들지 않고 그 파일을 연다(예시로 덮어쓰지 않게).
       const existing = files.find((f) => f.name.toLowerCase() === fileName.toLowerCase());
       if (existing) setStatus(`같은 이름의 요청 파일이 이미 있어 그 파일을 엽니다: ${existing.name}`);
@@ -233,7 +249,21 @@ export function createHttp(item, host, saved = {}, onChange = () => {}) {
       next = { path: file.path, name: file.name };
     }
     // 고친 내용을 저장하지 못했으면 옮겨 가지 않는다(편집기 내용이 사라지지 않게).
-    if (!(await saveIfDirty())) return renderPicker();
+    // 다만 아직 파일이 되지 못한 새 요청 파일은 저장이 계속 실패할 수 있다(그사이 같은 이름의 파일이 생긴 경우 등).
+    // 그때는 버리고 옮길지 묻는다. 묻지 않으면 항목을 닫는 것 말고는 빠져나갈 길이 없다.
+    if (!(await saveIfDirty())) {
+      if (current.path) return renderPicker();
+      if (!next.path) {
+        // 새 이름을 준 것이면 내용은 그대로 두고 이름만 바꾼다(다음에 저장할 때 그 이름으로 만든다).
+        current = next;
+        renderPicker();
+        markDirty();
+        onChange();
+        $editor.focus();
+        return;
+      }
+      if (!confirm(`"${current.name}"의 내용을 저장하지 못했습니다. 이 내용을 버리고 옮길까요?\n(버리지 않으려면 "취소"를 누른 뒤 내용을 복사해 두세요)`)) return renderPicker();
+    }
     current = next;
     await openCurrent();
     renderPicker();
@@ -444,9 +474,18 @@ export function createHttp(item, host, saved = {}, onChange = () => {}) {
     if (ev.ctrlKey && !ev.shiftKey && key === 's') { ev.preventDefault(); save(); }
     else if (ev.ctrlKey && key === 'enter') {
       ev.preventDefault();
+      if (reloadedUnderCursor) {
+        reloadedUnderCursor = false;
+        hint('요청 파일이 다른 곳에서 바뀌어 다시 읽었습니다. 커서가 있는 요청을 확인하고 다시 눌러 주세요.');
+        return;
+      }
       runLine($editor.value.slice(0, $editor.selectionStart).split('\n').length - 1);
     } else if (key === 'tab' && !ev.ctrlKey) { ev.preventDefault(); document.execCommand('insertText', false, '  '); }
   });
+
+  // 다시 읽은 뒤에 사용자가 커서를 옮기거나 글을 고쳤으면, 보낼 요청을 스스로 고른 것이다.
+  $editor.addEventListener('mousedown', () => { reloadedUnderCursor = false; });
+  $editor.addEventListener('input', () => { reloadedUnderCursor = false; });
 
   const ready = load(true).catch((err) => hint(String(err)));
 

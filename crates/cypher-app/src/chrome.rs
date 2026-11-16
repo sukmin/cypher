@@ -407,7 +407,7 @@ fn wait_first_page(chrome: &Chrome, start: &str) {
     }
     let deadline = Instant::now() + Duration::from_secs(6);
     while Instant::now() < deadline {
-        let arrived = chrome.pages().is_ok_and(|pages| pages.iter().any(|p| p["url"].as_str().is_some_and(|url| url.starts_with("http"))));
+        let arrived = chrome.pages().is_ok_and(|pages| pages.iter().any(|p| p["url"].as_str().is_some_and(|url| url.starts_with("http") || url.starts_with("file:"))));
         if arrived {
             return;
         }

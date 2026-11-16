@@ -193,8 +193,14 @@ fn download(asset: &Asset, to: &Path) -> Result<(), String> {
 }
 
 /// zip을 `to` 폴더에 푼다. Windows에 든 tar(System32의 bsdtar)를 쓴다. PATH의 다른 tar(Git의 것 등)는 zip을 풀지 못한다.
+///
+/// `to`는 zip이 든 폴더 아래여야 한다. tar에는 전체 경로를 주지 않고, 그 폴더에서 띄워 상대 경로만 준다:
+/// tar는 인자를 시스템 코드 페이지로 읽어서, 경로에 그 코드 페이지에 없는 글자(영어 Windows의 한글 사용자 이름 등)가
+/// 있으면 전체 경로로는 폴더를 찾지 못한다.
 fn unzip(zip: &Path, to: &Path) -> Result<(), String> {
     std::fs::create_dir_all(to).map_err(|e| e.to_string())?;
+    let relative = zip.parent().zip(zip.file_name()).and_then(|(dir, name)| Some((dir, name, to.strip_prefix(dir).ok()?)));
+    let (dir, zip, to) = relative.ok_or("묶음을 풀 폴더가 묶음이 든 폴더 아래에 있지 않습니다")?;
     let root = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| PathBuf::from(r"C:\Windows"));
     let tar = root.join("System32").join("tar.exe");
     let done = Command::new(&tar)
@@ -202,6 +208,7 @@ fn unzip(zip: &Path, to: &Path) -> Result<(), String> {
         .arg(zip)
         .arg("-C")
         .arg(to)
+        .current_dir(dir)
         .creation_flags(CREATE_NO_WINDOW)
         .output()
         .map_err(|e| format!("묶음을 풀지 못했습니다({}): {e}", tar.display()))?;
@@ -270,11 +277,22 @@ fn replace_files(from: &Path, to: &Path, stamp: &str) -> Result<Vec<String>, Str
     Ok(names.iter().map(|name| name.to_string_lossy().into_owned()).collect())
 }
 
+/// 업데이트가 이름을 바꿔 둔 옛 파일의 이름인지: `<원래 이름>.old-<바꾼 시각(초)>`으로 끝난다.
+/// 실행 파일 폴더에는 사용자의 다른 파일도 있을 수 있다. 이름에 `.old-`가 들었다고 지우면 안 된다(`보고서.old-2024.docx`).
+fn is_leftover(name: &str) -> bool {
+    name.rsplit_once(OLD_MARK)
+        .is_some_and(|(base, stamp)| !base.is_empty() && stamp.len() >= 9 && stamp.bytes().all(|b| b.is_ascii_digit()))
+}
+
+/// 설치하고 있는 중인지(겹쳐 설치하지 않게 한다)와, 이번 실행에서 설치를 마친 버전.
+static INSTALLING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static INSTALLED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None);
+
 /// 지난 업데이트가 남긴 것을 치운다: 이름을 바꿔 둔 옛 파일과 내려받은 묶음. 시작할 때 부른다.
 pub fn clean_leftovers() {
     if let Ok(dir) = install_dir() {
         for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
-            if entry.file_name().to_string_lossy().contains(OLD_MARK) && entry.path().is_file() {
+            if is_leftover(&entry.file_name().to_string_lossy()) && entry.path().is_file() {
                 let _ = std::fs::remove_file(entry.path()); // 아직 쓰이고 있으면 지워지지 않는다. 다음에 다시 시도한다.
             }
         }
@@ -334,7 +352,19 @@ pub async fn update_install() -> Result<String, String> {
     }
     let asset = release.asset.as_ref().ok_or("묶음이 없습니다")?;
     let work = crate::data_dir().ok_or("내려받을 폴더를 찾지 못했습니다")?.join("update");
-    install(asset, &install_dir()?, &work)?;
+    let target = install_dir()?;
+    // 창을 닫았다 다시 열어 한 번 더 누르면 설치가 겹칠 수 있다. 둘은 같은 작업 폴더를 쓰므로 하나만 돌게 한다.
+    use std::sync::atomic::Ordering;
+    if INSTALLED.lock().unwrap().as_deref() == Some(release.version.as_str()) {
+        return Err(format!("{}은(는) 이미 설치했습니다. Cypher를 다시 시작하면 새 버전으로 뜹니다.", release.version));
+    }
+    if INSTALLING.swap(true, Ordering::SeqCst) {
+        return Err("이미 내려받아 설치하고 있습니다. 잠시 뒤에 다시 확인하세요.".into());
+    }
+    let outcome = install(asset, &target, &work);
+    INSTALLING.store(false, Ordering::SeqCst);
+    outcome?;
+    *INSTALLED.lock().unwrap() = Some(release.version.clone());
     crate::log(&format!("업데이트: {VERSION} → {} 설치", release.version));
     Ok(release.version)
 }
@@ -343,7 +373,13 @@ pub async fn update_install() -> Result<String, String> {
 #[tauri::command]
 pub fn update_restart(app: AppHandle) -> Result<(), String> {
     let exe = install_dir()?.join("cypher.exe");
-    Command::new(&exe).spawn().map_err(|e| format!("새 버전을 띄우지 못했습니다({}): {e}", exe.display()))?;
+    let mut launch = Command::new(&exe);
+    // 본창의 저장소를 환경 변수로 돌려 띄운 경우, 그 변수는 본창을 만든 뒤 이 프로세스에서 지워 두었다.
+    // 새 프로세스에는 다시 넘겨야 같은 저장소(로그인·저장된 배치)로 뜬다.
+    if let Some(folder) = crate::site::data_folder_override() {
+        launch.env("WEBVIEW2_USER_DATA_FOLDER", folder);
+    }
+    launch.spawn().map_err(|e| format!("새 버전을 띄우지 못했습니다({}): {e}", exe.display()))?;
     if let Some(window) = app.get_window("main") {
         let _ = window.destroy();
     }
@@ -479,11 +515,15 @@ mod tests {
         std::fs::write(inner.join("bridge.txt"), text("전달")).unwrap();
         // Windows에 든 tar로 zip을 만든다(-a: 이름의 확장자에 맞는 형식).
         let tar = PathBuf::from(std::env::var_os("SystemRoot").unwrap()).join("System32").join("tar.exe");
-        let zip = root.join("pack.zip");
-        let made = Command::new(&tar).arg("-a").arg("-cf").arg(&zip).arg("-C").arg(root.join("src")).arg("cypher-9.9.9-windows-x64").output().unwrap();
+        // 작업 폴더의 이름에 시스템 코드 페이지에 없을 글자를 넣는다(영어 Windows의 한글 사용자 이름 같은 경우).
+        // tar에 전체 경로를 주면 이런 폴더를 찾지 못한다.
+        let work = root.join("작업 tést ทดสอบ");
+        std::fs::create_dir_all(&work).unwrap();
+        let zip = work.join("pack.zip");
+        let made = Command::new(&tar).current_dir(&work).arg("-a").arg("-cf").arg("pack.zip").arg("-C").arg(root.join("src")).arg("cypher-9.9.9-windows-x64").output().unwrap();
         assert!(made.status.success(), "{}", String::from_utf8_lossy(&made.stderr));
 
-        let unpacked = root.join("unpacked");
+        let unpacked = work.join("unpacked");
         unzip(&zip, &unpacked).unwrap();
         let found = find_package(&unpacked, &names).unwrap();
         assert_eq!(found, unpacked.join("cypher-9.9.9-windows-x64"));
@@ -500,7 +540,20 @@ mod tests {
         // zip이 아닌 파일은 풀지 못한다.
         std::fs::write(root.join("bad.zip"), text("zip이 아닌 파일")).unwrap();
         assert!(unzip(&root.join("bad.zip"), &root.join("bad")).is_err());
+        // 묶음이 든 폴더 밖에는 풀지 않는다.
+        assert!(unzip(&zip, &root.join("밖")).is_err());
         done(&root);
+    }
+
+    #[test]
+    fn 업데이트가_남긴_옛_파일만_치울_것으로_본다() {
+        for ours in ["cypher.exe.old-1794800000", "README.md.old-1794800000", "a.old-1.txt.old-1794800000"] {
+            assert!(is_leftover(ours), "{ours}");
+        }
+        // 실행 파일 폴더에 함께 있을 수 있는 사용자의 파일.
+        for theirs in ["보고서.old-2024.docx", "config.old-1.json", "notes.old-2024", ".old-1794800000", "cypher.exe.old-", "cypher.exe.old-17948x0000", "cypher.exe"] {
+            assert!(!is_leftover(theirs), "{theirs}");
+        }
     }
 
     /// 실제 GitHub에서 최신 릴리즈를 받아 시험용 폴더에 설치해 본다(인터넷이 필요해 평소에는 돌리지 않는다).

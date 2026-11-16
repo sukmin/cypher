@@ -114,7 +114,8 @@ fn classify(path: &Path) -> Dropped {
             _ => done("other", None),
         };
     }
-    if ext == "http" || ext == "rest" {
+    // HTTP 항목은 `.http` 파일만 연다. `.rest` 같은 다른 요청 파일은 글자 파일로 연다.
+    if ext == "http" {
         return done("http", None);
     }
     // 글자 파일인지: UTF-16(BOM 있음)이 아닌데 0 바이트가 보이면 글자 파일이 아니다.
@@ -152,6 +153,8 @@ mod tests {
         assert_eq!(kind(&file("no-extension", b"plain")), "text");
         assert_eq!(kind(&file("utf16.txt", &[0xff, 0xfe, b'a', 0, b'b', 0])), "text");
         assert_eq!(kind(&file("api.http", b"GET https://example.com\n")), "http");
+        assert_eq!(kind(&file("BIG.HTTP", b"GET https://example.com\n")), "http");
+        assert_eq!(kind(&file("api.rest", b"GET https://example.com\n")), "text"); // HTTP 항목이 열지 못하는 파일
         assert_eq!(kind(&file("결과.csv", "이름,값\n가,1\n".as_bytes())), "table");
         assert_eq!(kind(&file("rows.TSV", b"a\tb\n")), "table");
         assert_eq!(kind(&file("data.json", b"[1]")), "text");
