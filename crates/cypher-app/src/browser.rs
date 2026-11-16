@@ -801,7 +801,7 @@ pub fn tools() -> Value {
     json!([
         { "name": "browser_read", "inputSchema": none,
           "description": "이 세션과 같은 워크스페이스에 있는 Cypher 브라우저(사이드바의 사이트 항목)에 지금 열려 있는 페이지를 읽는다(사용자가 로그인해 둔 상태 그대로). 주소, 제목, 누르거나 입력할 수 있는 요소 목록(번호 포함), 페이지 글자를 돌려준다. 조작하기 전에 먼저 부른다." },
-        { "name": "browser_navigate", "description": "브라우저를 그 주소로 이동시킨다. 같은 워크스페이스에 브라우저(사이트 항목)가 없으면 새로 만들어 연다.",
+        { "name": "browser_navigate", "description": "브라우저를 그 주소로 이동시킨다. 같은 워크스페이스에 브라우저(사이트 항목)가 없으면 새로 만들어 연다. 이 컴퓨터의 HTML 파일(.html, .htm)은 전체 경로(예: C:\\work\\report.html)나 file: 주소로 연다.",
           "inputSchema": { "type": "object", "properties": { "url": { "type": "string" } }, "required": ["url"] } },
         { "name": "browser_click", "description": "browser_read가 준 번호(ref)의 요소를 누른다.",
           "inputSchema": { "type": "object", "properties": { "ref": { "type": "integer" } }, "required": ["ref"] } },

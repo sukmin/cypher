@@ -69,7 +69,7 @@
 </svg>
 <main>
 <h1>Cypher 구현 방식</h1>
-<p class="lead">Cypher가 어떤 조각으로 이루어져 있고, Claude Code 세션과 어떻게 이야기하며, 워크스페이스라는 울타리를 어떻게 지키고, 스스로를 어떻게 업데이트하는지를 그림으로 설명합니다. 기준: 0.16.1 (2026-11-15). 쓰는 법은 <a href="manual.html">사용 설명서</a>에 있습니다.</p>
+<p class="lead">Cypher가 어떤 조각으로 이루어져 있고, Claude Code 세션과 어떻게 이야기하며, 워크스페이스라는 울타리를 어떻게 지키고, 스스로를 어떻게 업데이트하는지를 그림으로 설명합니다. 기준: 0.16.2 (2026-11-16). 쓰는 법은 <a href="manual.html">사용 설명서</a>에 있습니다.</p>
 
 <nav>
 <ol>
@@ -405,7 +405,7 @@
   <text x="400" y="252" text-anchor="middle" class="s">놓지 않는 것: 고쳐 쓴 파일 · 이미 보이는 파일 · 숨김·빌드 폴더 안 · 임시·설정 폴더 · 한 요청의 9번째부터</text>
   <text x="400" y="272" text-anchor="middle" class="s">명령(Bash 등)으로 만든 파일은 알 수 없습니다. Claude가 doc_show · image_add · table_show로 놓을 수 있습니다.</text>
 </svg>
-<figcaption>설정 <code>[session] show_created</code>: <code>"known"</code>(기본), <code>"all"</code>(그 밖의 글자 파일도 문서로), <code>"off"</code>(끔).</figcaption>
+<figcaption>설정 <code>[session] show_created</code>: <code>"known"</code>(기본), <code>"all"</code>(그 밖의 글자 파일도 문서로), <code>"off"</code>(끔). 명령이나 스크립트로 만든 HTML 파일은 Claude가 <code>browser_navigate</code>에 파일의 전체 경로를 주어 사이트 항목으로 엽니다(세션에 주는 안내 글에 적혀 있습니다).</figcaption>
 </figure>
 <ul>
   <li>HTML 파일은 그 파일을 여는 사이트 항목이 됩니다. 웹뷰는 사용자가 그 항목을 처음 볼 때 뜹니다. <code>.json</code>은 설정 파일인 경우가 많아 놓지 않습니다(<code>table_show</code>로 놓을 수 있음).</li>

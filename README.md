@@ -261,7 +261,7 @@ Claude 세션이 Write 도구로 **새 파일**을 만들면 종류에 맞는 �
 - 세션이 일하는 폴더 아래의 숨김 폴더(`.git`, `.claude` …)·`node_modules`·`target`·`dist`·`build` 안의 파일, Claude Code의 설정·기억 폴더와 Cypher 저장소·임시 폴더의 파일, 네트워크 경로의 파일은 놓지 않습니다(`.cypher\http`의 요청 파일은 놓습니다).
 - 워크스페이스가 없는 세션이 만든 `.http`는 그 세션의 시작 폴더가 보는 요청 파일(폴더 바로 아래, `http`, `.cypher\http`)일 때만 HTTP 항목이 되고, 다른 폴더(시작 폴더의 다른 하위 폴더 포함)의 것은 다른 폴더 묶음에 끼어들지 않도록 자기 묶음의 문서 항목으로 보여 줍니다.
 - 한 요청에서 8개까지만 놓고, 넘치면 한 번 알립니다.
-- 명령(Bash 등)으로 만든 파일은 알 수 없어 놓지 않습니다. 그런 파일은 Claude가 `doc_show`·`image_add`로 놓을 수 있습니다.
+- 명령(Bash 등)이나 스크립트로 만든 파일은 알 수 없어 놓지 않습니다(스킬이 스크립트로 만든 결과물도 그렇습니다). 그런 파일은 Claude가 `doc_show`·`image_add`·`table_show`로 놓을 수 있고, HTML 파일은 `browser_navigate`에 파일의 전체 경로를 주어 사이트 항목으로 엽니다. Claude 세션에 주는 안내에 이 방법이 적혀 있고, "문서 항목으로 보여 줘", "브라우저로 열어 줘"처럼 시켜도 됩니다. `browser_navigate`는 워크스페이스에 든 세션만 쓸 수 있고, 그 워크스페이스에 브라우저가 이미 있으면 그 브라우저가 그 파일로 옮겨 갑니다.
 - 설정의 `[session] show_created`로 바꿉니다: `"known"`(기본), `"all"`(코드 같은 그 밖의 글자 파일도 문서 항목으로), `"off"`(놓지 않음, Write 도구의 훅도 걸지 않음).
 
 Claude 세션이 **있던 파일을 고치면**(Edit·Write 도구) 새 항목을 놓지 않고, 그 세션과 같은 워크스페이스(워크스페이스가 없으면 같은 폴더 묶음)에서 그 파일을 보여 주는 항목이 바로 새 내용을 읽습니다. 다른 워크스페이스의 항목은 건드리지 않습니다.
@@ -281,7 +281,7 @@ Claude 세션이 **있던 파일을 고치면**(Edit·Write 도구) 새 항목�
 | `browser_read` | 지금 페이지의 주소·제목·글자와, 누르거나 입력할 수 있는 요소 목록(번호) |
 | `browser_click` / `browser_type` / `browser_key` | 번호로 가리킨 요소 누르기, 글자 입력, 키 누르기 |
 | `browser_screenshot` / `browser_click_at` | 화면을 그림으로 받아 보고, 그 그림의 좌표를 누르기 |
-| `browser_navigate` / `browser_back` / `browser_scroll` / `browser_eval` | 이동, 뒤로, 스크롤, 페이지에서 스크립트 실행 |
+| `browser_navigate` / `browser_back` / `browser_scroll` / `browser_eval` | 이동(웹 주소, 또는 이 컴퓨터의 HTML 파일의 전체 경로), 뒤로, 스크롤, 페이지에서 스크립트 실행 |
 | `browser_tabs` / `browser_select` | 같은 워크스페이스의 브라우저 목록 보기, 조작 대상 바꾸기 |
 | `browser_dialog` | 페이지가 다음에 띄우는 확인 창(alert·confirm·prompt, 나가기 확인) 하나에 줄 답 정하기. 정하지 않으면 조작 중에 뜬 창은 Cypher가 바로 닫고(alert는 확인, confirm·prompt는 취소, 나가기 확인은 나가기) 그 사실을 도구의 답에 적음. 도구가 쓰고 있지 않을 때 뜬 창은 사용자가 답하도록 그대로 두고, 그 창이 떠 있는 채로 도구가 시작되면 닫고 시작함 |
 | `cypher_items` | 같은 워크스페이스의 항목 목록: 다른 세션(이름·상태만), 메모·이미지·마인드맵·문서·할 일·표의 파일 경로, 브라우저 주소, HTTP 요청 폴더, 명령 항목의 명령과 상태. 워크스페이스가 없는 세션에는 목록 대신 그 사실을 알려 줌 |
