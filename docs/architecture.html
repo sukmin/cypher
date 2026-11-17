@@ -69,7 +69,7 @@
 </svg>
 <main>
 <h1>Cypher 구현 방식</h1>
-<p class="lead">Cypher가 어떤 조각으로 이루어져 있고, Claude Code 세션과 어떻게 이야기하며, 워크스페이스라는 울타리를 어떻게 지키고, 스스로를 어떻게 업데이트하는지를 그림으로 설명합니다. 기준: 0.16.5 (2026-11-17). 쓰는 법은 <a href="manual.html">사용 설명서</a>에 있습니다.</p>
+<p class="lead">Cypher가 어떤 조각으로 이루어져 있고, Claude Code 세션과 어떻게 이야기하며, 워크스페이스라는 울타리를 어떻게 지키고, 스스로를 어떻게 업데이트하는지를 그림으로 설명합니다. 기준: 0.17.0 (2026-11-18). 쓰는 법은 <a href="manual.html">사용 설명서</a>에 있습니다.</p>
 
 <nav>
 <ol>
@@ -85,6 +85,8 @@
   <li><a href="#widths">터미널 화면 맞추기</a></li>
   <li><a href="#restore">다시 시작과 쉬는 세션</a></li>
   <li><a href="#update">업데이트</a></li>
+  <li><a href="#code">코드 보기</a></li>
+  <li><a href="#ssh">SSH 세션, 타이머·알람</a></li>
   <li><a href="#storage">어디에 무엇을 저장하나</a></li>
   <li><a href="#limits">막지 못하는 것</a></li>
   <li><a href="#files">코드 위치</a></li>
@@ -144,7 +146,7 @@
 </ul>
 
 <h2 id="items">2. 사이드바: 워크스페이스와 항목</h2>
-<p>사이드바에 놓이는 것을 <b>항목</b>이라 부릅니다. 터미널 세션(Claude, PowerShell 등 프로필)과 그 밖의 열 가지 종류(메모, HTTP, 사이트, 이미지, 마인드맵, ERD, 문서, 할 일, 명령, 표)가 있습니다. 0.13부터 <b>모든 세션과 항목은 이름 붙인 워크스페이스 안에만</b> 놓입니다(업무 하나가 워크스페이스 하나).</p>
+<p>사이드바에 놓이는 것을 <b>항목</b>이라 부릅니다. 터미널 세션(Claude, PowerShell 등 프로필)과 그 밖의 열한 가지 종류(메모, HTTP, 사이트, 이미지, 마인드맵, ERD, 문서, 할 일, 명령, 표, 코드)가 있습니다. 0.13부터 <b>모든 세션과 항목은 이름 붙인 워크스페이스 안에만</b> 놓입니다(업무 하나가 워크스페이스 하나).</p>
 <figure>
 <svg viewBox="0 0 800 230" role="img" aria-label="워크스페이스와 항목">
   <rect class="hi" x="20" y="20" width="470" height="190" rx="10"/>
@@ -176,6 +178,8 @@
   <li>항목은 아무것도 묻지 않고 만들어집니다. 볼 파일이나 실행할 명령이 필요한 종류(문서·명령·표)는 빈 영역으로 뜨고, 거기서 파일을 끌어다 놓거나 고르거나 경로를 적어 대상을 정합니다(<code>ui/empty.js</code>).</li>
   <li>워크스페이스를 정할 수 없으면 만들지 않습니다(<code>groupFor</code>): 주어진 워크스페이스 → 지금 보는 항목의 워크스페이스 → 워크스페이스가 하나뿐이면 그것. 그 밖에는 알림만 띄웁니다.</li>
   <li><b>워크스페이스 폴더</b>(<code>cypher.groupFolders</code>)는 그 워크스페이스에서 여는 세션의 시작 폴더입니다. 정하지 않았으면 그 워크스페이스에 이미 있는 항목의 폴더, 그것도 없으면 사용자 폴더를 씁니다.</li>
+  <li><b>워크스페이스의 순서</b> <span class="new">0.17부터</span>: 사이드바에는 만든 차례(<code>cypher.groups</code>의 차례)대로 보입니다. 워크스페이스의 머리를 끌어 다른 워크스페이스의 위·아래에 놓으면 그 목록에서의 자리를 옮깁니다(<code>moveGroup</code>). 놓을 자리는 머리부터 그 워크스페이스의 마지막 줄까지를 한 덩이로 보고 위쪽 절반이면 앞, 아래쪽 절반이면 뒤입니다(<code>groupUnder</code>). 항목을 끄는 것과 같은 마우스 처리를 함께 씁니다(파일 끌어다 놓기와 겹치지 않게 브라우저의 끌어다 놓기는 쓰지 않음).</li>
+  <li><b>스테이지 표시줄</b>(<code>renderWhere</code>): 지금 보는 항목의 워크스페이스 › 이름 · 폴더를 스테이지 맨 위에 적습니다. 터미널 세션을 보고 있을 때는 워크스페이스 이름을 크게 적고 <span class="new">0.17부터</span>, 나란히 볼 때는 창마다 제목 줄에 그 세션의 워크스페이스 이름을 붙입니다(여러 워크스페이스의 세션을 오가다 엉뚱한 세션에 입력하지 않게).</li>
   <li><b>북마크</b>는 항목에 붙이는 숫자(0~9) 하나입니다. 숫자 하나에 항목 하나이고, 항목의 기록(<code>mark</code>)에 함께 저장됩니다.</li>
   <li>코드 안의 이름(<code>group</code>, <code>createGroup</code>, 저장 키 <code>cypher.groups</code>)은 "그룹"이던 때의 것을 그대로 씁니다(저장된 자료를 옮기지 않으려는 것).</li>
 </ul>
@@ -408,6 +412,7 @@
 <figcaption>설정 <code>[session] show_created</code>: <code>"known"</code>(기본), <code>"all"</code>(그 밖의 글자 파일도 문서로), <code>"off"</code>(끔). 명령이나 스크립트로 만든 HTML 파일은 Claude가 <code>browser_navigate</code>에 파일의 전체 경로를 주어 사이트 항목으로 엽니다(세션에 주는 안내 글에 적혀 있습니다).</figcaption>
 </figure>
 <ul>
+  <li><b>최종 파일만 놓기</b> <span class="new">0.17부터</span>: ④에서 바로 놓지 않고 그 세션에 적어 두었다가(<code>heldFiles</code>) 그 요청의 응답이 끝났을 때(완료 신호, 중단된 요청의 정리, 세션 종료) 한꺼번에 놓습니다(<code>placeHeld</code>). 놓기 전에 앱이 최종 파일을 가려 줍니다(<code>created_final</code>): 지금은 없는 파일(만들었다가 지웠거나 옮겼다)과 빈 파일, 이름으로 보아 잠깐 쓰는 파일(<code>tmp</code>·<code>temp</code>·<code>scratch</code>·<code>임시</code>로 시작하거나 <code>_tmp</code>·<code>.bak</code>·<code>-old</code>·<code>-wip</code> 등으로 끝나는 이름 — 낱말의 일부인 <code>temperature</code>·<code>template</code>은 아님), 같은 요청에서 만든 문서·HTML 안에 이름이 적힌 그림(그 문서의 부품)은 놓지 않습니다. 아직 빈 파일은 버리지 않고 다음 응답이 끝날 때 다시 봅니다(빈 파일로 만들어 두고 다음 요청에서 채우는 경우. 다섯 번까지). 요청 중이 아닐 때 온 파일은 4초 동안 더 오지 않으면 놓고, 응답 도중에 닫은 세션의 파일은 놓지 않습니다.</li>
   <li>HTML 파일은 그 파일을 여는 사이트 항목이 됩니다. 웹뷰는 사용자가 그 항목을 처음 볼 때 뜹니다. <code>.json</code>은 설정 파일인 경우가 많아 놓지 않습니다(<code>table_show</code>로 놓을 수 있음).</li>
   <li>요청 파일(<code>.http</code>)은 그 폴더를 보는 HTTP 항목이 이미 있으면 새로 만들지 않고 그 항목의 파일 목록을 다시 읽게 합니다.</li>
   <li>한 세션에서 같은 파일은 한 번만 놓고, 그 워크스페이스의 문서·표·메모·HTTP·사이트 항목이 이미 보여 주는 파일은 놓지 않습니다. 한 요청에 8개까지 놓고, 넘치면 한 번 알립니다.</li>
@@ -476,6 +481,14 @@
       <li>메우는 조건: 돌고 있는 Claude 세션이고, 일하는 중·승인 대기 중이 아니고, 출력이 조용하고, 보통 화면(대체 화면이 아님)에 지난 출력이 있고, 글자를 골라 두지 않았고, 커서가 있는 줄이 보이고, 커서와 마지막 글자 아래의 빈 줄이 10줄 이상이면서 화면 줄 수의 1/5 이상일 때.</li>
       <li>메워지지 않는 빈 공간(대화를 비운 직후처럼 대화가 한 화면보다 짧을 때)은 한 번만 해 보고, 빈 공간이 더 커지거나 그 뒤의 출력이 화면의 줄을 위로 더 밀어 올리기 전에는 다시 하지 않습니다(<code>gapStuck</code>: 빈 줄 수와 커서 줄의 마커).</li>
       <li>다시 맞추느라 나온 출력으로는 사이드바의 "새 출력" 표시를 켜지 않습니다.</li>
+    </ul>
+  </li>
+  <li><b>프롬프트 편집기의 높이를 바꿀 때</b>(<code>settleResize</code>) <span class="new">0.17부터</span>: 편집기의 위쪽 테두리를 끄는 동안에는 터미널의 줄 수를 그대로 둡니다(<code>fitHeld</code>). 끄는 내내 따라 바꾸면 Claude Code가 그때마다 화면을 다시 그려 지난 출력에 같은 줄이 겹쳐 쌓이기 때문입니다. 끌던 손이 0.22초 멈추면(그리고 놓으면) 한 번에 새 크기로 맞춥니다.
+    <ul>
+      <li>줄 수만 줄었으면 Claude Code가 스스로 다시 그리므로 그 뒤의 정리(겹친 줄 지우기, 보던 자리 지키기)만 합니다.</li>
+      <li>줄 수가 늘었으면 새 크기를 알리고 0.3초 뒤에 다시 맞춥니다(한 줄 줄였다 되돌리기). 바로 이어서 줄이면 프로그램은 두 번의 변경을 "조금 늘어난 것" 한 번으로 보고 다시 그리지 않아, 늘어난 만큼 아래가 빈 채로 남습니다.</li>
+      <li>앞선 다시 맞추기가 끝나지 않았으면 끝난 뒤에 합니다(겹치면 어느 줄이 겹친 줄인지 가려낼 수 없음). 그사이 높이가 또 바뀌었어도 다시 맞추던 것은 원래 줄 수로만 되돌리고, 새 높이는 그 뒤에 맞춥니다. 접기·펴기와 두 번 눌러 기본 높이로 돌릴 때도 같은 길을 탑니다(<code>resizeComposer</code>).</li>
+      <li>겹친 줄을 지울 때, 다시 그린 쪽에만 몇 줄(6줄까지)이 더 있는 경우도 받아 줍니다: 프로그램은 줄 수가 줄 때마다 화면의 끝부분만 다시 그려서 그때 화면 맨 위의 줄이 지난 출력에서 빠지는데, 나중에 넓어져 다시 그리면 그 줄이 되살아나 위아래 덩이가 글자까지 똑같지는 않게 됩니다. 맞은 줄이 세 줄 이상이고 글자가 있는 줄이 있을 때만 지웁니다.</li>
     </ul>
   </li>
   <li><b>겹친 줄 지우기</b>(<code>dropRepeated</code>): 다시 맞추면 내용이 아래로 내려오면서, 이미 위로 올라가 있던 줄이 화면 위쪽에 한 번 더 그려집니다. 다시 맞추기 전에 화면의 윗줄 세 개와 맨 윗줄의 자리(xterm.js 마커), 아래 빈 줄 수를 적어 두고, 프로그램이 다 그린 뒤(줄 수를 되돌리고 0.5초 뒤부터 0.3초 조용할 때까지, 길어도 3초) 그 윗줄이 마커 자리에서 몇 줄 아래로 내려와 있는지로 겹친 줄 수를 구합니다(빈 공간이 줄어든 만큼을 먼저 보고, 아니면 가까운 데부터 찾습니다). 겹친 두 덩이는 다시 그릴 때 화면이 시작되던 줄을 사이에 두고 붙어 있으므로, 그 줄 수만큼의 위아래 덩이가 글자까지 똑같은 곳을 찾아 위쪽(지난 출력 쪽)을 지우고, 없으면 지우지 않습니다. 자리를 마커로 잡으므로 다시 그리는 사이에 새 출력이 와도 맞습니다. Claude가 도는 세션에서만 하고(셸은 화면을 다시 채워 그리지 않습니다), 글자를 골라 둔 동안에는 하지 않습니다. xterm.js에는 지난 출력의 가운데 줄을 지우는 공개 기능이 없어 안쪽 버퍼(<code>_core.buffers.normal</code>)를 직접 고칩니다 — xterm.js를 바꿀 때 다시 확인할 곳입니다. 내용의 끝을 보고 있었으면 끝난 뒤 맨 아래를 보게 합니다(기다리는 사이에 사용자가 스크롤을 움직였으면 그대로 둡니다).</li>
@@ -566,19 +579,43 @@
 </ul>
 <p class="note">릴리즈를 낼 때 지킬 것: 태그는 숫자와 점만으로 된 버전(<code>v0.16.0</code>처럼 앞의 <code>v</code>는 있어도 됨), 묶음의 이름은 <code>…-windows-x64.zip</code>으로 끝나고(지금까지는 <code>cypher-&lt;버전&gt;-windows-x64.zip</code>), 안에는 <code>cypher.exe</code>와 <code>cypher-bridge.exe</code>가 한 폴더에 함께 들어 있어야 합니다. 묶음은 이 저장소의 릴리즈 자산으로 올려야 하고(GitHub가 붙여 주는 확인값 <code>digest</code>가 있어야 함), 300MB를 넘으면 안 됩니다. 이 모양이 바뀌면 이전 버전의 업데이트 단추가 그 릴리즈를 설치하지 못합니다. 저장소 주소(<code>sukmin/cypher</code>)는 실행 파일 안에 적혀 있어서, 저장소의 이름이나 소유자가 바뀌어도 마찬가지입니다. 또 본창 웹뷰의 실행 옵션(<code>tauri.conf.json</code>의 <code>additionalBrowserArgs</code>)을 바꾼 버전은 "지금 다시 시작"으로는 뜨지 못합니다: 앞선 창이 떠 있는 동안 새 프로세스가 같은 저장소를 다른 옵션으로 열 수 없기 때문입니다. 그때는 "새 버전이 뜨지 못하고 끝났습니다"로 알리고 창을 그대로 두므로, Cypher를 껐다 켜면 새 버전으로 뜹니다(릴리즈 글에 적어 둘 것).</p>
 
-<h2 id="storage">13. 어디에 무엇을 저장하나</h2>
+<h2 id="code">13. 코드 보기 <span class="new">0.17부터</span></h2>
+<p>코드 항목은 프로젝트 폴더 하나를 통째로 읽는 화면입니다(고치지는 않습니다). 파일마다 사이드바에 항목이 생기지 않고, 항목 하나 안에서 나무와 탭으로 파일을 오갑니다. 언어 서버를 두지 않고 <b>글자의 모양</b>으로 강조하고 찾습니다.</p>
+<table>
+  <tr><th>하는 일</th><th>어디서, 어떻게</th></tr>
+  <tr><td>문법 강조</td><td>화면(<code>ui/code-lex.js</code>). 글을 줄마다의 조각(예약어·자료형·문자열·주석 …)으로 나눕니다. 일반 언어는 언어마다 예약어와 주석·문자열 모양만 다르게 주고 같은 방식으로 읽고, 마크업(HTML·Vue)은 태그를 읽다가 <code>&lt;script&gt;</code>·<code>&lt;style&gt;</code> 안을 JavaScript·CSS로 넘겨 읽습니다. 바깥 라이브러리는 쓰지 않습니다.</td></tr>
+  <tr><td>코드 그리기</td><td>화면(<code>ui/code.js</code>). 줄을 150줄씩 덩이로 묶어, 처음에는 글자만 넣어 두고 화면 가까이 온 덩이만 강조해 그립니다. 화면 밖의 덩이는 브라우저가 그리기를 건너뜁니다(<code>content-visibility</code>). 줄 높이가 일정하므로 줄 번호로 스크롤 자리를 계산합니다. 찾은 곳·같은 이름 표시는 글자를 고치지 않고 브라우저의 강조 기능(CSS Highlight)으로 칠합니다. 파일의 글자는 모두 <code>textContent</code>로만 넣습니다.</td></tr>
+  <tr><td>정의 찾기</td><td>앱(<code>cypher-core/src/code.rs</code>). 주석과 문자열을 가린 뒤 줄마다 언어별 모양(정규식)과 중괄호 깊이로 정의를 가려냅니다: 함수·메서드·생성자, 클래스·인터페이스·열거형·구조체·트레이트, 필드·상수·열거 값, CSS의 선택자·변수, HTML의 id. 메서드와 필드는 "자료형의 몸통 바로 안쪽 깊이"에 있을 때만 정의로 보아, 함수 몸통 안의 호출·지역 변수와 가립니다. Python은 들여쓰기로, Vue·HTML은 구역마다 그 언어로 읽습니다.</td></tr>
+  <tr><td>정의로 가기</td><td>화면이 순서를 정합니다: ① 감싼 함수의 첫 줄부터 지금 줄 사이의 지역 선언(변수·인자·import) → ② 프로젝트 전체에서 그 이름의 정의(<code>code_defs</code>) → ③ 없으면 이 파일의 위쪽 어디서든 선언. 정의가 여럿이면 같은 파일, <code>자료형.이름</code>의 자료형이 감싼 것, 같은 폴더, 이 파일이 가져다 쓰는 파일, 같은 언어 순으로 점수를 매겨 맨 앞이 뚜렷하면 바로 가고 아니면 고르게 합니다. 누른 자리가 바로 그 정의면 쓰는 곳을 보여 줍니다.</td></tr>
+  <tr><td>쓰는 곳 찾기·기호 찾기·글 찾기</td><td>앱(<code>cypher-app/src/code.rs</code>). 색인을 만들어 두지 않고 <b>물을 때마다 프로젝트의 파일을 훑습니다</b>(여러 스레드로 나눠 읽음). Claude가 파일을 고치는 동안에도 늘 지금 내용으로 답합니다. 훑는 파일은 git이 아는 파일(추적하는 것과 무시하지 않는 새 파일)이고, git 저장소가 아니면 숨김·빌드 폴더를 빼고 돌아다니며 코드·글자 파일만 고릅니다. 파일은 4만 개, 파일 하나는 1MB, 결과는 2천 곳까지입니다. 쓰는 곳은 낱말 단위로 찾아 정의·쓰는 곳·주석 안·문자열 안으로 가려 줍니다.</td></tr>
+  <tr><td>바뀐 파일과 줄</td><td>변경 내용 옆 창과 같은 git 명령을 씁니다(<code>git_changes</code>, <code>git_diff</code>). 나무와 탭에 고친 파일·새 파일을 색으로, 줄 번호 옆에 더한 줄·고친 줄·지운 자리를 표시합니다. 같은 워크스페이스의 Claude 세션이 파일을 쓰면 앱이 알려 온 신호(8절)를 코드 항목에도 넘겨(<code>fileChanged</code>) 나무와 바뀐 파일을 곧 다시 읽고, 보고 있는 파일이면 바로 다시 읽습니다. 그 밖에는 보이는 동안 2초마다 고친 시각을 봅니다.</td></tr>
+  <tr><td>띄울 프로그램 찾기</td><td>(코드 보기와는 별개) 세션의 프로그램은 PATH에서 실행 파일·배치 파일을 찾아 띄웁니다. 사용자가 적어 준 Claude 실행 명령은 더 너그럽게 찾습니다: PATH의 PowerShell 스크립트(<code>이름.ps1</code>), 그것도 없으면 PowerShell의 명령(프로필의 별칭·함수)으로 실행합니다. 스크립트의 실행 정책은 건드리지 않고, PowerShell에 넘기는 인자는 작은따옴표(굽은 따옴표 포함)를 겹쳐 적어 글자 그대로 넘깁니다(<code>cypher-pty</code>).</td></tr>
+  <tr><td>글꼴</td><td>위쪽 글꼴 칸에서 코드의 글꼴과 글자 크기를 앱의 글꼴(설정 → 모양)과 따로 정합니다. 이 컴퓨터에 기억하고(<code>cypher.code.font</code>) 모든 코드 항목이 함께 씁니다.</td></tr>
+</table>
+<p>한계: 자료형을 따져야 알 수 있는 것(같은 이름의 메서드 가운데 어느 것인지, 상속받은 멤버)은 가리지 못해 이름이 같은 정의를 모두 내놓습니다. 한 줄에 정의가 둘 이상이면 첫 정의만 찾습니다. TypeScript 인터페이스의 속성, C의 전역 변수처럼 모양만으로 가리기 어려운 것은 정의로 잡지 않습니다. 4만 줄이 넘는 파일과 5천 자가 넘는 줄은 강조하지 않고, 그런 줄에는 찾은 곳·같은 이름 표시도 걸지 않습니다(지금 자리 하나만 표시 — 한 줄로 줄인 CSS·JSON에서 화면이 멈추지 않게).</p>
+
+<h2 id="ssh">14. SSH 세션, 타이머·알람 <span class="new">0.17부터</span></h2>
+<ul>
+  <li><b>SSH 세션</b>은 터미널 세션의 한 프로필(<code>ssh</code>)입니다. Cypher가 SSH를 직접 구현하지 않고 Windows에 든 OpenSSH(<code>ssh.exe</code>)를 가상 터미널에 붙여 띄웁니다. 그래서 키·에이전트·<code>~/.ssh/config</code>·known_hosts는 명령줄과 똑같이 적용되고, 비밀번호는 Cypher를 지나가기만 할 뿐 저장되지 않습니다.</li>
+  <li>접속할 곳(<code>{ target, port, identity, options, name }</code>)은 화면이 세션을 만들 때 넘기고, 앱이 <code>ssh</code>의 인자로 바꿉니다(<code>cypher-core/src/ssh.rs</code>). 대상 자리에 옵션이 끼어들지 못하게, <code>-</code>로 시작하거나 빈칸이 든 대상은 거절합니다. 접속할 곳은 항목의 기록에 함께 저장되어 다시 시작하면 쉬는 세션으로 되살아나고, 누르면 다시 접속합니다. 워크스페이스 틀에는 주소·포트·이름만 담고(키 파일 경로와 추가 옵션은 담지 않음 — 틀 파일은 남에게서 받을 수 있고, 옵션은 명령을 실행할 수 있음), 틀로 펼친 SSH 세션은 쉬는 세션으로 놓아 사용자가 누를 때 접속합니다.</li>
+  <li>접속 창(<code>ui/ssh.js</code>)은 저장해 둔 서버(<code>cypher.ssh.hosts</code>)와 <code>~/.ssh/config</code>의 <code>Host</code>(여러 호스트에 걸리는 <code>*</code>·<code>?</code>·<code>!</code>가 든 이름은 뺌)를 보여 줍니다. <b>연결 복제</b>는 같은 접속할 곳으로 세션을 하나 더 여는 것입니다(연결을 함께 쓰는 것이 아니라 새로 접속함. Windows의 OpenSSH는 연결 함께 쓰기를 지원하지 않음).</li>
+  <li><b>동시 입력</b>은 두 가지입니다(<code>broadcast</code>): 나란히 보이는 모든 터미널 세션(<code>'all'</code>, Ctrl+Shift+B)과 나란히 보이는 SSH 세션끼리만(<code>'ssh'</code>, SSH 창 제목 줄의 [동시 입력]). 입력을 보낼 때 받는 세션을 다시 셉니다(<code>castTargets</code>): 끝났거나 쉬는 세션은 빠지고, 대상이 아닌 세션에 친 것은 그 세션에만 갑니다.</li>
+  <li><b>타이머·알람</b>(<code>ui/timer.js</code>)은 울릴 때를 벽시계 시각으로 적어 화면의 저장소에 둡니다(<code>cypher.timers</code>). 1초마다, 그리고 켠 직후에 지난 것을 찾아 알리고 지웁니다. 그래서 Cypher가 꺼져 있던 동안 지나간 것은 켠 직후에 "지난 알람"으로, 컴퓨터가 잠들어 늦어진 것은 깨어난 직후에 알립니다. 24시간을 넘는 것은 받지 않습니다. 저장된 목록이 기준이라(맞추고 지우고 살필 때마다 다시 읽음) Cypher 창이 둘이어도 서로의 것을 지우지 않습니다. 창이 가려지거나 내려가 있으면 브라우저가 화면의 타이머를 늦추므로(오래 가려져 있으면 1분에 한 번), 다음에 울릴 때까지 앱이 대신 기다렸다가(<code>wake_after</code>, 길면 30초씩 끊어) 화면을 깨웁니다.</li>
+</ul>
+
+<h2 id="storage">15. 어디에 무엇을 저장하나</h2>
 <table>
   <tr><th>곳</th><th>담는 것</th></tr>
   <tr><td><code>%APPDATA%\cypher</code></td><td>사용자의 것: 설정(<code>config.toml</code>, 예시 <code>config.example.toml</code>), 메모(<code>memos</code>), 마인드맵(<code>mindmaps</code>), ERD(<code>erds</code>), 할 일(<code>todos</code>), 이미지(<code>images</code>), 워크스페이스 틀(<code>templates</code>). 닫은 것은 각 폴더의 <code>closed</code>에 30일</td></tr>
   <tr><td><code>%LOCALAPPDATA%\cypher</code></td><td>내부 상태: 세션에 넘기는 설정 파일(<code>claude-settings-*.json</code>, <code>mcp-*.json</code> — 이틀 넘은 것은 시작할 때 지움. 다만 그 파일을 만든 Cypher가 아직 떠 있으면 두어, 며칠째 떠 있는 다른 창의 세션이 쓰는 파일을 지우지 않음), 끼움 프로그램(<code>shim</code>), 기록(<code>cypher.log</code>), 되돌리기 전 차이(<code>reverted</code>), 업데이트 내려받기(<code>update</code>), 붙여넣은 그림(<code>paste</code>, 사흘 뒤 지움), 워크스페이스별 브라우저 프로필(<code>site-profiles</code>, <code>chrome-profiles</code>. 워크스페이스 없이 띄운 chrome 엔진의 것은 <code>chrome-profile</code>)</td></tr>
   <tr><td><code>%LOCALAPPDATA%\dev.cypher.terminal</code></td><td>본창의 브라우저 저장소(공용 프로필). 화면의 저장소도 이 안에 있음</td></tr>
-  <tr><td>화면의 저장소(localStorage)</td><td>열린 항목과 분할 배치(<code>cypher.state</code>), 워크스페이스 목록(<code>cypher.groups</code>)과 폴더(<code>cypher.groupFolders</code>), 워크스페이스 → 프로필 번호(<code>cypher.profiles</code>), 닫은 항목(<code>cypher.closed</code>), 알림 기록(<code>cypher.notices</code>), 모양(<code>cypher.look</code>), 브라우저 시작 페이지(<code>cypher.home</code>), Claude 실행 명령(<code>cypher.claudeCommand</code>), 보낸 프롬프트·최근 폴더·자주 쓰는 지시, 접어 둔 워크스페이스·사이드바 너비·찾기 방식, 브라우저 즐겨찾기(<code>cypher.bookmarks</code>)</td></tr>
+  <tr><td>화면의 저장소(localStorage)</td><td>열린 항목과 분할 배치(<code>cypher.state</code>), 워크스페이스 목록(<code>cypher.groups</code>)과 폴더(<code>cypher.groupFolders</code>), 워크스페이스 → 프로필 번호(<code>cypher.profiles</code>), 닫은 항목(<code>cypher.closed</code>), 알림 기록(<code>cypher.notices</code> — 최근 20개), 타이머·알람(<code>cypher.timers</code>), 저장해 둔 SSH 서버(<code>cypher.ssh.hosts</code>), 코드 보기의 글꼴(<code>cypher.code.font</code>), 모양(<code>cypher.look</code>), 브라우저 시작 페이지(<code>cypher.home</code>), Claude 실행 명령(<code>cypher.claudeCommand</code>), 보낸 프롬프트·최근 폴더·자주 쓰는 지시, 접어 둔 워크스페이스·사이드바 너비·찾기 방식, 브라우저 즐겨찾기(<code>cypher.bookmarks</code>)</td></tr>
   <tr><td><code>%APPDATA%\dev.cypher.terminal</code></td><td>창의 위치와 크기. 시작할 때 되살리고, 메뉴 줄을 붙인 뒤 크기만 한 번 더 되살립니다(메뉴 줄이 없을 때 맞춘 크기 그대로 두면 창 안쪽이 메뉴 줄 높이만큼 줄어, 닫았다 켤 때마다 창이 그만큼 작아짐. 최대화된 창은 건드리지 않음). 닫힐 때와 "지금 다시 시작"으로 새 버전을 띄우기 직전에 저장합니다</td></tr>
   <tr><td>실행 파일이 있는 폴더</td><td><code>cypher.exe</code>, <code>cypher-bridge.exe</code>와 묶음에 함께 든 파일(README 등). 업데이트 직후에는 이름을 바꿔 둔 옛 파일(<code>*.old-*</code>)이 다음 시작 때까지 남음</td></tr>
 </table>
 <p>Cypher는 사용자의 설정 파일을 고치거나 덮어쓰지 않고(없을 때만 기본 파일을 만듦), 통계·오류 보고 같은 통신을 하지 않습니다. 업데이트 확인도 단추를 눌렀을 때만 합니다.</p>
 
-<h2 id="limits">14. 막지 못하는 것</h2>
+<h2 id="limits">16. 막지 못하는 것</h2>
 <p>울타리는 <b>Cypher 도구</b>에 세운 것입니다. 그 바깥은 Cypher가 막을 수 없습니다.</p>
 <ul>
   <li><b>파일 직접 접근</b>: Claude Code는 자기 권한 설정 안에서 이 컴퓨터의 파일을 읽고 씁니다. 다른 워크스페이스의 메모가 저장된 파일도 파일로는 읽을 수 있습니다. 이것은 Claude Code의 권한 설정으로 다룹니다.</li>
@@ -588,11 +625,13 @@
   <li><b>업데이트의 믿음</b>: 확인값은 GitHub가 알려 주는 값입니다. 묶음이 올라온 뒤에 바뀌지 않았다는 것과 이 저장소의 릴리즈에서 받았다는 것은 확인하지만, 릴리즈를 올리는 계정 자체가 탈취된 경우까지 막지는 못합니다(업데이트는 실행 파일의 서명을 따로 확인하지 않습니다).</li>
 </ul>
 
-<h2 id="files">15. 코드 위치</h2>
+<h2 id="files">17. 코드 위치</h2>
 <table>
   <tr><th>하는 일</th><th>파일</th></tr>
   <tr><td>항목·워크스페이스·분할·북마크, 범위 판정(<code>canControl</code>), 도구 요청에 답하기(<code>mcpAction</code>), 프로필 번호(<code>profileOf</code>), 만든 파일 놓기(<code>onCreatedFile</code>), 고친 파일 새로 읽기(<code>onEditedFile</code>),세션 상태(<code>onStatus</code>·<code>onHook</code>·<code>onTool</code>), 되살리기(<code>restore</code>·<code>wake</code>), 다시 맞추기(<code>realign</code>)</td><td><code>ui/main.js</code></td></tr>
   <tr><td>항목 화면: 메모, HTTP, 사이트, 이미지, 마인드맵, ERD, 문서, 할 일, 명령, 표, 빈 영역</td><td><code>ui/memo.js</code>, <code>http.js</code>, <code>site.js</code>, <code>image.js</code>, <code>mindmap.js</code>, <code>erd.js</code>, <code>reader.js</code>, <code>todo.js</code>, <code>run.js</code>, <code>table.js</code>, <code>empty.js</code></td></tr>
+  <tr><td>코드 보기: 화면(나무·탭·이동·찾기), 문법 강조, 정의·쓰는 곳 찾기(글자의 모양으로), 프로젝트 훑기</td><td><code>ui/code.js</code>, <code>ui/code-lex.js</code>, <code>crates/cypher-core/src/code.rs</code>, <code>crates/cypher-app/src/code.rs</code></td></tr>
+  <tr><td>SSH 접속 창과 저장해 둔 서버, 접속할 곳을 ssh 인자로 바꾸기·<code>~/.ssh/config</code> 읽기, 타이머·알람</td><td><code>ui/ssh.js</code>, <code>crates/cypher-core/src/ssh.rs</code>, <code>ui/timer.js</code></td></tr>
   <tr><td>떠 있는 창·메뉴·변경 내용·업데이트 창, 빠른 이동, 닫은 항목, 알림 기록, 워크스페이스 틀, 끌어다 놓기, 모양</td><td><code>ui/extras.js</code>, <code>palette.js</code>, <code>closed.js</code>, <code>notices.js</code>, <code>template.js</code>, <code>drop.js</code>, <code>look.js</code>, <code>matrix.js</code></td></tr>
   <tr><td>글자 칸 수 표</td><td><code>ui/widths.js</code></td></tr>
   <tr><td>로컬 통로: 확인값, 세션 확인, 상태줄·훅 받기, 도구 신호 추리기</td><td><code>crates/cypher-app/src/status.rs</code></td></tr>
@@ -608,7 +647,7 @@
   <tr><td>git(변경 내용·되돌리기·커밋), 끌어다 놓기, 기억 내보내기·가져오기, 사용량, 창 자석, 클립보드</td><td><code>crates/cypher-app/src/extras.rs</code>, <code>drops.rs</code>, <code>memory.rs</code>, <code>monitor.rs</code>, <code>magnet.rs</code>, <code>clipboard.rs</code></td></tr>
   <tr><td>경로 비교(대소문자, <code>..</code>)</td><td><code>crates/cypher-app/src/paths.rs</code></td></tr>
   <tr><td>전달 프로그램과 끼움 프로그램</td><td><code>crates/cypher-bridge/src/main.rs</code></td></tr>
-  <tr><td>ConPTY 세션(띄우기·입출력·흐름 제어·종료)</td><td><code>crates/cypher-pty/src/lib.rs</code></td></tr>
+  <tr><td>ConPTY 세션(띄우기·입출력·흐름 제어·종료), 띄울 프로그램 찾기(실행 파일·배치 파일·PowerShell 스크립트, 없으면 PowerShell의 별칭·함수)</td><td><code>crates/cypher-pty/src/lib.rs</code></td></tr>
   <tr><td>설정 파일, 프로필과 실행 명령 읽기, 링크 인식, <code>.http</code> 형식, 글자 파일 인코딩, 창 자석 위치 계산</td><td><code>crates/cypher-core/src/config.rs</code>, <code>profile.rs</code>, <code>links.rs</code>, <code>http.rs</code>, <code>textfile.rs</code>, <code>magnet.rs</code></td></tr>
 </table>
 <p>쓰는 법은 <a href="manual.html">사용 설명서</a>에, 단축키와 도구별 설명·설정 항목은 저장소의 <code>README.md</code>에 있습니다.</p>

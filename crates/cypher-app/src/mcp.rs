@@ -39,9 +39,9 @@ notify_user로 알릴 수 있습니다(응답이 끝날 때의 알림은 Cypher�
 
 /// Write 도구로 만든 파일을 Cypher가 알아서 놓는 설정일 때 덧붙이는 안내.
 const CREATED_NOTE: &str = " Write 도구로 새로 만든 문서(.md, .txt)·SVG 그림·요청 파일(.http)·표 파일(.csv, .tsv)·HTML 파일(.html)은 Cypher가 알아서 이 세션의 워크스페이스에 \
-항목으로 놓으므로 doc_show나 image_add, table_show를 다시 부를 필요가 없습니다. 그 파일을 Edit·Write 도구로 고치면 \
+항목으로 놓으므로 doc_show나 image_add, table_show를 다시 부를 필요가 없습니다(응답이 끝날 때 한꺼번에 놓습니다). 그 파일을 Edit·Write 도구로 고치면 \
 같은 워크스페이스에서 그 파일을 보여 주는 항목(문서, 표, HTML 페이지를 연 사이트, 그림)이 스스로 새 내용을 읽으므로, 고친 뒤에 다시 놓거나 새로 고칠 필요도 없습니다. 다만 숨김 폴더(.git 등)나 빌드 폴더 안의 파일, \
-임시 폴더의 파일, 한 요청에서 8개를 넘는 파일, 명령(Bash 등)이나 스크립트로 만든 파일은 놓이지 않으니, 사용자에게 보여 줄 것이면 doc_show·image_add·table_show로 놓고, \
+임시 폴더의 파일, 한 요청에서 8개를 넘는 파일, 명령(Bash 등)이나 스크립트로 만든 파일, 그리고 중간 파일(응답이 끝나기 전에 지운 파일, `tmp_…`·`….bak`처럼 잠깐 쓰는 이름의 파일, 같은 요청에서 만든 문서·HTML에 넣은 그림)은 놓이지 않으니, 사용자에게 보여 줄 것이면 doc_show·image_add·table_show로 놓고, \
 HTML 파일은 browser_navigate에 그 파일의 전체 경로를 주어 여세요.";
 
 /// 세션에 알려 줄 안내 글. `show_created`는 설정의 `[session] show_created`.

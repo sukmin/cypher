@@ -20,6 +20,9 @@ import { initTodo, createTodo } from './todo.js';
 import { initRun, createRun } from './run.js';
 import { initTable, createTable } from './table.js';
 import { setPty, windowsPty, matchWidths } from './widths.js';
+import { initSsh, showSsh, cleanSpec, specLabel, saveHost, savedHosts } from './ssh.js';
+import { initTimer, showTimers, nextTimer, addTimer, removeTimer, timers } from './timer.js';
+import { initCode, createCode } from './code.js';
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -70,6 +73,8 @@ const KINDS = {
   todo: { label: '할 일', icon: '☑', hint: '업무의 체크 목록 · 같은 워크스페이스의 Claude가 채우고 체크', create: createTodo },
   run: { label: '명령', icon: '▷', hint: '자주 돌리는 명령(시험·빌드·개발 서버)을 단추로 두고 실행 · 성공·실패 표시', create: createRun },
   table: { label: '표', icon: '▤', hint: 'CSV·TSV·JSON 파일을 표로 보기 · 정렬·거르기 · 바뀌면 자동 갱신', create: createTable },
+  // 코드 보기는 프로젝트 폴더 하나를 통째로 본다(파일마다 항목이 생기지 않는다). 고치지는 않고, 작업한 내용을 읽는 데 쓴다.
+  code: { label: '코드', icon: '❮❯', hint: '프로젝트의 코드 보기 · 문법 강조 · 정의로 가기 · 쓰는 곳 찾기 · 바뀐 파일과 줄 표시', create: createCode },
 };
 
 /**
@@ -95,7 +100,7 @@ const SHOW_WORKTREE = false;
 const offersWorktree = () => SHOW_WORKTREE && config.profiles.some((p) => p.id === 'claude');
 let folder = '';
 let lastProfile = 'claude';
-let broadcast = false;
+let broadcast = false;          // 동시 입력: false(꺼짐) | 'all'(나란히 보이는 모든 세션) | 'ssh'(나란히 보이는 SSH 세션끼리)
 let closing = false;
 let limits = null;              // 계정 사용 한도(어느 Claude 세션이든 마지막으로 알려 준 값)
 let filterWaiting = false;      // 대기 중인 세션만 목록에 보이기
@@ -219,7 +224,10 @@ async function init() {
     finished: runFinished,
   });
   initTable({ invoke, make, setStatus, showMenu, baseName, toClaude: imageToClaude, openMemo });
+  initCode({ invoke, make, setStatus, showMenu, baseName, toClaude: textToClaude });
   initNotices({ make, openPopup, setStatus, jump: jumpToNotice, onChange: renderNoticeButton });
+  // SSH 접속 창에서 고르거나 적은 곳으로 세션을 연다.
+  initSsh({ invoke, make, openPopup, setStatus, connect: (spec, opts) => newSession(SSH, { ...opts, ssh: spec }) });
   initTemplate({
     invoke, make, openPopup, ask, setStatus, notice, baseName,
     pickFolder: (title) => invoke('pick_folder', { start: startFolderHint(), title }),
@@ -228,6 +236,9 @@ async function init() {
     open: openTemplate,
   });
   $('notices').onclick = showNotices;
+  // 타이머·알람: 맞춰 둔 것이 Cypher가 꺼져 있는 동안 지나갔으면 여기서(켠 직후) 바로 알린다.
+  initTimer({ make, openPopup, setStatus, ring: timerRang, onChange: renderTimerButton, wake: (ms) => invoke('wake_after', { ms }) });
+  $('timers').onclick = showTimers;
   initSidebarGrip();
   initComposer();
   // 사이드바 아래에는 자주 쓰는 것만 둔다. 나머지는 창 상단 메뉴에 있다. 브라우저는 사이드바의 사이트 항목이다.
@@ -357,6 +368,7 @@ function runMenu(id) {
     palette: showPalette,
     reopen: showClosed,
     notices: showNotices,
+    timers: showTimers,
     templates: showTemplates,
     snippets: showSnippets,
     broadcast: () => setBroadcast(!broadcast),
@@ -469,7 +481,7 @@ const baseName = (p) => p.replace(/[\\/]+$/, '').split(/[\\/]/).pop() || p;
 const setStatus = (text) => { $('status-text').textContent = text; };
 /** 항목의 원래 이름(종류와 폴더, 메모는 파일 이름이나 첫 줄). */
 const baseLabel = (s) => (s.kind === 'term'
-  ? `${s.profile.label} · ${s.worktree || baseName(s.cwd)}`
+  ? `${s.profile.label} · ${s.ssh ? specLabel(s.ssh) : s.worktree || baseName(s.cwd)}`
   : s.view?.title() || KINDS[s.kind].label);
 /** 화면에 보일 이름: 별칭이 있으면 별칭, 없으면 원래 이름. */
 const label = (s) => s.name || baseLabel(s);
@@ -532,6 +544,13 @@ async function newSession(profileId, opts = {}) {
   // 세션은 워크스페이스 안에서만 연다. 워크스페이스를 정해 주지 않았으면 지금 보고 있는 항목의 워크스페이스에 연다.
   const group = groupFor(opts);
   if (!group) return null;
+  // SSH 세션은 접속할 곳이 있어야 한다. 정해 주지 않았으면 접속 창을 띄워 고르게 하고, 거기서 고르면 다시 이리로 온다.
+  const sshProfile = isSshProfile(profile);
+  const ssh = sshProfile ? cleanSpec(opts.ssh) : null;
+  if (sshProfile && !ssh) {
+    if (!opts.restoring) showSsh({ ...opts, group, ssh: undefined });
+    return null;
+  }
   if (!opts.restoring) lastProfile = profileId;
   // 시작 폴더: 정해 주지 않았으면 그 워크스페이스의 폴더(워크스페이스 폴더), 그것도 없으면 기본 폴더(사용자 폴더).
   let start = opts.cwd || folder;
@@ -573,6 +592,7 @@ async function newSession(profileId, opts = {}) {
     startCwd: cwd, cwd, project: '', worktree: opts.worktree || '',
     name: opts.name || '', color: opts.color || '', mark: freeMark(opts.mark),
     group,
+    ssh,               // SSH 세션이면 접속할 곳 { target, name?, port?, identity?, options? }
     title: '', model: '', effort: '', context: null, cost: 0,
     usage: '', usageEl: null,
     agents: new Map(), // 지금 돌고 있는 서브에이전트: 번호 → 종류
@@ -632,12 +652,14 @@ async function startProcess(s, worktree = null) {
     s.lastOutput = performance.now();
   };
   const size = { cols: term.cols, rows: term.rows };
+  // 기본 Claude 프로필은 사용자가 정해 둔 실행 명령으로 띄운다. 그 명령으로 띄우지 못하거나 뜨자마자 끝나면 어디서 고치는지 알려 준다.
+  const command = s.profile.id === 'claude' && claudeCommand ? claudeCommand : null;
+  s.launch = { command, at: Date.now() };
   try {
     s.id = await invoke('session_create', {
       profile: s.profile.id, cwd: s.startCwd, cols: size.cols, rows: size.rows,
       resume: resumeOf(s) || null, worktree: worktree || null, onOutput: channel,
-      // 기본 Claude 프로필은 사용자가 정해 둔 실행 명령으로 띄운다.
-      command: s.profile.id === 'claude' && claudeCommand ? claudeCommand : null,
+      command, ssh: s.ssh || null,
     });
     // 띄우는 사이에 사용자가 이미 닫았으면, 방금 뜬 프로세스를 끝내고 손을 뗀다.
     if (!sessions.has(s.key)) { invoke('session_close', { id: s.id }); return; }
@@ -654,6 +676,7 @@ async function startProcess(s, worktree = null) {
   } catch (err) {
     if (!sessions.has(s.key)) return;
     term.write(`\x1b[31m세션을 시작하지 못했습니다: ${err}\x1b[0m\r\n`);
+    if (command) term.write(commandHint(command));
     s.exited = true;
   }
   render();
@@ -741,6 +764,17 @@ async function newItem(kind, opts = {}) {
   render();
   saveState();
   return s;
+}
+
+/** SSH 세션 프로필의 번호(앱의 기본 프로필). */
+const SSH = 'ssh';
+/** 접속할 곳을 받아 띄우는 SSH 프로필인지. 사용자가 설정 파일에서 같은 번호로 인자까지 적어 둔 프로필은 그 인자대로 띄우는 보통 프로필이다. */
+const isSshProfile = (profile) => profile?.id === SSH && !(profile.args || []).length;
+
+/** 같은 서버에 세션을 하나 더 연다(연결 복제). 화면에 보이는 세션이면 그 옆에 나눠 열고, 아니면 지금 창 자리에 연다. */
+function cloneSsh(s, show = visible.includes(s) ? 'split' : 'replace') {
+  if (!s?.ssh) return null;
+  return newSession(SSH, { ...besideOf(s), cwd: s.startCwd, ssh: s.ssh, color: s.color, show });
 }
 
 /** 모든 종류의 창에 공통인 동작: 나란히 보기에서 창을 누르면 그 창이 활성화된다. */
@@ -853,6 +887,8 @@ function balanced(list, dir = 'row') {
 function layout() {
   // 창을 떼었다 붙이면 그 안에 있던 초점이 사라진다. 배치를 다시 지은 뒤에 되돌린다.
   const focused = document.activeElement;
+  // 창을 떼었다 붙이면 그 안의 스크롤이 맨 위로 돌아간다. 보던 자리를 스스로 지키는 항목(코드 보기)에 미리 알린다.
+  for (const s of visible) { try { s.view?.freeze?.(); } catch { /* 그 화면의 문제로 배치가 멈추지 않게 */ } }
   visible = leavesOf(tree);
   for (const s of sessions.values()) {
     const shown = visible.includes(s);
@@ -884,6 +920,7 @@ function layout() {
       ? '워크스페이스 머리의 +를 눌러 세션이나 메모·HTTP·사이트·문서·할 일 같은 항목을 더하세요.'
       : '왼쪽 위의 [+ 워크스페이스]로 워크스페이스를 만들고, 워크스페이스 머리의 +로 세션이나 항목을 더하세요.';
   syncComposer();
+  markBroadcast();
   syncSites(); // 사이트 항목의 웹뷰를 새 창 자리에 맞춘다.
   if (focused && focused !== document.activeElement && focused !== document.body && $terms.contains(focused)) {
     focused.focus({ preventScroll: true });
@@ -896,6 +933,7 @@ function layout() {
   });
   // 쉬는 세션이 화면에 올라왔으면(누르기, 끌어다 놓기, 묶음 나란히 보기) 재개한다.
   for (const s of visible) wake(s);
+  markBroadcast(); // 방금 재개한 세션도 동시 입력을 받는다.
 }
 
 /**
@@ -916,6 +954,7 @@ function resyncScroll(s) {
 }
 
 function fitVisible() {
+  if (fitHeld) return; // 프롬프트 편집기의 높이를 끄는 중: 손이 멈추면 한 번에 맞춘다(settleResize).
   for (const s of visible) {
     try { s.fitAddon?.fit(); } catch { /* 아직 크기를 잴 수 없는 상태 */ }
   }
@@ -1039,6 +1078,9 @@ async function closeSession(s, { forget = false } = {}) {
     if (!(await s.view.close())) return;
     s.view.dispose();
   } else {
+    // 응답 도중에 닫은 세션이 만들던 파일은 놓지 않는다(닫은 뒤에 항목이 생기거나, 지운 워크스페이스가 되살아나지 않게).
+    clearTimeout(s.heldFilesTimer);
+    s.heldFiles?.clear();
     if (s.id != null && !s.exited) invoke('session_close', { id: s.id });
     s.term.dispose();
   }
@@ -1153,14 +1195,45 @@ function focusPane(step) {
   activate(visible[(visible.indexOf(active) + step + visible.length) % visible.length]);
 }
 
+/**
+ * 동시 입력을 켜거나 끈다. 켜면 한 세션에 친 글쇠가 나란히 보이는 다른 세션에도 함께 들어간다.
+ * `on`: 참(나란히 보이는 모든 터미널 세션) | 'ssh'(나란히 보이는 SSH 세션끼리만 — 여러 서버에 같은 명령을 넣을 때) | 거짓(끔)
+ */
 function setBroadcast(on) {
-  broadcast = on;
-  $terms.classList.toggle('broadcast', on);
-  $('status-mode').textContent = on ? '동시 입력 켜짐: 나란히 보이는 모든 세션에 입력됩니다' : '';
+  broadcast = on === SSH ? SSH : on ? 'all' : false;
+  markBroadcast();
   focusItem(active);
 }
 
+/** 지금 동시 입력을 받는 세션들: 나란히 보이는 살아 있는 터미널 세션(SSH 동시 입력이면 그 가운데 SSH 세션). */
+function castTargets() {
+  if (!broadcast) return [];
+  return visible.filter((v) => isTerm(v) && !v.exited && !v.dormant && (broadcast !== SSH || v.ssh));
+}
+
+/** 동시 입력을 받는 창을 표시하고(제목 줄의 색 줄, SSH 세션의 [동시 입력] 단추) 상태줄에 알린다. */
+function markBroadcast() {
+  const targets = castTargets();
+  $terms.classList.toggle('broadcast', !!broadcast);
+  for (const s of sessions.values()) {
+    s.pane.classList.toggle('casting', targets.includes(s));
+    if (s.castButton) {
+      s.castButton.classList.toggle('on', broadcast === SSH);
+      s.castButton.title = broadcast === SSH
+        ? 'SSH 동시 입력 끄기'
+        : 'SSH 동시 입력 켜기: 여기에 치는 글쇠가 나란히 보이는 다른 SSH 세션에도 함께 들어갑니다';
+    }
+  }
+  $('status-mode').textContent = !broadcast ? ''
+    : broadcast === SSH ? (targets.length ? `SSH 동시 입력 켜짐: 나란히 보이는 SSH 세션 ${targets.length}개에 함께 입력됩니다` : 'SSH 동시 입력 켜짐: 나란히 보이는 접속 중인 SSH 세션이 없습니다')
+    : '동시 입력 켜짐: 나란히 보이는 모든 세션에 입력됩니다';
+}
+
 const byId = (id) => [...sessions.values()].find((s) => s.id === id);
+
+const QUICK_EXIT_MS = 10000; // 띄운 지 이 안에 오류로 끝난 세션은 "띄우지 못한 것"으로 보고 실행 명령을 고치는 곳을 알려 준다.
+/** 정해 둔 Claude 실행 명령으로 세션을 띄우지 못했을 때 터미널에 적는 안내. */
+const commandHint = (command) => `\x1b[33mClaude 실행 명령으로 띄웠습니다: ${command}\r\n이 명령이 맞는지 확인하세요: 창 위쪽 메뉴의 설정 → "Claude 실행 명령…"에서 고치거나, 비우면 기본값(claude)으로 띄웁니다.\x1b[0m\r\n`;
 
 /**
  * 누구의 것인지 아직 모르는 종료 알림(번호 → 종료 코드). 세션을 띄우라는 요청의 답(번호)보다 종료 알림이 먼저 닿으면
@@ -1182,7 +1255,11 @@ function onExit({ id, code }) {
   s.interruptAt = 0;
   s.waiting = '';    // 끝난 세션이 "대기"로 남아 대기 수와 다음 대기로 가기(Ctrl+Shift+N)를 막지 않게 한다.
   s.heldStop = false;
+  placeHeld(s);      // 끝나기 전에 만든 파일 가운데 최종 파일을 사이드바에 놓는다.
+  markBroadcast();   // 끝난 세션은 동시 입력을 받지 않는다.
   s.term.write(`\r\n\x1b[90m[세션 종료${code == null ? '' : `: 코드 ${code}`} · 사이드바에서 오른쪽 클릭 → 다시 시작]\x1b[0m\r\n`);
+  // 정해 둔 실행 명령으로 띄운 Claude 세션이 뜨자마자 오류로 끝났으면 그 명령이 문제일 수 있다.
+  if (s.launch?.command && code && Date.now() - s.launch.at < QUICK_EXIT_MS) s.term.write(commandHint(s.launch.command));
   render();
   saveState();
 }
@@ -1231,6 +1308,7 @@ const INFO_ONLY = new Set([
  * API 오류로 끝난 요청에는 완료(Stop) 신호를 보내지 않는다.
  */
 function endWork(s) {
+  placeHeld(s); // 이 요청에서 만든 파일 가운데 최종 파일을 사이드바에 놓는다.
   s.workStart = 0;
   s.interruptAt = 0;
   s.heldStop = false;
@@ -1313,8 +1391,7 @@ function onHook({ id, event, kind, message, agent, agent_type: agentType, backgr
     s.took = 0;
     s.tools.clear();          // 앞 요청에서 끝 신호가 빠진 도구 표시가 남지 않게 한다.
     s.toolSig = '';
-    s.placed = 0;             // 이 요청에서 만든 파일을 사이드바에 놓은 수(넘치지 않게 센다)
-    s.unplaced = 0;
+    placeHeld(s);             // 앞 요청에서 만들고 아직 놓지 않은 파일이 남아 있으면 놓는다(한도는 놓는 묶음마다 따로 센다).
     return render();
   }
   if (event === 'Notification' && kind === 'idle_prompt') {
@@ -1345,6 +1422,7 @@ function onHook({ id, event, kind, message, agent, agent_type: agentType, backgr
     if (s.workStart) s.took = (force && s.heldEpoch ? s.heldEpoch : Date.now()) - s.workStart;
     s.workStart = 0;
     s.tools.clear(); // 응답이 끝났으니 쓰고 있는 도구도 없다.
+    placeHeld(s);    // 이 요청에서 만든 파일 가운데 최종 파일을 사이드바에 놓는다.
   }
   if (force) s.agents.clear(); // 한참 조용했으니 남아 있던 서브에이전트 표시는 끝난 것으로 본다.
   s.waiting = event === 'Stop' ? 'done' : 'approval';
@@ -1464,6 +1542,31 @@ function renderNoticeButton() {
   $button.classList.toggle('has', count > 0);
 }
 
+/** 사이드바 아래 [타이머] 단추: 맞춰 둔 것이 있으면 가장 먼저 울릴 것까지 남은 시간을 보여 준다(1초마다 고친다). */
+function renderTimerButton() {
+  const next = nextTimer();
+  const $button = $('timers');
+  const text = next ? `⏰ ${next.left}` : '타이머';
+  if ($button.textContent !== text) $button.textContent = text;
+  $button.classList.toggle('has', !!next);
+  $button.title = next
+    ? `타이머·알람 ${next.count}개 · 다음: ${next.label || (next.kind === 'alarm' ? '알람' : '타이머')} (${next.left} 남음) · 누르면 보기·맞추기`
+    : '타이머·알람 맞추기 (24시간 이내) · Cypher가 꺼져 있는 동안 지나간 것은 켠 직후에 알려 줍니다';
+}
+
+/**
+ * 타이머·알람이 울렸다(timer.js): 알림 기록에 남기고, 누를 때까지 남는 알림을 띄우고, 창이 뒤에 있으면 Windows 알림도 띄운다.
+ * 놓치면 안 되는 알림이라 스스로 사라지지 않는다.
+ */
+function timerRang({ title, body }) {
+  logNotice(null, 'timer', title, body);
+  const box = make('div', 'toast alarm');
+  box.append(make('b', '', `⏰ ${title}`), make('span', '', body), make('span', 'alarm-hint', '누르면 닫힙니다'));
+  box.onclick = () => box.remove();
+  $('toasts').append(box);
+  if (!document.hasFocus() && config.notify.system) invoke('notify', { title: `⏰ ${title}`, body });
+}
+
 /** 세션과 무관한 알림(오류 등). 상태줄과 달리 다른 표시에 덮이지 않고 누를 때까지 12초간 남는다. */
 function notice(title, body) {
   logNotice(null, 'info', title, body);
@@ -1557,7 +1660,7 @@ function sessionItem(s) {
     if (ev.ctrlKey) toggleShown(s); else activate(s);
   };
   li.onmousedown = (ev) => {
-    if (ev.button === 0 && !ev.ctrlKey && !ev.target.closest('button, input')) drag = { s, x: ev.clientX, y: ev.clientY, active: false };
+    if (ev.button === 0 && !ev.ctrlKey && !ev.target.closest('button, input')) { cancelDrag(); drag = { s, x: ev.clientX, y: ev.clientY, active: false }; }
   };
   li.dataset.key = s.key;
   li.ondblclick = (ev) => { if (!ev.target.closest('button, input')) rename(s); };
@@ -1617,7 +1720,7 @@ function sessionItem(s) {
   // 지금 쓰는 도구: 일하는 동안에는 터미널 제목 대신 보이고, 승인을 기다릴 때는 무엇을 승인하는지 알 수 있게 뒤에 붙는다.
   const running = s.exited || s.waiting === 'done' ? null : currentTool(s);
   const subText = s.exited ? '종료됨 (오른쪽 클릭: 다시 시작)'
-    : s.dormant ? (resumeOf(s) ? '쉬는 중 · 누르면 대화를 이어 재개' : '쉬는 중 · 누르면 재개')
+    : s.dormant ? (resumeOf(s) ? '쉬는 중 · 누르면 대화를 이어 재개' : s.ssh ? '쉬는 중 · 누르면 다시 접속' : '쉬는 중 · 누르면 재개')
     : s.waiting === 'done' && s.took >= 1000 ? `완료 · ${duration(s.took)} 걸림 · 다음 지시 대기`
     : WAITING_TEXT[s.waiting] || (s.heldStop && s.agents.size ? '서브에이전트가 끝나기를 기다리는 중' : running ? ''
       // 터미널이 아닌 항목은 그 화면이 내놓는 한 줄(할 일의 진행, 명령의 상태)을 보여 준다.
@@ -1860,7 +1963,8 @@ function addItems(group) {
   const forSession = group.logical && groupFolderOf(group.name) ? { group: opts.group } : opts;
   return [
     { caption: `폴더: ${opts.cwd}${group.logical && groupFolderOf(group.name) ? ' (워크스페이스 폴더)' : ''}` },
-    ...config.profiles.map((p) => ({ label: `+ ${p.label} 세션`, action: () => newSession(p.id, forSession) })),
+    // SSH 세션은 접속할 곳을 고르는 창이 먼저 뜬다.
+    ...config.profiles.map((p) => ({ label: isSshProfile(p) ? `+ ${p.label} 세션… (서버에 접속)` : `+ ${p.label} 세션`, action: () => newSession(p.id, forSession) })),
     ...Object.entries(KINDS).map(([kind, def]) => ({ label: `+ ${def.label}`, action: () => createKind(kind, opts) })),
   ];
 }
@@ -1879,7 +1983,8 @@ function currentGroup() {
 function templateItem(s) {
   const base = { kind: s.kind, cwd: s.project || s.startCwd, name: s.name || undefined, color: s.color || undefined };
   // 세션은 프로필과 폴더만 담는다(대화는 담지 않고, 펼칠 때 새로 시작한다).
-  if (isTerm(s)) return { ...base, profile: s.profile.id };
+  // SSH 세션은 접속할 곳(주소·포트·이름)도 담는다. 키 파일과 추가 옵션은 담지 않는다(다른 PC에는 없는 경로이고, 옵션은 명령을 실행할 수 있다).
+  if (isTerm(s)) return { ...base, profile: s.profile.id, ...(s.ssh ? { ssh: { target: s.ssh.target, name: s.ssh.name, port: s.ssh.port } } : {}) };
   const state = s.view.state();
   switch (s.kind) {
     case 'memo':
@@ -1893,6 +1998,8 @@ function templateItem(s) {
     case 'todo': return { ...base, saved: { text: s.view.text() } };
     case 'run': return state.command ? { ...base, saved: { command: state.command } } : null;
     case 'table': return state.path ? { ...base, saved: { path: state.path } } : null;
+    // 코드 보기는 프로젝트 폴더만 담는다(열어 둔 파일은 담지 않는다).
+    case 'code': return { ...base, saved: { root: state.root } };
     default: return null;
   }
 }
@@ -1929,6 +2036,7 @@ function templateSaved(kind, saved) {
     // 명령은 받아 두기만 하고 실행하지 않는다(틀을 펼친 뒤 사용자가 ▶를 눌러야 돈다).
     case 'run': return { ...text('command') };
     case 'table': return { ...text('path') };
+    case 'code': return { ...text('root') };
     default: return null;
   }
 }
@@ -1953,7 +2061,11 @@ async function openTemplate(template, { group, cwd = null }) {
   for (const item of items) {
     const term = !item.kind || item.kind === 'term';
     const saved = term ? null : templateSaved(item.kind, item.saved);
-    const known = term ? config.profiles.some((p) => p.id === item.profile) : !!KINDS[item.kind] && !!saved;
+    // 다른 폴더에서 펼치는 코드 보기는 그 폴더를 본다.
+    if (saved && item.kind === 'code' && cwd) saved.root = cwd;
+    // 틀 파일은 다른 사람에게서 받은 것일 수 있다. SSH 세션은 주소·포트·이름만 받는다(키 파일·추가 옵션은 받지 않는다).
+    const ssh = term && item.profile === SSH ? cleanSpec({ target: item.ssh?.target, name: item.ssh?.name, port: item.ssh?.port }) : null;
+    const known = term ? config.profiles.some((p) => p.id === item.profile) && (item.profile !== SSH || !!ssh) : !!KINDS[item.kind] && !!saved;
     const title = typeof item.name === 'string' ? item.name : '';
     if (!known) {
       skipped.push(`${title || item.profile || item.kind}: 이 Cypher에서 펼칠 수 없는 종류입니다`);
@@ -1963,10 +2075,11 @@ async function openTemplate(template, { group, cwd = null }) {
     if (!cwd && !kept) moved += 1;
     try {
       const s = await revive({
-        kind: term ? 'term' : item.kind, profile: item.profile, saved,
+        kind: term ? 'term' : item.kind, profile: item.profile, saved, ssh,
         name: title, color: COLORS.includes(item.color) ? item.color : '',
         cwd: cwd || (kept ? item.cwd : folder), group,
-      }, { show: 'hidden' });
+        // 틀로 펼친 SSH 세션은 쉬는 세션으로 둔다. 틀은 남에게서 받을 수 있으니, 펼치자마자 그 주소로 접속하지 않고 사용자가 누를 때 접속한다.
+      }, { show: 'hidden', ...(ssh ? { dormant: true } : {}) });
       if (s) made.push(s);
     } catch (err) {
       skipped.push(`${title || item.kind}: ${err}`);
@@ -1974,7 +2087,9 @@ async function openTemplate(template, { group, cwd = null }) {
   }
   if (moved) skipped.push(`폴더가 없어진 항목 ${moved}개는 ${folder}에서 열었습니다`);
   reveal(made);
-  if (made.length) activate(made[0]);
+  // 쉬는 세션으로 놓은 것(SSH)은 고르지 않는다: 고르면 바로 접속한다.
+  const first = made.find((s) => !s.dormant);
+  if (first) activate(first);
   return { made: made.length, skipped };
 }
 
@@ -1995,9 +2110,26 @@ function groupMenu(group, ev) {
     const own = groupFolderOf(group.name);
     items.push({ label: own ? '워크스페이스 폴더 바꾸기…' : '워크스페이스 폴더 정하기… (이 워크스페이스의 세션이 시작될 폴더)', action: () => pickGroupFolder(group.name) });
     items.push({ label: '워크스페이스 이름 바꾸기', action: () => renameGroup(group) });
+    // 순서는 머리를 끌어서도 바꾼다. 메뉴로는 한 칸씩 옮긴다.
+    const at = groupList.indexOf(group.name);
+    if (at > 0) items.push({ label: '위로 옮기기 (머리를 끌어도 됩니다)', action: () => nudgeGroup(group.name, -1) });
+    if (at >= 0 && at < groupList.length - 1) items.push({ label: '아래로 옮기기', action: () => nudgeGroup(group.name, 1) });
     items.push({ label: '워크스페이스 삭제', action: () => deleteGroup(whole) }); // 항목이 남아 있으면 물어보고 모두 닫은 뒤 지운다.
   } else {
     items.push({ label: '이 묶음을 워크스페이스로 만들기…', action: () => askGroup(all) });
+  }
+  // SSH 세션이 둘 이상이면: 모두 나란히 띄우고 SSH 동시 입력을 켠다(여러 서버에 같은 명령을 넣을 때).
+  const servers = all.filter((s) => s.ssh && !s.exited);
+  if (servers.length > 1) {
+    items.push({
+      label: `SSH 세션 ${Math.min(servers.length, MAX_PANES)}개 나란히 보고 동시 입력`,
+      action: () => {
+        tree = balanced(servers.slice(0, MAX_PANES));
+        layout();
+        if (visible[0]) activate(visible[0]);
+        setBroadcast(SSH);
+      },
+    });
   }
   items.push({
     label: '이 워크스페이스만 나란히 보기',
@@ -2023,15 +2155,21 @@ document.addEventListener('mousemove', (ev) => {
   if (!drag.active) {
     if (Math.hypot(ev.clientX - drag.x, ev.clientY - drag.y) < 6) return;
     drag.active = true;
-    drag.ghost = make('div', 'drag-ghost', label(drag.s));
+    drag.ghost = make('div', 'drag-ghost', drag.group ? `◆ ${drag.group}` : label(drag.s));
     document.body.append(drag.ghost);
     $list.classList.add('dragging');
-    render(); // "새 워크스페이스" 놓을 자리를 보여 준다.
+    if (!drag.group) render(); // "새 워크스페이스" 놓을 자리를 보여 준다.
   }
   drag.ghost.style.left = `${ev.clientX + 12}px`;
   drag.ghost.style.top = `${ev.clientY + 8}px`;
   for (const row of $list.querySelectorAll('li.drop, li.before, li.after')) row.classList.remove('drop', 'before', 'after');
   const point = document.elementFromPoint(ev.clientX, ev.clientY);
+  if (drag.group) {
+    // 워크스페이스를 끄는 중: 놓으면 끼어들 자리(다른 워크스페이스의 위나 아래)를 선으로 보여 준다.
+    const over = groupUnder(point, ev.clientY);
+    if (over && over.name !== drag.group) (over.after ? over.last : over.head).classList.add(over.after ? 'after' : 'before');
+    return;
+  }
   point?.closest?.('li.group[data-drop]')?.classList.add('drop');
   // 다른 항목의 줄 위에서는 놓으면 끼어들 자리(그 줄의 위나 아래)를 선으로 보여 준다.
   const over = rowUnder(point, ev.clientY);
@@ -2042,13 +2180,20 @@ document.addEventListener('mousemove', (ev) => {
 
 document.addEventListener('mouseup', (ev) => {
   if (!drag) return;
-  const { s, active: moved, ghost } = drag;
+  const { s, group: draggedGroup, active: moved, ghost } = drag;
   drag = null;
   if (!moved) return; // 그냥 클릭
   ghost.remove();
   $list.classList.remove('dragging');
   showDropHint(null);
+  draggedAt = performance.now();
   const point = document.elementFromPoint(ev.clientX, ev.clientY);
+  if (draggedGroup) {
+    // 워크스페이스를 다른 워크스페이스의 위나 아래에 놓음: 사이드바에서의 순서를 바꾼다.
+    const over = groupUnder(point, ev.clientY);
+    if (over) moveGroup(draggedGroup, over.name, over.after);
+    return render();
+  }
   const head = point?.closest?.('li.group[data-drop]');
   if (head) {
     // 묶음 머리에 놓음: 그 묶음으로 옮긴다.
@@ -2082,6 +2227,62 @@ function rowUnder(point, y) {
   if (!target) return null;
   const rect = row.getBoundingClientRect();
   return { row, target, after: y > rect.top + rect.height / 2 };
+}
+
+/** 끌던 것을 그만둔다(Esc, 놓는 신호를 받지 못한 채 다시 눌렀을 때). 따라다니던 표시와 놓을 자리 표시를 치운다. 그만둔 것이 있었으면 참. */
+function cancelDrag() {
+  if (!drag) return false;
+  const moved = drag.active;
+  drag.ghost?.remove();
+  drag = null;
+  if (!moved) return false;
+  $list.classList.remove('dragging');
+  showDropHint(null);
+  draggedAt = performance.now();
+  render();
+  return true;
+}
+// 끄는 중에 Esc를 누르면 옮기지 않고 그만둔다.
+window.addEventListener('keydown', (ev) => {
+  if (ev.key === 'Escape' && drag?.active && cancelDrag()) { ev.preventDefault(); ev.stopPropagation(); }
+}, true);
+
+/** 끌기를 막 끝낸 때. 끌다가 처음 누른 줄 위에서 놓으면 클릭도 함께 오는데, 그 클릭으로 묶음이 접히지 않게 한다. */
+let draggedAt = -Infinity;
+
+/**
+ * 그 자리(point)에 있는 워크스페이스와, 세로 위치로 본 끼어들 자리. 워크스페이스의 머리뿐 아니라 그 아래에 펼쳐진 항목 줄 위도
+ * 그 워크스페이스로 친다. 머리부터 마지막 줄까지의 위쪽 절반이면 그 워크스페이스의 앞, 아래쪽 절반이면 뒤다.
+ */
+function groupUnder(point, y) {
+  const row = point?.closest?.('#sessions li');
+  if (!row) return null;
+  let head = row;
+  while (head && !head.classList.contains('group')) head = head.previousElementSibling;
+  if (!head || head.dataset.drop !== 'logical' || !groupList.includes(head.dataset.name)) return null;
+  let last = head;
+  while (last.nextElementSibling && !last.nextElementSibling.classList.contains('group')) last = last.nextElementSibling;
+  const top = head.getBoundingClientRect().top, bottom = last.getBoundingClientRect().bottom;
+  return { name: head.dataset.name, head, last, after: y > (top + bottom) / 2 };
+}
+
+/** 워크스페이스 `name`을 사이드바 순서에서 `target`의 바로 앞(after이면 바로 뒤)으로 옮긴다. 이 순서는 다시 시작해도 유지된다. 옮겼으면 참. */
+function moveGroup(name, target, after) {
+  if (name === target || !groupList.includes(name) || !groupList.includes(target)) return false;
+  const order = groupList.filter((other) => other !== name);
+  order.splice(order.indexOf(target) + (after ? 1 : 0), 0, name);
+  if (order.every((other, index) => other === groupList[index])) return false; // 제자리
+  groupList = order;
+  saveGroups();
+  render();
+  return true;
+}
+
+/** 워크스페이스를 사이드바에서 한 칸 위(step -1)나 아래(step 1)로 옮긴다. */
+function nudgeGroup(name, step) {
+  const at = groupList.indexOf(name), to = at + step;
+  if (at < 0 || to < 0 || to >= groupList.length) return false;
+  return moveGroup(name, groupList[to], step > 0);
 }
 
 /** 항목 s를 사이드바 순서에서 target의 바로 앞(after이면 바로 뒤)으로 옮긴다. 이 순서는 다시 시작해도 유지된다. */
@@ -2160,7 +2361,7 @@ function render() {
       'group', group.logical && 'logical', group.list.some((s) => s.attention || s.waiting) && 'attention',
     ].filter(Boolean).join(' '));
     const ownFolder = group.logical ? groupFolderOf(group.name) : '';
-    head.title = `${group.hint}\n${group.logical ? `워크스페이스 폴더: ${ownFolder || `정하지 않음 (기본 폴더 ${folder}에서 시작)`}\n` : ''}클릭: 접기·펼치기 · 오른쪽 클릭: 메뉴 · +: 세션·항목 더하기 · 끌어다 놓기: 이 워크스페이스에 넣기`;
+    head.title = `${group.hint}\n${group.logical ? `워크스페이스 폴더: ${ownFolder || `정하지 않음 (기본 폴더 ${folder}에서 시작)`}\n` : ''}클릭: 접기·펼치기 · 오른쪽 클릭: 메뉴 · +: 세션·항목 더하기 · 항목을 끌어다 놓기: 이 워크스페이스에 넣기${group.logical ? ' · 이 머리를 끌기: 워크스페이스 순서 바꾸기' : ''}`;
     head.dataset.drop = group.logical ? 'logical' : 'folder';
     head.dataset.name = group.name;
     // 밖에서 끌어다 놓은 것을 이 묶음의 항목으로 만들 때 쓴다(drop.js).
@@ -2213,7 +2414,14 @@ function render() {
       row.append(path, recent, pick);
       head.append(row);
     }
+    // 워크스페이스의 머리를 끌면 다른 워크스페이스의 위나 아래로 순서를 옮긴다(단추와 폴더 줄에서는 끌기를 시작하지 않는다).
+    if (group.logical && !filterWaiting) {
+      head.onmousedown = (ev) => {
+        if (ev.button === 0 && !ev.ctrlKey && !ev.target.closest('button, input, .group-folder')) { cancelDrag(); drag = { group: group.name, x: ev.clientX, y: ev.clientY, active: false }; }
+      };
+    }
     head.onclick = () => {
+      if (performance.now() - draggedAt < 300) return; // 끌다가 제자리에 놓은 것
       if (folded) collapsed.delete(group.key); else collapsed.add(group.key);
       localStorage.setItem('cypher.collapsed', JSON.stringify([...collapsed]));
       render();
@@ -2231,7 +2439,7 @@ function render() {
     hint.onclick = () => newGroup();
     rows.push(hint);
   }
-  if (drag?.active) {
+  if (drag?.active && !drag.group) {
     const fresh = make('li', 'group new', '+ 새 워크스페이스로 (여기에 놓기)');
     fresh.dataset.drop = 'new';
     rows.push(fresh);
@@ -2265,9 +2473,18 @@ function render() {
       hide.onclick = (ev) => { ev.stopPropagation(); toggleShown(s); };
       s.headInfo = make('span', 'pane-info');
       s.head.replaceChildren(s.headInfo, only, hide);
+      if (s.ssh) {
+        // SSH 세션: 나란히 보이는 SSH 세션끼리의 동시 입력을 그 자리에서 켜고 끈다.
+        s.castButton = make('button', 'pane-button cast', '동시 입력');
+        s.castButton.onclick = (ev) => { ev.stopPropagation(); setBroadcast(broadcast === SSH ? false : SSH); };
+        s.head.insertBefore(s.castButton, only);
+        markBroadcast();
+      }
       s.head.ondblclick = () => showOnly(s);
     }
     s.headInfo.replaceChildren(
+      // 나란히 볼 때는 창마다 그 세션의 워크스페이스를 적는다(서로 다른 워크스페이스의 세션을 나란히 두고 헷갈리지 않게).
+      ...(isTerm(s) && s.group ? [make('span', 'pane-group', `◆ ${s.group}`)] : []),
       ...(s.mark ? [markBadge(s.mark)] : []),
       make('span', 'title', label(s)),
       ...(s.agents.size ? [agentPill(s.agents.size, agentSummary(s))] : []),
@@ -2277,11 +2494,18 @@ function render() {
   syncComposer();
 }
 
-/** 스테이지 맨 위에 지금 보고 있는 항목을 알려 준다: 워크스페이스(또는 폴더 묶음) › 별칭·이름 · 원래 이름 · 폴더. */
+/**
+ * 스테이지 맨 위에 지금 보고 있는 항목을 알려 준다: 워크스페이스(또는 폴더 묶음) › 별칭·이름 · 원래 이름 · 폴더.
+ * 터미널 세션(Claude·셸·SSH)을 보고 있을 때는 워크스페이스 이름을 크게 적는다: 여러 워크스페이스의 세션을 오가다
+ * 엉뚱한 세션에 입력하는 일이 없게, 지금 입력이 어느 업무로 가는지 한눈에 보이게 한다.
+ */
 function renderWhere() {
   const $where = $('where');
   const s = active && sessions.has(active.key) ? active : null;
   $where.hidden = !s;
+  // 화면에 터미널 세션이 보이는 동안에는 줄의 높이를 그대로 둔다. 나란히 볼 때 고른 창에 따라 높이가 바뀌면 그때마다
+  // 터미널의 줄 수가 바뀌어 Claude Code가 화면을 다시 그린다.
+  $where.classList.toggle('big', isTerm(s) || visible.some(isTerm));
   if (!s) return;
   const name = make('span', 'where-name', label(s));
   if (s.color) name.style.color = s.color;
@@ -2405,6 +2629,7 @@ function paletteEntries() {
     command('새 워크스페이스 만들기…', newGroup),
     command('닫은 항목 다시 열기…', showClosed, '명령 · Ctrl+Shift+R: 가장 나중에 닫은 것'),
     command('알림 기록', showNotices, `명령 · Ctrl+Shift+A${unreadCount() ? ` · 새 알림 ${unreadCount()}개` : ''}`),
+    command('타이머·알람 맞추기…', showTimers, `명령 · 24시간 이내${nextTimer() ? ` · 다음 알림까지 ${nextTimer().left}` : ''}`),
     command('워크스페이스 틀: 저장해 둔 구성 펼치기…', showTemplates),
     ...(currentGroup() ? [command('지금 워크스페이스를 틀로 저장…', () => saveTemplate(currentGroup()), `명령 · ${currentGroup().name}`)] : []),
     command('다음 대기 세션으로', nextWaiting, '명령 · Ctrl+Shift+N'),
@@ -2413,6 +2638,8 @@ function paletteEntries() {
     command('화면에서 찾기', openSearch, '명령 · Ctrl+Shift+F'),
     command('자주 쓰는 지시', showSnippets, '명령 · Ctrl+Shift+P'),
     command(broadcast ? '동시 입력 끄기' : '동시 입력 켜기', () => setBroadcast(!broadcast), '명령 · Ctrl+Shift+B'),
+    command(broadcast === SSH ? 'SSH 동시 입력 끄기' : 'SSH 동시 입력 켜기', () => setBroadcast(broadcast === SSH ? false : SSH), '명령 · 나란히 보이는 SSH 세션끼리만 함께 입력'),
+    ...(active?.ssh ? [command(`이 SSH 연결 복제 (${specLabel(active.ssh)})`, () => cloneSsh(active), '명령 · 같은 서버에 새 세션')] : []),
     command('프롬프트 편집기로 가기', focusComposer, '명령 · Ctrl+Shift+E'),
     ...(visible.length > 1 && active ? [command('분할 풀기 (지금 창만 보기)', () => showOnly(active))] : []),
     command('기억 내보내기·가져오기', () => showMemory()),
@@ -2506,13 +2733,24 @@ function sessionMenu(s, ev) {
     ...(term ? [
       ...(s.dormant ? [{ label: resumeOf(s) ? '재개 (대화 이어 가기)' : '재개', action: () => activate(s) }] : []),
       ...(s.exited ? [{
-        label: resumeOf(s) ? '다시 시작 (대화 이어 가기)' : '다시 시작 (같은 폴더에서)',
+        label: resumeOf(s) ? '다시 시작 (대화 이어 가기)' : s.ssh ? '다시 접속' : '다시 시작 (같은 폴더에서)',
         action: () => restartSession(s),
       }] : []),
-      {
+      ...(s.ssh ? [
+        { label: `이 연결 복제 (같은 서버에 새 세션 · ${specLabel(s.ssh)})`, action: () => cloneSsh(s) },
+        { label: '다른 서버에 접속…', action: () => showSsh({ ...besideOf(s), cwd: s.startCwd, show: visible.includes(s) ? 'split' : 'replace' }) },
+        ...(savedHosts().some((host) => host.target === s.ssh.target && (host.port || 0) === (s.ssh.port || 0)) ? [] : [{
+          label: '이 서버를 저장해 두기 (접속 창에서 한 번에 접속)',
+          action: () => { if (saveHost({ ...s.ssh, name: s.ssh.name || s.name })) setStatus(`SSH 서버를 저장했습니다: ${specLabel(s.ssh)}`); },
+        }]),
+        ...(visible.includes(s) && visible.filter((v) => v.ssh).length > 1 ? [{
+          label: broadcast === SSH ? 'SSH 동시 입력 끄기' : 'SSH 동시 입력 켜기 (나란히 보이는 SSH 세션에 함께 입력)',
+          action: () => setBroadcast(broadcast === SSH ? false : SSH),
+        }] : []),
+      ] : [{
         label: `같은 폴더에 새 ${s.profile.label} 세션`,
         action: () => newSession(s.profile.id, { ...besideOf(s), show: visible.includes(s) ? 'split' : 'replace' }),
-      },
+      }]),
       { label: '변경 내용 보기', action: () => { activate(s); toggleDiff(true); } },
       ...(s.exited || s.dormant ? [] : [{ label: '화면 다시 맞추기 (글자가 어긋나 보일 때)', action: () => realign(s) }]),
       { label: '출력 저장…', action: () => exportText(s) },
@@ -2930,6 +3168,12 @@ function httpFolders(s) {
 // 그 세션의 묶음에 놓는다: 문서(.md, .txt) → 문서 항목, 그림 → 이미지 항목, 요청 파일(.http) → HTTP 항목,
 // 표 파일(.csv, .tsv) → 표 항목, HTML 파일(.html, .htm) → 사이트 항목(그 파일을 브라우저로 연다).
 // 보던 화면은 바꾸지 않고 사이드바에만 놓으며, 알림으로 알려 준다. 설정의 [session] show_created로 끄거나 넓힌다.
+//
+// 만들자마자 놓지 않고 그 요청의 응답이 끝날 때 놓는다(placeHeld). 일하는 도중에 만들었다가 지운 파일, 잠깐 쓰는 파일
+// (tmp_…, ….bak), 같은 요청에서 만든 문서에 들어간 그림 같은 "중간 파일"은 놓지 않고 최종 파일만 놓는다.
+
+const HELD_TRIES = 5;            // 빈 채로 남은 새 파일을 다시 살펴보는 횟수(응답이 끝날 때마다 한 번)
+const CREATED_SETTLE_MS = 4000;  // 요청 중이 아닐 때(신호 없이 만든 파일) 이만큼 더 만들지 않으면 놓는다
 
 const MAX_PLACED = 8;           // 요청 하나에서 사이드바에 놓는 파일 수
 /** 드라이브 글자만 남은 폴더(`C:`)에는 구분자를 붙인다(붙이지 않으면 "그 드라이브의 지금 폴더"를 뜻하게 된다). */
@@ -2958,6 +3202,7 @@ function showsFile(other, path) {
     case 'http': return samePath(other.view.state().file || '', path);
     case 'site': return sameFileUrl(other.view.url() || '', fileUrl(path));
     case 'image': return samePath(other.view.state().source || '', path);
+    case 'code': return other.view.shows(path);
     default: return false;
   }
 }
@@ -2969,7 +3214,10 @@ function showsFile(other, path) {
  */
 function refreshShown(s, path) {
   for (const other of sessions.values()) {
-    if (other === s || groupKey(other) !== groupKey(s) || !showsFile(other, path)) continue;
+    if (other === s || groupKey(other) !== groupKey(s)) continue;
+    // 코드 보기는 열어 둔 파일이 아니어도 프로젝트의 파일이 바뀐 것을 알아야 한다(나무와 바뀐 파일 목록).
+    try { other.view?.fileChanged?.(path); } catch { /* 그 화면의 문제로 다른 항목까지 멈추지 않게 */ }
+    if (!showsFile(other, path)) continue;
     Promise.resolve(other.view.refresh?.()).catch(() => {});
   }
 }
@@ -2980,23 +3228,63 @@ function onEditedFile({ id, path }) {
   if (s && path) refreshShown(s, path);
 }
 
-/** 앱이 알려 온 "Claude 세션이 새로 만든 파일"을 그 세션의 묶음에 놓는다. */
-async function onCreatedFile({ id, path, kind }) {
+/**
+ * 앱이 알려 온 "Claude 세션이 새로 만든 파일". 바로 놓지 않고 적어 두었다가 그 요청의 응답이 끝날 때 최종 파일만 놓는다(placeHeld).
+ */
+function onCreatedFile({ id, path, kind }) {
   const s = byId(id);
   if (!s || !path) return;
   // 지웠다가 다시 만든 파일처럼, 이미 그 파일을 보여 주는 항목이 있으면 그 항목은 새 내용을 읽는다.
   refreshShown(s, path);
-  if (!shouldPlace(s, path, kind)) return;
-  try {
-    const item = await placeCreated(s, path, kind);
-    if (item && sessions.has(s.key)) announce(item, s, '파일을 만들었습니다');
-  } catch (err) {
-    setStatus(`만든 파일을 사이드바에 놓지 못했습니다(${baseName(path)}): ${err}`);
+  s.heldFiles ??= new Map(); // 경로(견주는 꼴) → { path, kind }. 만든 차례대로.
+  s.heldFiles.set(pathKey(path), { path, kind });
+  // 요청 중이 아닌데 온 파일(요청 시작 신호를 받지 못한 경우)은 잠깐 기다렸다가 놓는다. 요청 중이면 응답이 끝날 때 놓는다.
+  clearTimeout(s.heldFilesTimer);
+  s.heldFilesTimer = setTimeout(() => { if (!s.workStart) placeHeld(s); }, CREATED_SETTLE_MS);
+}
+
+/**
+ * 적어 둔 "새로 만든 파일" 가운데 최종 파일을 그 세션의 묶음에 놓는다. 응답이 끝났을 때(완료 신호, 중단, 세션 종료) 부른다.
+ * 그사이 지운 파일·잠깐 쓰는 파일·문서에 들어간 그림은 앱이 가려 준다(created_final).
+ */
+function placeHeld(s) {
+  if (!s) return Promise.resolve();
+  clearTimeout(s.heldFilesTimer);
+  // 지금까지 적어 둔 것만 한 묶음으로 놓는다(차례를 기다리는 사이 다음 요청이 만든 파일이 이 묶음의 한도에 세어지지 않게).
+  const held = [...(s.heldFiles?.values() || [])];
+  s.heldFiles?.clear();
+  if (!held.length) return s.placing || Promise.resolve();
+  // 잇달아 불러도 차례대로 놓는다(앞의 것을 놓는 중이면 그 뒤에 잇는다).
+  s.placing = (s.placing || Promise.resolve()).then(() => placeHeldNow(s, held)).catch(() => {});
+  return s.placing;
+}
+
+async function placeHeldNow(s, held) {
+  // 가려 주지 못하면(오류) 지금까지처럼 모두 놓는다.
+  const keep = await invoke('created_final', { paths: held.map((file) => file.path) }).catch(() => held.map(() => 'final'));
+  if (!sessions.has(s.key)) return; // 기다리는 사이 세션을 닫았다.
+  const batch = { placed: 0, unplaced: 0 }; // 이번에(응답 하나에서) 놓은 수와 넘쳐서 놓지 않은 수
+  for (const [index, file] of held.entries()) {
+    const { path, kind } = file;
+    // 아직 빈 파일은 다음 응답이 끝날 때 다시 본다(빈 파일로 만들어 두고 다음 요청에서 채우는 경우). 몇 번 보고도 비어 있으면 잊는다.
+    if (keep[index] === 'later') {
+      file.tries = (file.tries || 0) + 1;
+      if (file.tries < HELD_TRIES && !s.heldFiles.has(pathKey(path))) s.heldFiles.set(pathKey(path), file);
+      continue;
+    }
+    if (keep[index] !== 'final' || !shouldPlace(s, path, kind, batch)) continue;
+    try {
+      if (!sessions.has(s.key)) return;
+      const item = await placeCreated(s, path, kind);
+      if (item && sessions.has(s.key)) announce(item, s, '파일을 만들었습니다');
+    } catch (err) {
+      setStatus(`만든 파일을 사이드바에 놓지 못했습니다(${baseName(path)}): ${err}`);
+    }
   }
 }
 
 /** 그 파일을 사이드바에 놓을지: 설정, 이미 놓았거나 보이는 파일, 한 요청의 한도를 본다. 놓기로 했으면 센다. */
-function shouldPlace(s, path, kind) {
+function shouldPlace(s, path, kind, batch) {
   const mode = config.session.show_created || 'known';
   if (mode === 'off' || (kind === 'other' && mode !== 'all')) return false;
   // 같은 파일은 그 세션에서 한 번만 놓는다(지웠다가 다시 만들어도).
@@ -3004,19 +3292,20 @@ function shouldPlace(s, path, kind) {
   if (s.placedFiles.has(pathKey(path))) return false;
   s.placedFiles.add(pathKey(path));
   // 그 묶음에 이미 이 파일을 보여 주는 항목이 있으면 더 놓지 않는다(사이트 항목은 HTML 파일일 때만 친다).
-  const shows = (other) => (other.kind !== 'site' || kind === 'html') && showsFile(other, path);
+  // 코드 보기가 탭으로 열어 둔 것은 "보여 주는 항목"으로 치지 않는다(코드 보기는 프로젝트의 어느 파일이든 열어 둘 수 있다).
+  const shows = (other) => other.kind !== 'code' && (other.kind !== 'site' || kind === 'html') && showsFile(other, path);
   if ([...sessions.values()].some((other) => groupKey(other) === groupKey(s) && shows(other))) return false;
   // 한 요청에서 파일을 많이 만들면 사이드바가 넘치므로 몇 개까지만 놓고, 넘친 것은 한 번만 알린다.
-  if ((s.placed || 0) >= MAX_PLACED) {
-    s.unplaced = (s.unplaced || 0) + 1;
-    if (s.unplaced === 1) {
+  if (batch.placed >= MAX_PLACED) {
+    batch.unplaced += 1;
+    if (batch.unplaced === 1) {
       const body = `이 요청에서 만든 파일이 많아 ${MAX_PLACED}개까지만 사이드바에 놓았습니다.`;
       logNotice(s, 'item', label(s), body);
       if (config.notify.in_app) toast(s, label(s), body);
     }
     return false;
   }
-  s.placed = (s.placed || 0) + 1;
+  batch.placed += 1;
   return true;
 }
 
@@ -3121,18 +3410,25 @@ async function askHomePage() {
 /**
  * 설정 → "Claude 실행 명령…": "+ Claude"로 여는 세션을 띄울 명령을 정한다(별칭·감싼 스크립트·늘 붙이는 인자 등).
  * Cypher는 이 명령 뒤에 자기 인자(--settings, --mcp-config, --resume)를 붙여 띄운다. 비우면 프로필의 명령(기본은 claude)이다.
+ * 프로그램은 PATH에서 찾고(실행 파일, 배치 파일, PowerShell 스크립트), 파일로 찾지 못하면 PowerShell의 명령(프로필에 만들어 둔 별칭·함수)으로
+ * 실행해 본다. 경로의 `%USERPROFILE%`·`~`를 풀고, 빈칸이 든 경로를 따옴표 없이 적어도 실제 파일까지를 프로그램으로 본다(cypher-pty, profile.rs).
  */
 async function askClaudeCommand() {
   const given = await ask('Claude 실행 명령 ("+ Claude"로 여는 세션을 이 명령으로 띄웁니다 · 비우면 기본값 claude)', '예: claude --dangerously-skip-permissions', claudeCommand);
-  if (given == null) return;
-  const command = given.trim();
+  if (given != null) setClaudeCommand(given);
+}
+
+/** Claude 실행 명령을 정한다(빈 글이면 기본 명령). 따옴표가 닫히지 않은 명령은 받지 않는다. 정했으면 참. */
+function setClaudeCommand(given) {
+  const command = String(given ?? '').trim();
   // 빈칸이 든 경로는 큰따옴표로 감싼다. 따옴표가 짝이 맞지 않으면 세션을 띄울 때 읽지 못한다.
-  if ((command.match(/"/g) || []).length % 2) return notice('Claude 실행 명령', `큰따옴표가 닫히지 않았습니다: ${command}. 바꾸지 않았습니다.`);
+  if ((command.match(/"/g) || []).length % 2) { notice('Claude 실행 명령', `큰따옴표가 닫히지 않았습니다: ${command}. 바꾸지 않았습니다.`); return false; }
   claudeCommand = command;
   try { localStorage.setItem('cypher.claudeCommand', claudeCommand); } catch { /* 저장 공간 문제는 무시 */ }
   setStatus(claudeCommand
-    ? `Claude 실행 명령: ${claudeCommand} — 이제부터 여는 Claude 세션에 적용됩니다(열려 있는 세션은 그대로).`
+    ? `Claude 실행 명령: ${claudeCommand} — 이제부터 여는 Claude 세션에 적용됩니다(열려 있는 세션은 그대로). 프로그램·배치 파일(.cmd)·PowerShell 스크립트(.ps1)와 PowerShell 프로필의 별칭·함수를 쓸 수 있습니다.`
     : 'Claude 실행 명령을 비웠습니다. 기본 명령(claude)으로 띄웁니다.');
+  return true;
 }
 
 /** 지금 보고 있는 항목의 워크스페이스가 쓰는 Chrome을 연다. 워크스페이스가 없으면 공용 프로필의 Chrome(Claude 세션은 조작할 수 없다). */
@@ -3333,9 +3629,29 @@ const composerTarget = () => (visible.length === 1 && isTerm(visible[0]) ? visib
 
 /** 프롬프트 편집기를 접거나 편다. 단추 글자와 저장값을 함께 맞춘다. */
 function setComposerFolded(folded) {
-  $('composer').classList.toggle('folded', folded);
-  $('composer-fold').textContent = folded ? '프롬프트 편집기 ▴' : '프롬프트 편집기 ▾';
-  localStorage.setItem('cypher.composer.folded', folded ? '1' : '');
+  if ($('composer').classList.contains('folded') === folded) return;
+  // 접거나 펴면 세션 화면의 줄 수가 바뀐다. 높이를 끌 때처럼 한 번에 맞추고 Claude 세션은 화면을 다시 맞춘다.
+  resizeComposer(() => {
+    $('composer').classList.toggle('folded', folded);
+    $('composer-fold').textContent = folded ? '프롬프트 편집기 ▴' : '프롬프트 편집기 ▾';
+    try { localStorage.setItem('cypher.composer.folded', folded ? '1' : ''); } catch { /* 저장 공간 문제는 무시 */ }
+  });
+}
+
+/**
+ * 프롬프트 편집기의 크기를 바꾸는 일(`change`)을 하고, 그 뒤에 세션 화면을 한 번에 새 크기에 맞춘다(settleResize).
+ * 바꾸는 동안에는 터미널 크기를 묶어 두고, 무슨 일이 있어도 묶인 채로 남지 않게 한다.
+ */
+function resizeComposer(change) {
+  fitHeld = true;
+  try {
+    change();
+  } finally {
+    let done = false;
+    const settle = () => { if (!done) { done = true; settleResize(); } };
+    requestAnimationFrame(settle);
+    setTimeout(settle, 120); // 창이 가려져 그리기 신호가 오지 않을 때를 대비한다.
+  }
 }
 
 function initComposer() {
@@ -3346,7 +3662,9 @@ function initComposer() {
     return clamped;
   };
   setHeight(Number(localStorage.getItem('cypher.composer.height')) || COMPOSER_HEIGHT);
-  setComposerFolded(!!localStorage.getItem('cypher.composer.folded'));
+  // 처음에는 저장해 둔 대로만 차린다(맞출 세션이 아직 없다).
+  $box.classList.toggle('folded', !!localStorage.getItem('cypher.composer.folded'));
+  $('composer-fold').textContent = $box.classList.contains('folded') ? '프롬프트 편집기 ▴' : '프롬프트 편집기 ▾';
   $('composer-fold').onclick = () => {
     setComposerFolded(!$box.classList.contains('folded'));
     if (!$box.classList.contains('folded')) $text.focus(); else focusItem(active);
@@ -3382,17 +3700,29 @@ function initComposer() {
     document.body.classList.add('resizing-col');
     let height = 0;
     const bottom = $box.getBoundingClientRect().bottom;
-    const move = (e) => { height = setHeight(bottom - e.clientY - 4); };
+    // 끄는 동안에는 세션 화면의 줄 수를 그대로 두고, 손이 멈추면(그리고 놓으면) 새 높이에 맞춰 화면을 다시 맞춘다.
+    const move = (e) => {
+      if (e.buttons === 0) return stop(); // 놓는 신호를 받지 못했다(창 밖에서 놓음): 여기서 끝낸다
+      settleResizeSoon();
+      height = setHeight(bottom - e.clientY - 4);
+    };
     const stop = () => {
       document.removeEventListener('mousemove', move);
       document.removeEventListener('mouseup', stop);
+      window.removeEventListener('blur', stop);
       document.body.classList.remove('resizing-col');
-      if (height) localStorage.setItem('cypher.composer.height', String(height));
+      try { if (height) localStorage.setItem('cypher.composer.height', String(height)); } catch { /* 저장 공간 문제는 무시 */ }
+      settleResize();
     };
+    // 끄는 중에 창이 초점을 잃어 놓는 신호를 받지 못해도 크기가 묶인 채로 남지 않게 한다.
+    window.addEventListener('blur', stop);
     document.addEventListener('mousemove', move);
     document.addEventListener('mouseup', stop);
   };
-  grip.ondblclick = () => localStorage.setItem('cypher.composer.height', String(setHeight(COMPOSER_HEIGHT)));
+  grip.ondblclick = () => resizeComposer(() => {
+    const height = setHeight(COMPOSER_HEIGHT);
+    try { localStorage.setItem('cypher.composer.height', String(height)); } catch { /* 저장 공간 문제는 무시 */ }
+  });
 }
 
 /**
@@ -3564,6 +3894,7 @@ function describe(s) {
       profile: s.profile.id,
       resume: resumeOf(s) || null,
       draft: s.draft || undefined,
+      ssh: s.ssh || undefined, // SSH 세션이 접속할 곳
     } : { saved: s.view.state() }),
   };
 }
@@ -3575,7 +3906,7 @@ function revive(item, opts = {}) {
   // 종류 표시가 없는 예전 기록은 터미널 세션이다.
   const term = !item.kind || item.kind === 'term';
   return term
-    ? newSession(item.profile, { ...common, resume: item.resume, draft: item.draft })
+    ? newSession(item.profile, { ...common, resume: item.resume, draft: item.draft, ssh: item.ssh })
     : newItem(item.kind, { ...common, saved: item.saved });
 }
 
@@ -3645,7 +3976,8 @@ async function restore({ docsOnly = false } = {}) {
 
 /** 키 입력을 순서대로 보낸다. 동시 입력이 켜져 있으면 나란히 보이는 모든 세션에 보낸다. */
 function send(s, data) {
-  const targets = broadcast && visible.includes(s) ? visible.filter((v) => isTerm(v) && !v.exited) : [s];
+  const casting = castTargets();
+  const targets = casting.includes(s) ? casting : [s];
   const interrupts = data === '\x1b' || data === '\x03'; // Esc, Ctrl+C
   for (const t of targets) {
     // 일하는 중에 누른 Esc·Ctrl+C는 요청을 중단시킬 수 있다. 조금 뒤 조용해졌는지 보고 작업 시간을 멈춘다(refreshActivity).
@@ -3696,27 +4028,94 @@ function realignIfSkewed(s) {
   realign(s);
 }
 
-/**
- * 세션의 화면을 다시 맞춘다: 터미널을 한 줄 줄였다가 되돌려, 세션의 프로그램이 화면을 처음부터 다시 그리게 한다.
- * 다시 그리지 않는 프로그램(셸)이라도 가상 터미널이 자기 화면을 통째로 다시 보내므로 화면 쪽이 어긋난 것은 바로잡힌다.
- */
-function realign(s) {
-  if (!s?.term || s.id == null || s.exited || s.realigning || s.settling) return;
-  const { cols, rows } = s.term;
-  if (rows < 3) return;
-  s.realigning = true;
-  s.settling = true;
-  s.skewed = false;
-  s.realignedAt = performance.now() + REALIGN_HOLD_MS; // 되돌린 뒤까지 조용한 시간으로 친다
-  // 다시 그린 뒤에 겹친 줄을 지우고 보던 자리를 되찾을 수 있게, 지금 화면의 윗줄과 보던 자리를 적어 둔다(settleRepaint).
+/** 다시 맞추기 전의 화면: 화면의 윗줄 글자와 그 줄에 꽂은 표시, 내용의 끝을 보고 있었는지, 보던 자리, 아래에 남은 빈 줄 수. */
+function screenBefore(s) {
   const buffer = s.term.buffer.active;
-  const before = {
+  return {
     top: topLines(s.term),
     mark: buffer.type === 'normal' ? s.term.registerMarker(-buffer.cursorY) : null, // 지금 화면의 맨 윗줄
     atEnd: seesEnd(s.term),
     viewY: buffer.viewportY,
     gap: gapBelow(s.term),
   };
+}
+
+// 프롬프트 편집기의 위쪽 테두리를 끌어 높이를 바꾸면 그 위의 세션 화면도 줄 수가 바뀐다. 끄는 내내 터미널 크기를 따라 바꾸면
+// Claude Code가 그때마다 화면을 다시 그려 지난 출력에 같은 줄이 겹쳐 쌓이고, 다 끌고 나면 화면이 잘리거나 아래가 빈 채로 남는다.
+// 그래서 끄는 동안에는 터미널 크기를 그대로 두고(fitHeld), 손이 멈추면 한 번에 새 크기로 맞춘 뒤 Claude 세션은 화면을 다시
+// 맞춘다(realign): Claude Code가 새 줄 수에 맞게 처음부터 다시 그리고, 겹친 줄은 지운다.
+
+const RESIZE_SETTLE_MS = 220;  // 끌던 손이 이만큼 멈추면 화면을 새 크기에 맞춘다
+const RESIZE_BOUNCE_MS = 300;  // 새 크기를 알린 뒤 이만큼 있다가 다시 그리게 한다(프로그램이 새 크기를 먼저 알아채게)
+const RESIZE_RETRY_MS = 250;   // 다시 맞추는 중이면 이만큼 뒤에 다시 본다
+const RESIZE_TRIES = 24;       // 그렇게 기다려 보는 횟수(넘으면 그냥 맞춘다)
+let fitHeld = false;           // 참인 동안에는 터미널 크기를 창에 맞추지 않는다
+let settleTimer = 0;
+let settleTries = 0;
+
+/** 끄는 중: 손이 멈추면 맞추게 걸어 둔다. */
+function settleResizeSoon() {
+  fitHeld = true;
+  clearTimeout(settleTimer);
+  settleTries = 0;
+  settleTimer = setTimeout(() => settleResize(true), RESIZE_SETTLE_MS);
+}
+
+/**
+ * 화면에 보이는 터미널을 지금 창 크기에 맞추고, 줄·칸 수가 바뀐 Claude 세션은 화면을 다시 맞춘다.
+ * `still`이면 아직 끄는 중이다(다음에 손이 멈출 때까지 다시 크기를 묶어 둔다).
+ *
+ * - 줄 수만 줄었으면 Claude Code가 스스로 화면을 다시 그린다. 그 뒤의 정리(겹친 줄 지우기, 보던 자리)만 한다.
+ * - 줄 수가 늘었거나 칸 수가 바뀌었으면 새 크기를 알린 뒤 조금 있다가 한 줄 줄였다 되돌린다(realign). 바로 이어서 줄이면
+ *   프로그램은 두 번의 변경을 "조금 늘어난 것" 한 번으로 보고 다시 그리지 않아, 늘어난 만큼 아래가 빈 채로 남는다.
+ * - 앞선 다시 맞추기가 아직 끝나지 않았으면 끝난 뒤에 한다. 겹쳐서 하면 어느 줄이 겹친 줄인지 가려낼 수 없다.
+ */
+function settleResize(still = false) {
+  clearTimeout(settleTimer);
+  settleTimer = 0;
+  const claudes = visible.filter((s) => isTerm(s) && aliveClaude(s) && s.id != null);
+  if (claudes.some((s) => s.realigning || s.settling) && settleTries < RESIZE_TRIES) {
+    settleTries += 1;
+    fitHeld = true;
+    settleTimer = setTimeout(() => settleResize(still), RESIZE_RETRY_MS);
+    return;
+  }
+  settleTries = 0;
+  fitHeld = false;
+  // 크기를 바꾸기 전의 화면을 적어 둔다(다시 그린 뒤 겹친 줄을 가려내는 데 쓴다).
+  const watched = claudes
+    .filter((s) => !s.realigning && !s.settling)
+    .map((s) => ({ s, cols: s.term.cols, rows: s.term.rows, before: screenBefore(s) }));
+  fitVisible();
+  for (const { s, cols, rows, before } of watched) {
+    if (s.term.cols === cols && s.term.rows === rows) { before.mark?.dispose(); continue; } // 크기가 그대로다
+    s.settling = true;
+    s.skewed = false;
+    s.realignedAt = performance.now();
+    if (s.term.cols === cols && s.term.rows < rows) { settleRepaint(s, before); continue; }
+    setTimeout(() => {
+      s.settling = false;
+      if (!sessions.has(s.key)) { before.mark?.dispose(); return; }
+      realign(s, before);
+    }, RESIZE_BOUNCE_MS);
+  }
+  fitHeld = still;
+}
+
+/**
+ * 세션의 화면을 다시 맞춘다: 터미널을 한 줄 줄였다가 되돌려, 세션의 프로그램이 화면을 처음부터 다시 그리게 한다.
+ * 다시 그리지 않는 프로그램(셸)이라도 가상 터미널이 자기 화면을 통째로 다시 보내므로 화면 쪽이 어긋난 것은 바로잡힌다.
+ */
+function realign(s, before = null) {
+  const { cols, rows } = s?.term || {};
+  if (!s?.term || s.id == null || s.exited || s.realigning || s.settling || rows < 3) { before?.mark?.dispose(); return; }
+  s.realigning = true;
+  s.settling = true;
+  s.skewed = false;
+  s.realignedAt = performance.now() + REALIGN_HOLD_MS; // 되돌린 뒤까지 조용한 시간으로 친다
+  // 다시 그린 뒤에 겹친 줄을 지우고 보던 자리를 되찾을 수 있게, 지금 화면의 윗줄과 보던 자리를 적어 둔다(settleRepaint).
+  // 크기를 바꾼 뒤에 다시 맞추는 경우(settleResize)에는 크기를 바꾸기 전에 적어 둔 것을 받는다.
+  before ??= screenBefore(s);
   s.term.resize(cols, rows - 1);
   setTimeout(() => {
     s.realigning = false;
@@ -3724,7 +4123,9 @@ function realign(s) {
     try {
       // 그 사이에 창 크기가 바뀌었으면(터미널이 이미 새 크기다) 그대로 두고, 아니면 원래 줄 수로 되돌린다.
       if (s.term.cols === cols && s.term.rows === rows - 1) {
-        if (visible.includes(s)) { try { s.fitAddon.fit(); } catch { s.term.resize(cols, rows); } } else s.term.resize(cols, rows);
+        // 크기를 묶어 둔 동안(프롬프트 편집기의 높이를 바꾸는 중)에는 원래 줄 수로만 되돌린다. 여기서 새 높이에 맞춰 버리면
+        // 뒤따르는 settleResize가 "크기가 그대로"로 보고 넘어가, 새 높이로 다시 그린 것의 겹친 줄을 지우지 못한다.
+        if (visible.includes(s) && !fitHeld) { try { s.fitAddon.fit(); } catch { s.term.resize(cols, rows); } } else s.term.resize(cols, rows);
       }
     } finally {
       s.realignedAt = performance.now();
@@ -3750,6 +4151,7 @@ const REPAINT_MIN_MS = 500;  // 줄 수를 되돌린 뒤 프로그램이 다시 
 const REPAINT_QUIET_MS = 300; // 그 뒤 이만큼 출력이 없으면 다 그린 것으로 본다
 const REPAINT_WAIT_MS = 3000; // 그래도 이만큼 지나면 더 기다리지 않는다
 const TOP_LINES = 3;         // 화면이 얼마나 내려왔는지 알아볼 때 견주는 윗줄 수
+const REPEAT_EXTRA = 6;      // 겹친 덩이를 견줄 때, 다시 그린 쪽에만 있어도 되는 줄 수(줄 수가 줄 때 지난 출력에서 빠졌던 줄)
 
 const lineText = (buffer, y) => buffer.getLine(y)?.translateToString(true) ?? '';
 
@@ -3887,22 +4289,40 @@ function dropRepeated(s, before) {
     return true;
   };
   let edge = -1; // 겹친 두 덩이 사이: 다시 그릴 때 화면이 시작되던 줄
+  let count = moved; // 지울 줄 수
   for (let y = from; y <= Math.min(from + moved, base) && edge < 0; y++) {
     if (y - moved >= 0 && same(y - moved, y)) edge = y;
+  }
+  // 똑같은 덩이가 없으면: 다시 그린 쪽에만 있는 줄이 몇 줄 끼어 있는 경우를 본다. 프로그램은 줄 수가 줄 때마다 화면의 끝부분만
+  // 다시 그려서 그때 화면 맨 위에 있던 줄이 지난 출력에서 빠지는데, 나중에 넓어져 다시 그리면 그 줄이 되살아난다. 그러면 위쪽 덩이는
+  // 아래쪽 덩이에서 그 몇 줄이 빠진 모양이다. 아래에서부터 차례로 맞춰 보아, 아래쪽에만 있는 줄이 몇 줄(REPEAT_EXTRA) 이하이고
+  // 위쪽의 줄이 모두 차례대로 맞으면 위쪽의 맞은 줄들을 지운다(지우는 줄은 모두 아래쪽에 같은 차례로 그대로 있다).
+  for (let y = from; y <= Math.min(from + moved, base) && edge < 0; y++) {
+    let upper = y - 1, lower = y + moved - 1, extra = 0;
+    while (lower >= y && upper >= 0 && extra <= REPEAT_EXTRA) {
+      if (lineText(buffer, upper) === lineText(buffer, lower)) upper -= 1; else extra += 1;
+      lower -= 1;
+    }
+    const matched = y - 1 - upper;
+    // 맞은 줄이 적으면(빈 줄 하나가 우연히 맞은 것일 수 있다) 겹친 것으로 보지 않는다: 세 줄 이상, 끼어든 줄보다 많이,
+    // 그리고 글자가 있는 줄이 하나는 맞아야 한다.
+    let written = 0;
+    for (let i = upper + 1; i < y; i++) if (lineText(buffer, i).trim()) written += 1;
+    if (lower < y && extra > 0 && extra <= REPEAT_EXTRA && matched === moved - extra && matched >= Math.max(3, extra) && written > 0) { edge = y; count = matched; }
   }
   if (edge < 0) return 0;
   // xterm.js에는 지난 출력의 가운데 줄을 지우는 공개 기능이 없어 안쪽 버퍼를 직접 고친다(같이 넣어 둔 판에 맞춘 것).
   const inner = term._core?.buffers?.normal;
   if (!inner?.lines?.splice || inner.ybase !== base) return 0;
-  const start = edge - moved;
-  const shift = (y) => (y >= edge ? y - moved : Math.min(y, start)); // 지운 줄 아래는 그만큼 올라오고, 지운 줄 안은 그 자리로
-  inner.lines.splice(start, moved);
-  inner.ybase -= moved;
+  const start = edge - count;
+  const shift = (y) => (y >= edge ? y - count : Math.min(y, start)); // 지운 줄 아래는 그만큼 올라오고, 지운 줄 안은 그 자리로
+  inner.lines.splice(start, count);
+  inner.ybase -= count;
   inner.ydisp = shift(inner.ydisp);
   inner.savedY = shift(inner.savedY);
   term._core.viewport?.syncScrollArea(true);
   term.refresh(0, term.rows - 1);
-  return moved;
+  return count;
 }
 
 const sizeKey = ({ cols, rows }) => `${cols}x${rows}`;
@@ -4226,8 +4646,9 @@ window.addEventListener('keydown', (ev) => {
   if (digit && combo) setMark(active, digit);
   // 그 숫자의 북마크가 없으면 가로채지 않는다(Ctrl+0은 문서·ERD·마인드맵·메모에서 기본 크기·전체 맞춤이기도 하다).
   else if (digit && ev.ctrlKey && !ev.shiftKey && !ev.altKey && markedItem(digit)) jumpToMark(digit);
-  else if (combo && key === 't') newSession(lastProfile);
-  else if (combo && key === 'd') newSession(lastProfile, { show: 'split' });
+  // 마지막에 연 것이 SSH 세션이고 지금 SSH 세션을 보고 있으면 그 연결을 복제한다(아니면 접속 창이 뜬다).
+  else if (combo && key === 't') { if (lastProfile === SSH && active?.ssh) cloneSsh(active, 'replace'); else newSession(lastProfile); }
+  else if (combo && key === 'd') { if (lastProfile === SSH && active?.ssh) cloneSsh(active, 'split'); else newSession(lastProfile, { show: 'split' }); }
   else if (combo && key === 'w') { if (active) closeSession(active); }
   else if (combo && key === 'x') { if (active) toggleShown(active); }
   else if (combo && key === 'f') openSearch();
@@ -4261,8 +4682,9 @@ window.cypher = {
   onHook, onStatus, nextWaiting, writeState, rename, sendPrompt, text: sessionText, addImages, onCaptured, captureBrowser,
   setLook, currentLook, mcpAction, handoffSite, onMcpRequest, setMark, jumpToMark, markedItem, textToClaude, runFinished,
   showPalette, paletteEntries, showClosed, reopenLast, restartSession, placeInOrder, inSidebarOrder, cycle, find, recallPrompt, createGroup, newGroup, adoptGroup, groupFor,
-  onCreatedFile, onEditedFile, onTool, realign, closeGap, gapBelow, wake, wakeGroup, restore, runsClaude, askClaudeCommand, setGroupFolder, groupFolderOf, groupContext, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
+  showTimers, addTimer, removeTimer, timers, nextTimer, onCreatedFile, placeHeld, cloneSsh, showSsh, castTargets, saveHost, savedHosts, onEditedFile, onTool, realign, settleResize, settleResizeSoon, moveGroup, nudgeGroup, closeGap, gapBelow, wake, wakeGroup, restore, runsClaude, askClaudeCommand, setClaudeCommand, setGroupFolder, groupFolderOf, groupContext, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
   get visible() { return visible; },
+  get broadcast() { return broadcast; },
   get active() { return active; },
 };
 

@@ -630,9 +630,9 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     button('표식', '표식 붙이기·떼기 (가지 오른쪽 클릭)', (ev) => showMenu(ev, markItems(selected || root))),
     $fold,
     button('맞춤', '전체 맞춤 (Ctrl+0)', () => fit()),
-    button('축소', '축소 (Ctrl+-, Ctrl+휠)', () => zoomBy(1 / 1.25)),
+    button('축소', '축소 (Ctrl+-, 휠)', () => zoomBy(1 / 1.25)),
     $zoom,
-    button('확대', '확대 (Ctrl++, Ctrl+휠)', () => zoomBy(1.25)),
+    button('확대', '확대 (Ctrl++, 휠)', () => zoomBy(1.25)),
     button('구조', '펼치는 방향: 양쪽 · 오른쪽', (ev) => showMenu(ev, [
       { label: `${logic ? '' : '● '}양쪽으로 펼치기 (마인드맵)`, action: () => change(() => { logic = false; }) },
       { label: `${logic ? '● ' : ''}오른쪽으로만 펼치기 (논리도)`, action: () => change(() => { logic = true; }) },
@@ -702,7 +702,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
   $svg.append($view);
   const $edit = make('textarea', 'mm-edit');
   Object.assign($edit, { spellcheck: false, autocomplete: 'off', hidden: true, rows: 1 });
-  const $hint = make('div', 'mm-hint', 'Tab: 하위 · Enter: 형제 · 글자 입력·F2·두 번 누르기: 고치기(Shift+Enter: 줄 바꿈, Esc: 취소) · Delete: 지우기 · 끌기: 옮기기 · 빈 곳 끌기·Ctrl+클릭: 여러 개 고르기 · Space+끌기·가운데 단추: 그림 옮기기 · 오른쪽 클릭: 표식·색 · Ctrl+E: 코드');
+  const $hint = make('div', 'mm-hint', 'Tab: 하위 · Enter: 형제 · 글자 입력·F2·두 번 누르기: 고치기(Shift+Enter: 줄 바꿈, Esc: 취소) · Delete: 지우기 · 가지 끌기: 옮기기 · 휠: 확대·축소 · 빈 곳 끌기: 그림 옮기기 · Shift+빈 곳 끌기·Ctrl+클릭: 여러 개 고르기 · 오른쪽 클릭: 표식·색 · Ctrl+E: 코드');
   $stage.append($svg, $edit, $hint);
   const body = make('div', 'mm-body');
   body.append($codeView, $stage);
@@ -1236,7 +1236,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
 
   const pointOf = (ev) => { const rect = $stage.getBoundingClientRect(); return { x: ev.clientX - rect.left, y: ev.clientY - rect.top }; };
   const nodeOfEvent = (ev) => byId(ev.target.closest?.('.mm-node')?.dataset.id);
-  // 누르고 있는 것: { pan } 그림 옮기기 · { box } 빈 곳에서 범위 상자로 고르기 · { node } 가지 누르기·끌어 옮기기. 공통: x, y, moved
+  // 누르고 있는 것: { pan } 그림 옮기기(빈 곳 끌기) · { box } Shift·Ctrl을 누른 채 빈 곳에서 범위 상자로 고르기 · { node } 가지 누르기·끌어 옮기기. 공통: x, y, moved
   let press = null;
   let lastDown = null; // 바로 앞에 누른 곳 { node, at, x, y }
 
@@ -1278,8 +1278,11 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     lastDown = again ? null : { node, at: ev.timeStamp, x: ev.clientX, y: ev.clientY };
     if (again) { beginEdit(node); return; }
     if (!node) {
-      // 빈 곳: 끌면 범위 상자로 고른다(Ctrl·Shift를 누르고 있으면 이미 고른 것에 더한다). 끌지 않고 떼면 여러 개 고른 것이 풀린다.
-      press = { box: true, x: ev.clientX, y: ev.clientY, moved: false, at: pointOf(ev), add, base: new Set(add ? picked : []), main: selected };
+      // 빈 곳: 끌면 그림이 손을 따라 움직인다. 끌지 않고 떼면 여러 개 고른 것이 풀린다.
+      // Shift·Ctrl을 누른 채 끌면 범위 상자로 고른다(이미 고른 것에 더한다).
+      press = add
+        ? { box: true, x: ev.clientX, y: ev.clientY, moved: false, at: pointOf(ev), add, base: new Set(picked), main: selected }
+        : { pan: true, empty: true, x: ev.clientX, y: ev.clientY, moved: false, from: { ...view } };
       return;
     }
     // 표식은 이미 고른 가지에서 누를 때만 메뉴를 띄운다(표식이 많은 가지를 고르려고 누를 때 방해되지 않게).
@@ -1313,7 +1316,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     if (!press.moved && Math.hypot(dx, dy) < 5) return;
     press.moved = true;
     if (press.pan || (press.node && !press.node.parent)) {
-      // 그림 옮기기: 가운데 단추, Space+끌기, 중심 주제 끌기.
+      // 그림 옮기기: 빈 곳 끌기, 가운데 단추, Space+끌기, 중심 주제 끌기. 누른 자리에서 움직인 만큼 그대로 따라간다.
       view = { ...view, x: press.from.x + dx, y: press.from.y + dy };
       auto = false;
       $stage.classList.add('panning');
@@ -1343,13 +1346,17 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
   };
   const onUp = (ev) => {
     if (!press) return;
-    const { node, moved, ghost, mark, band, box, pan, add, moving } = press;
+    const { node, moved, ghost, mark, band, box, pan, empty, add, moving } = press;
     press = null;
     $stage.classList.remove('panning');
     ghost?.remove();
     band?.remove();
     $view.querySelector('.mm-drop')?.remove();
-    if (pan) return;
+    if (pan) {
+      // 빈 곳을 끌지 않고 눌렀다 뗐으면 여러 개 고른 것을 풀고 대표 가지만 남긴다.
+      if (empty && !moved && picked.size > 1) select(selected, false);
+      return;
+    }
     if (box) {
       // 범위 상자로 고른 것은 끄는 동안 이미 반영됐다. 빈 곳을 끌지 않고 눌렀다 뗐으면 여러 개 고른 것을 풀고 대표 가지만 남긴다.
       if (!moved && !add && picked.size > 1) select(selected, false);
@@ -1374,10 +1381,19 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
 
   $stage.addEventListener('wheel', (ev) => {
     ev.preventDefault();
-    if (ev.ctrlKey || ev.altKey) return zoomBy(ev.deltaY < 0 ? 1.12 : 1 / 1.12, pointOf(ev));
-    view = { ...view, x: view.x - (ev.shiftKey ? ev.deltaY : ev.deltaX), y: view.y - (ev.shiftKey ? 0 : ev.deltaY) };
-    auto = false;
-    applyView();
+    // 휠은 마우스가 가리키는 곳을 중심으로 확대·축소한다(굴린 만큼 부드럽게: 한 칸에 16%쯤, 터치패드처럼 잘게 오는 값은 그만큼 조금씩).
+    // 그림을 옮기는 것은 빈 곳을 끌어서 한다. 좌우로 굴린 것(터치패드의 가로 쓸기, Shift+휠)과 Alt+휠은 그림을 옮긴다.
+    const sideways = Math.abs(ev.deltaX) > Math.abs(ev.deltaY);
+    if (!ev.ctrlKey && (ev.shiftKey || ev.altKey || sideways)) {
+      const along = sideways ? ev.deltaX : ev.deltaY;
+      view = ev.altKey && !sideways ? { ...view, y: view.y - along } : { ...view, x: view.x - along };
+      auto = false;
+      return applyView();
+    }
+    // 줄 단위(1)·쪽 단위(2)로 알려 오는 휠은 픽셀로 어림한다.
+    const pixels = ev.deltaY * (ev.deltaMode === 1 ? 33 : ev.deltaMode === 2 ? 300 : 1);
+    // 터치패드의 두 손가락 벌리기는 Ctrl+휠로 오고 값이 아주 작다. 그때는 같은 손짓에 더 크게 반응한다.
+    zoomBy(Math.exp(-Math.max(-300, Math.min(300, pixels)) * (ev.ctrlKey && Math.abs(pixels) < 40 ? 0.012 : 0.0015)), pointOf(ev));
   }, { passive: false });
 
   $stage.addEventListener('contextmenu', (ev) => {

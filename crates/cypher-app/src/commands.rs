@@ -156,6 +156,43 @@ pub async fn run_pick(start: Option<String>) -> Option<String> {
     .flatten()
 }
 
+/// 주어진 시간(밀리초, 길어야 60초)이 지나면 돌아온다. 화면이 타이머·알람을 제때 울리는 데 쓴다: 창이 가려지거나 내려가 있으면
+/// 브라우저가 화면의 타이머를 늦추는데(오래 가려져 있으면 1분에 한 번), 앱이 대신 기다렸다가 알려 주면 늦지 않는다.
+#[tauri::command]
+pub async fn wake_after(ms: u64) {
+    let wait = std::time::Duration::from_millis(ms.min(60_000));
+    let _ = tauri::async_runtime::spawn_blocking(move || std::thread::sleep(wait)).await;
+}
+
+/// 사용자의 SSH 폴더(`~\.ssh`).
+fn ssh_dir() -> PathBuf {
+    PathBuf::from(home_dir()).join(".ssh")
+}
+
+/// 사용자의 `~/.ssh/config`에 적어 둔 호스트들. SSH 접속 창이 고를 수 있게 보여 준다. 파일이 없으면 빈 목록.
+#[tauri::command]
+pub async fn ssh_hosts() -> Vec<cypher_core::ssh::ConfigHost> {
+    std::fs::read(ssh_dir().join("config"))
+        .map(|bytes| cypher_core::ssh::config_hosts(&String::from_utf8_lossy(&bytes)))
+        .unwrap_or_default()
+}
+
+/// SSH 접속에 쓸 개인 키 파일을 고른다. 취소하면 None. 고른 경로는 화면이 접속 창에 채울 뿐 여기서 읽지 않는다.
+#[tauri::command]
+pub async fn ssh_pick_key() -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("SSH 개인 키 파일");
+        let dir = ssh_dir();
+        if dir.is_dir() {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog.pick_file().map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 /// Claude 세션 ID(UUID) 모양인지. 명령 인자로 넘기기 전에 확인한다.
 fn is_session_id(s: &str) -> bool {
     s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
@@ -201,9 +238,13 @@ pub fn session_create(
     resume: Option<String>,
     worktree: Option<String>,
     command: Option<String>,
+    ssh: Option<cypher_core::ssh::SshTarget>,
     on_output: Channel<InvokeResponseBody>,
 ) -> Result<u32, String> {
     let profile = state.config.profile(&profile).ok_or("알 수 없는 프로필입니다")?;
+    // SSH 세션: 앱의 기본 `ssh` 프로필. 사용자가 설정 파일에서 같은 번호로 인자까지 적어 둔 프로필(예전부터 쓰던 것)은
+    // 그 인자대로 띄우는 보통 프로필로 둔다(접속할 곳을 덧붙이면 그것이 원격 명령으로 실행된다).
+    let is_ssh = profile.id == cypher_core::profile::SSH_PROFILE && profile.args.is_empty();
     let cwd = PathBuf::from(cwd);
     if !cwd.is_dir() {
         return Err(format!("폴더가 없습니다: {}", cwd.display()));
@@ -212,10 +253,28 @@ pub fn session_create(
     // Claude 프로필은 사용자가 설정 → "Claude 실행 명령…"에 적어 둔 명령으로 띄운다(없으면 프로필의 것).
     let custom = command.as_deref().map(str::trim).filter(|text| profile.claude && !text.is_empty());
     let (program, mut args) = match custom {
-        Some(text) => cypher_core::profile::split_command(text)
-            .ok_or("Claude 실행 명령을 읽지 못했습니다(따옴표가 닫히지 않았거나 비어 있습니다). 설정 → Claude 실행 명령에서 고치세요.")?,
+        Some(text) => {
+            let (program, args) = cypher_core::profile::split_command(text)
+                .ok_or("Claude 실행 명령을 읽지 못했습니다(따옴표가 닫히지 않았거나 비어 있습니다). 설정 → Claude 실행 명령에서 고치세요.")?;
+            // 프로그램 자리의 `%USERPROFILE%`·`~`를 풀고, 빈칸이 든 경로를 따옴표 없이 적었으면 실제로 있는 파일까지 이어 붙인다.
+            // (확장자를 빼고 적은 경로는 실행할 때 확장자를 붙여 찾으므로, 여기서도 그렇게 있는지 본다.)
+            let exists = |path: &str| {
+                let path = Path::new(path);
+                let path = if path.is_absolute() { path.to_path_buf() } else { cwd.join(path) };
+                path.is_file() || ["exe", "cmd", "bat", "com", "ps1"].iter().any(|ext| PathBuf::from(format!("{}.{ext}", path.display())).is_file())
+            };
+            cypher_core::profile::locate_program(program, args, |name| std::env::var(name).ok(), exists)
+        }
         None => (profile.program.clone(), profile.args.clone()),
     };
+    // 사용자가 적어 준 실행 명령의 프로그램을 파일로 찾지 못하면 PowerShell의 명령(프로필에 만들어 둔 별칭·함수)으로 실행해 본다.
+    // 기본 명령(claude)은 지금까지처럼 찾지 못하면 "실행하지 못했습니다"로 알린다.
+    let shell_fallback = custom.is_some();
+    // SSH 세션: 접속할 곳을 ssh의 인자로 붙인다(프로필에 적어 둔 인자 뒤에).
+    if is_ssh {
+        let target = ssh.as_ref().ok_or("접속할 곳을 정하지 않았습니다. 워크스페이스 머리의 + → \"+ SSH 세션\"으로 접속할 곳을 적어 주세요.")?;
+        args.extend(cypher_core::ssh::ssh_args(target)?);
+    }
 
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let mut path_first: Option<PathBuf> = None;
@@ -276,7 +335,7 @@ pub fn session_create(
                 }
             }
         }
-    } else {
+    } else if !is_ssh {
         if wants_powershell_hook(&program, &args) {
             // Claude 세션이 아닌 셸에서만 UTF-8을 기본으로 맞춘다(Claude Code는 스스로 UTF-8로 주고받는다).
             let utf8 = if state.config.session.utf8 { POWERSHELL_UTF8 } else { "" };
@@ -301,6 +360,7 @@ pub fn session_create(
 
     let options = SpawnOptions {
         path_first,
+        shell_fallback,
         program,
         args,
         cwd,
@@ -382,6 +442,7 @@ pub fn run_start(
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);
     let options = SpawnOptions {
         path_first: None,
+        shell_fallback: false,
         program: run_shell(&state.config),
         args: vec!["-NoLogo".into(), "-Command".into(), run_script(command, state.config.session.utf8)],
         cwd,

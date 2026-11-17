@@ -27,6 +27,8 @@ const MAIN: &[&str] = &[
     "store_dirs", "ui_zoom", "closed_restore",
     "update_current", "update_check", "update_install", "update_restart", "app_ready",
     "http_files", "http_read", "http_save", "http_run_at",
+    "created_final", "ssh_hosts", "ssh_pick_key", "wake_after",
+    "code_list", "code_files", "code_outline", "code_defs", "code_usages", "code_search", "code_symbols",
 ];
 
 fn permissions(commands: &[&str]) -> String {

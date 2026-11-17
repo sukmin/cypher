@@ -237,7 +237,9 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
 }
 #terms.multi .pane-head { display: flex; }
 .pane.active .pane-head { color: var(--text); border-bottom-color: var(--accent); }
-#terms.broadcast .pane:not(.hidden) .pane-head { border-bottom-color: var(--busy); }
+/* 동시 입력을 받는 창(나란히 보이는 모든 세션, 또는 SSH 동시 입력이면 SSH 세션만) */
+.pane.casting .pane-head { border-bottom-color: var(--busy); }
+.pane-button.cast.on { color: var(--on-accent); background: var(--busy); border-color: var(--busy); }
 .pane-info { display: contents; } /* 제목·모델 글자만 다시 그리려고 묶은 것. 배치에는 끼지 않는다. */
 .pane-head .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pane-head .model { color: var(--accent); }

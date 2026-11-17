@@ -122,6 +122,100 @@ fn kind_of(path: &Path, base: Option<&Path>, skip: &[PathBuf]) -> Option<&'stati
     }
 }
 
+/// 이름으로 보아 잠깐 쓰고 버릴 파일인지: `tmp`·`temp`·`scratch`·`임시`로 시작하거나, `…_tmp`·`….bak`·`…-old`처럼 끝나는 이름.
+/// (`temperature.md`나 `oldest.csv`처럼 낱말의 일부인 것은 치지 않는다: 구분 글자나 이름의 끝이 이어져야 한다.)
+fn looks_temporary(path: &Path) -> bool {
+    let lower = |part: Option<&std::ffi::OsStr>| part.map(|text| text.to_string_lossy().to_lowercase()).unwrap_or_default();
+    let (stem, ext) = (lower(path.file_stem()), lower(path.extension()));
+    if matches!(ext.as_str(), "tmp" | "temp" | "bak" | "part" | "partial" | "swp") {
+        return true;
+    }
+    let is_break = |ch: Option<char>| ch.is_none_or(|ch| matches!(ch, '-' | '_' | '.' | ' '));
+    let head = ["tmp", "temp", "scratch", "임시"].iter().any(|word| stem.strip_prefix(word).is_some_and(|rest| is_break(rest.chars().next())));
+    let tail = ["tmp", "temp", "bak", "backup", "old", "wip", "scratch", "임시"]
+        .iter()
+        .any(|word| stem.strip_suffix(word).is_some_and(|rest| !rest.is_empty() && is_break(rest.chars().next_back())));
+    head || tail
+}
+
+/// 그 문서(Markdown·HTML)가 그 이름의 파일을 가리키는지. 이름 그대로와 주소에 맞게 바꿔 적은 꼴(빈칸 → `%20` 등)을 찾는다.
+fn mentions(text: &str, name: &str) -> bool {
+    let encoded: String = name.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) { (b as char).to_string() } else { format!("%{b:02x}") }).collect();
+    // 이름의 앞이 다른 이름의 일부면 안 된다(`bar-chart.png`를 넣은 문서가 `chart.png`를 넣은 것은 아니다).
+    let whole = |needle: &str| {
+        text.match_indices(needle).any(|(at, _)| {
+            !text[..at].chars().next_back().is_some_and(|before| before.is_alphanumeric() || matches!(before, '-' | '_' | '.' | '%'))
+        })
+    };
+    whole(name) || whole(&encoded)
+}
+
+/// 요청 하나에서 만든 파일들 가운데 사이드바에 놓을 "최종 파일"을 가린다(같은 순서의 참·거짓).
+/// 놓지 않는 것(중간 파일):
+/// - 요청이 끝난 지금은 없는 파일(만들었다가 지웠거나 다른 이름으로 옮겼다)과 빈 파일
+/// - 이름으로 보아 잠깐 쓰는 파일(`tmp_…`, `….bak` 등)
+/// - 같은 요청에서 만든 문서·HTML 파일 안에 들어간 그림(그 문서의 부품이다. 문서를 열면 함께 보인다)
+pub fn final_files(paths: &[PathBuf]) -> Vec<bool> {
+    const MAX_DOC: u64 = 4 << 20; // 이보다 큰 문서는 읽지 않는다
+    let is_doc = |path: &Path| path.extension().is_some_and(|ext| ["md", "markdown", "mdown", "mkd", "html", "htm"].iter().any(|known| ext.eq_ignore_ascii_case(known)));
+    let is_image = |path: &Path| path.extension().is_some_and(|ext| crate::image::format_of_extension(&ext.to_string_lossy().to_lowercase()).is_some());
+    let alive: Vec<bool> = paths.iter().map(|path| std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() > 0)).collect();
+    // 살아 있는 문서의 글(소문자). 그림이 있을 때만 읽는다.
+    let any_image = paths.iter().zip(&alive).any(|(path, alive)| *alive && is_image(path));
+    let docs: Vec<(usize, String)> = if any_image {
+        paths
+            .iter()
+            .enumerate()
+            .filter(|(index, path)| alive[*index] && is_doc(path) && std::fs::metadata(path).is_ok_and(|meta| meta.len() <= MAX_DOC))
+            .filter_map(|(index, path)| Some((index, std::fs::read_to_string(path).ok()?.to_lowercase())))
+            .collect()
+    } else {
+        Vec::new()
+    };
+    paths
+        .iter()
+        .enumerate()
+        .map(|(index, path)| {
+            if !alive[index] || looks_temporary(path) {
+                return false;
+            }
+            if !is_image(path) {
+                return true;
+            }
+            let Some(name) = path.file_name().map(|name| name.to_string_lossy().to_lowercase()) else { return true };
+            !docs.iter().any(|(doc, text)| *doc != index && mentions(text, &name))
+        })
+        .collect()
+}
+
+/// 파일마다의 판정: "final"(사이드바에 놓을 최종 파일), "later"(있지만 아직 빈 파일 — 다음에 다시 본다), "skip"(놓지 않는다).
+pub fn verdicts(paths: &[PathBuf]) -> Vec<&'static str> {
+    final_files(paths)
+        .into_iter()
+        .zip(paths)
+        .map(|(is_final, path)| {
+            if is_final {
+                "final"
+            } else if !looks_temporary(path) && std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && meta.len() == 0) {
+                // 빈 파일로 만들어 두고 다음 요청에서 채우는 경우가 있다.
+                "later"
+            } else {
+                "skip"
+            }
+        })
+        .collect()
+}
+
+/// 화면이 묻는다: 요청이 끝났을 때, 그동안 만든 파일 가운데 어느 것이 사이드바에 놓을 최종 파일인지.
+#[tauri::command]
+pub async fn created_final(paths: Vec<String>) -> Vec<&'static str> {
+    // 파일을 읽는 일이라 작업 스레드에서 한다. 가리지 못하면 모두 놓는다.
+    let count = paths.len();
+    tauri::async_runtime::spawn_blocking(move || verdicts(&paths.iter().map(PathBuf::from).collect::<Vec<_>>()))
+        .await
+        .unwrap_or_else(|_| vec!["final"; count])
+}
+
 /// 앞부분에 0 바이트가 없으면 글자 파일로 본다.
 fn looks_like_text(path: &Path) -> bool {
     let mut head = [0u8; 4096];
@@ -179,6 +273,50 @@ mod tests {
         // `..`로 돌아 나가는 경로는 놓지 않는다(건너뛸 폴더를 피해 가지 못하게).
         std::fs::create_dir_all(dir.join("sub")).unwrap();
         assert_eq!(kind_of(&dir.join("sub").join("..").join("계획 문서.md"), Some(&dir), &none), None);
+    }
+
+    #[test]
+    fn 중간_파일은_최종_파일로_치지_않는다() {
+        let dir = test_dir("cypher-created-final-test");
+        let file = |name: &str, text: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, text).unwrap();
+            path
+        };
+        let report = file("보고서.html", "<img src=\"chart%201.png\"><img src='logo.svg'>");
+        let notes = file("정리.md", "# 정리\n![그림](Diagram.PNG)\n결과는 결과.csv에 있다");
+        let paths = vec![
+            report.clone(),                    // 최종 문서
+            notes.clone(),                     // 최종 문서
+            file("chart 1.png", "그림"),       // 보고서에 들어간 그림
+            file("logo.svg", "<svg/>"),        // 보고서에 들어간 그림
+            file("diagram.png", "그림"),       // 정리에 들어간 그림(대/소문자가 달라도)
+            file("혼자 있는 그림.png", "그림"), // 어느 문서에도 들어가지 않은 그림
+            file("결과.csv", "a,b"),           // 문서가 이름을 적었어도 그림이 아니면 최종 파일이다
+            file("bar-chart 1.png", "그림"),   // 이름의 뒷부분만 같은 다른 그림은 문서에 든 것이 아니다
+            file("tmp_data.csv", "a,b"),       // 이름이 임시 파일
+            file("draft.md.bak", "x"),
+            file("빈 파일.md", ""),
+            dir.join("지운 파일.md"),          // 만들었다가 지웠다
+        ];
+        assert_eq!(final_files(&paths), [true, true, false, false, false, true, true, true, false, false, false, false]);
+        // 빈 파일은 "나중에 다시 보기", 그 밖의 놓지 않는 것은 "건너뛰기"로 알려 준다.
+        let said = verdicts(&paths);
+        assert_eq!(said[0], "final");
+        assert_eq!(said[paths.len() - 2], "later"); // 빈 파일.md
+        assert_eq!(said[paths.len() - 1], "skip"); // 지운 파일.md
+        assert_eq!(said[paths.len() - 4], "skip"); // tmp_data.csv
+        // 문서 하나만 만들었으면 그대로 최종 파일이다. 자기 이름을 적은 문서도 마찬가지다.
+        assert_eq!(final_files(std::slice::from_ref(&report)), [true]);
+        let own = file("self.svg", "<svg><!-- self.svg --></svg>");
+        assert_eq!(final_files(&[own]), [true]);
+
+        for name in ["tmp.md", "TMP-1.csv", "temp notes.md", "scratch.txt", "임시_정리.md", "report_old.md", "data.bak.csv", "plan-wip.md", "x.tmp", "a.part"] {
+            assert!(looks_temporary(Path::new(name)), "{name}");
+        }
+        for name in ["temperature.md", "template.html", "oldest.csv", "bold.md", "draft.md", "중간보고.md", "old.md", "scratchpad.md", "wip.md", "header-partial.html"] {
+            assert!(!looks_temporary(Path::new(name)), "{name}");
+        }
     }
 
     #[test]

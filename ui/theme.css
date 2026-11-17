@@ -142,7 +142,7 @@
 :root[data-theme="win32"] #where { background: #000080; color: #ffffff; }
 :root[data-theme="win32"] #where .where-group, :root[data-theme="win32"] #where .where-kind, :root[data-theme="win32"] #where .where-origin, :root[data-theme="win32"] #where .where-path { color: #dfdfdf; }
 :root[data-theme="win32"] .pane.active .pane-head { background: #000080; color: #ffffff; }
-:root[data-theme="win32"] .pane.active .pane-head .model { color: #ffffff; }
+:root[data-theme="win32"] .pane.active .pane-head .model, :root[data-theme="win32"] .pane.active .pane-head .pane-group { color: #ffffff; }
 
 /* ───────── 매트릭스 테마: 검은 바탕에 녹색 글자. 본창 맨 뒤에 흐르는 글자(matrix.js의 캔버스)가 깔리고,
    그 위의 화면은 반투명한 바탕을 써서 글자가 은은하게 비친다. ───────── */
@@ -223,3 +223,17 @@
 :root[data-theme="win32"] .reader-code { background: #f4f4f4; }
 :root[data-theme="win32"] .reader-table th { background: #dfdfdf; }
 :root[data-theme="win32"] .reader-copy { border: 1px solid #808080; box-shadow: none; }
+
+/* 코드 보기의 강조 색: 밝은 바탕의 테마 */
+:root[data-theme="light"] .doc.code, :root[data-theme="win32"] .doc.code {
+  --c-kw: #0033b3; --c-ty: #00627a; --c-def: #795e26; --c-call: #1f2328; --c-cn: #871094; --c-num: #1750eb; --c-str: #067d17;
+  --c-com: #8c8c8c; --c-doc: #6a8759; --c-ann: #9e880d; --c-mac: #0550ae; --c-tag: #0033b3; --c-attr: #174ad4; --c-prop: #871094;
+  --c-sel: #7a3e9d; --c-var: #0550ae; --c-esc: #0037a6;
+  --c-add: #2da44e; --c-mod: #0969da; --c-del: #cf222e; --c-same: rgba(9, 105, 218, 0.16);
+}
+:root[data-theme="matrix"] .doc.code {
+  --c-kw: #c8ff3d; --c-ty: #7dffb0; --c-def: #ffffff; --c-call: #39f57a; --c-cn: #d6ffe2; --c-num: #9dffcf; --c-str: #1fd65f;
+  --c-com: #167a38; --c-doc: #1fa34e; --c-ann: #c8ff3d; --c-mac: #d6ffe2; --c-tag: #c8ff3d; --c-attr: #7dffb0; --c-prop: #d6ffe2;
+  --c-sel: #c8ff3d; --c-var: #9dffcf; --c-esc: #c8ff3d;
+}
+:root[data-theme="win32"] .code-row.current, :root[data-theme="win32"] .code-pick-row.on, :root[data-theme="win32"] .cl.flash { color: #ffffff; }

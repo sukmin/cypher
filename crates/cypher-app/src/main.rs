@@ -5,6 +5,7 @@ mod chrome;
 mod claude;
 mod clipboard;
 mod closed;
+mod code;
 mod commands;
 mod created;
 mod drops;
@@ -224,6 +225,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         .item(&item("palette", "빠른 이동·명령 찾기\tCtrl+Shift+K")?)
         .item(&item("reopen", "닫은 항목 다시 열기…\tCtrl+Shift+R")?)
         .item(&item("notices", "알림 기록\tCtrl+Shift+A")?)
+        .item(&item("timers", "타이머·알람…")?)
         .item(&item("templates", "워크스페이스 틀: 저장·불러오기…")?)
         .separator()
         .item(&item("snippets", "자주 쓰는 지시\tCtrl+Shift+P")?)
@@ -372,6 +374,9 @@ fn main() {
             commands::session_resize,
             commands::session_pause,
             commands::session_close,
+            commands::ssh_hosts,
+            commands::ssh_pick_key,
+            commands::wake_after,
             commands::link_detect,
             commands::link_open,
             extras::git_changes,
@@ -388,6 +393,14 @@ fn main() {
             template::template_remove,
             template::template_folder,
             template::dirs_exist,
+            created::created_final,
+            code::code_list,
+            code::code_files,
+            code::code_outline,
+            code::code_defs,
+            code::code_usages,
+            code::code_search,
+            code::code_symbols,
             memory::memory_info,
             memory::memory_export,
             memory::memory_import,

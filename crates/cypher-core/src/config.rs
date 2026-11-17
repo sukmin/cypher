@@ -277,7 +277,7 @@ mod tests {
         assert_eq!(config.font.size, 72); // 범위를 벗어나면 잘라 낸다.
         assert_eq!(config.font.family, Font::default().family);
         assert!(config.notify.system && config.session.restore);
-        assert_eq!(config.profiles.len(), 3);
+        assert_eq!(config.profiles.len(), 4);
         assert_eq!(config.profile("powershell").unwrap().program, "pwsh.exe");
         assert_eq!(config.profile("gitbash").unwrap().args, vec!["-i"]);
         assert!(config.profile("claude").unwrap().claude);

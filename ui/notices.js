@@ -1,13 +1,13 @@
 // 알림 기록: 떴다가 사라지는 알림(완료, 승인 대기, 컨텍스트 경고, Claude가 보낸 알림, 오류 등)을 모아 둔다.
 //
 // 자리를 비운 사이 어느 세션이 언제 끝났고 얼마나 걸렸는지 나중에 볼 수 있다.
-// 이 컴퓨터에 기억하고(localStorage) 7일이 지난 것과 200개를 넘는 것은 버린다.
+// 이 컴퓨터에 기억하고(localStorage) 가장 최근 것 20개만 남긴다(7일이 지난 것도 버린다). 기록이 길면 정작 볼 것이 묻힌다.
 
 const KEY = 'cypher.notices';
-const MAX = 200;
+const MAX = 20;
 const KEEP_MS = 7 * 24 * 60 * 60 * 1000;
-const ICONS = { done: '✔', approval: '❗', context: '◔', claude: '✉', item: '＋', info: '·' };
-const KIND_TEXT = { done: '완료', approval: '승인·입력 대기', context: '컨텍스트 경고', claude: 'Claude가 보낸 알림', item: '새 항목', info: '알림' };
+const ICONS = { done: '✔', approval: '❗', context: '◔', claude: '✉', item: '＋', timer: '⏰', info: '·' };
+const KIND_TEXT = { done: '완료', approval: '승인·입력 대기', context: '컨텍스트 경고', claude: 'Claude가 보낸 알림', item: '새 항목', timer: '타이머·알람', info: '알림' };
 
 // 이번 실행의 표식. 항목 번호(key)는 실행마다 새로 매겨지므로, 같은 실행에서 남긴 기록만 번호로 찾아간다.
 const BOOT = `${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
@@ -26,7 +26,8 @@ function load() {
   let saved = [];
   try { saved = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch { /* 깨진 기록은 버린다 */ }
   const limit = Date.now() - KEEP_MS;
-  list = Array.isArray(saved) ? saved.filter((entry) => entry && entry.at > limit && typeof entry.title === 'string') : [];
+  // 예전 판이 남긴 긴 기록도 여기서 최근 것만 남긴다.
+  list = Array.isArray(saved) ? saved.filter((entry) => entry && entry.at > limit && typeof entry.title === 'string').slice(0, MAX) : [];
   return list;
 }
 
@@ -39,7 +40,7 @@ export const unreadCount = () => load().filter((entry) => entry.unread).length;
 
 /**
  * 알림 하나를 기록한다.
- * kind: done | approval | context | claude | item | info · key: 그 알림이 가리키는 항목의 번호(없으면 null)
+ * kind: done | approval | context | claude | item | timer | info · key: 그 알림이 가리키는 항목의 번호(없으면 null)
  * group: 그 항목의 묶음 이름 · unread: 사용자가 그 자리에서 보지 못했을 알림이면 참
  */
 export function recordNotice({ kind = 'info', title = '', body = '', key = null, group = '', unread = true }) {
@@ -98,7 +99,7 @@ export function showNotices() {
   const close = openPopup(`알림 기록${unread ? ` — 새 알림 ${unread}개` : ''}`, [
     ...rows,
     make('p', 'note', entries.length
-      ? '완료·승인 대기·컨텍스트 경고와 Claude가 보낸 알림이 7일 동안 남습니다. 왼쪽에 색 줄이 있는 것은 이 창을 열기 전까지 보지 않은 알림입니다.'
+      ? `완료·승인 대기·컨텍스트 경고와 Claude가 보낸 알림 가운데 최근 ${MAX}개가 남습니다(7일까지). 왼쪽에 색 줄이 있는 것은 이 창을 열기 전까지 보지 않은 알림입니다.`
       : '아직 알림이 없습니다. Claude 세션의 응답이 끝나거나 승인을 기다리면 여기에 쌓입니다.'),
     clear,
   ]);
