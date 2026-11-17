@@ -12,7 +12,7 @@
 // 가까운 것(같은 파일, 같은 폴더, `자료형.이름`의 자료형이 감싼 것)을 앞에 세워 고르게 한다.
 // 파일 내용은 신뢰할 수 없는 입력이다: 글자는 모두 textContent로만 넣는다.
 
-import { tokenize, langOf, LANG_NAMES, wordPattern } from './code-lex.js';
+import { tokenize, langOf, fileBadge, LANG_NAMES, wordPattern } from './code-lex.js';
 
 let api = null; // { invoke, make, setStatus, showMenu, baseName, toClaude(item, text, ev) }
 
@@ -192,6 +192,8 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   grip.title = '끌기: 너비 조절';
 
   const $tabs = make('div', 'code-tabs');
+  // 탭은 초점을 받지 못하는 요소라, 그대로 두면 누른 뒤 초점이 창 밖으로 나가 단축키(Alt+←, Ctrl+F4 …)가 듣지 않는다.
+  $tabs.addEventListener('mousedown', (ev) => { ev.preventDefault(); (current ? $scroll : $tree).focus({ preventScroll: true }); });
   const $crumbs = make('div', 'code-crumbs');
   const $query = make('input');
   Object.assign($query, { placeholder: '이 파일에서 찾기', spellcheck: false, autocomplete: 'off' });
@@ -276,6 +278,12 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   /** 그 폴더 안에 바뀐 파일이 있는지. */
   const dirChanged = (dir) => { const prefix = `${lower(dir)}\\`; for (const path of git.files.keys()) if (path.startsWith(prefix)) return true; return false; };
 
+  /** 파일 종류의 표식(나무와 탭의 이름 앞). */
+  function fileIcon(path) {
+    const [mark, tone] = fileBadge(path);
+    return make('i', `code-ico fi-${tone}`, mark);
+  }
+
   function treeRow(path, name, depth, { dir = false, dim = false, note = '' } = {}) {
     const row = make('div', `code-row${dir ? ' dir' : ''}${dim ? ' dim' : ''}`);
     row.dataset.path = path;
@@ -286,7 +294,8 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     if (!dir && current && lower(current.path) === lower(path)) row.classList.add('current');
     if (!dir && touched.has(lower(path))) row.classList.add('touched');
     if (focusedPath && lower(path) === focusedPath) row.classList.add('focus');
-    row.append(make('span', 'code-twist', dir ? (open ? '▾' : '▸') : ''), make('span', 'code-name', name));
+    // 폴더는 펼침 표시, 파일은 종류의 표식(확장자마다 색이 다르다).
+    row.append(dir ? make('span', 'code-twist', open ? '▾' : '▸') : fileIcon(path), make('span', 'code-name', name));
     if (note) row.append(make('span', 'code-note', note));
     row.title = `${path}${status === 'mod' ? '\n고친 파일' : status === 'new' ? '\n새 파일' : status === 'gone' ? '\n지운 파일' : ''}${touched.has(lower(path)) ? '\nClaude 세션이 방금 쓴 파일' : ''}`;
     return row;
@@ -613,12 +622,21 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   }
 
   function closeTab(tab) {
-    const at = tabs.indexOf(tab);
-    if (at < 0) return;
-    tabs = tabs.filter((other) => other !== tab);
-    if (current === tab) {
+    closeTabs([tab]);
+  }
+
+  /** 탭을 여럿 한 번에 닫는다. 보던 탭이 닫히면 남은 탭 가운데 가까운 것(오른쪽 먼저)을 보인다. */
+  function closeTabs(closing) {
+    const drop = new Set(closing.filter((tab) => tabs.includes(tab)));
+    if (!drop.size) return;
+    const at = tabs.indexOf(current);
+    const next = current && drop.has(current)
+      ? tabs.slice(at + 1).find((tab) => !drop.has(tab)) || tabs.slice(0, at).reverse().find((tab) => !drop.has(tab))
+      : null;
+    const closedCurrent = !!current && drop.has(current);
+    tabs = tabs.filter((tab) => !drop.has(tab));
+    if (closedCurrent) {
       current = null;
-      const next = tabs[Math.min(at, tabs.length - 1)];
       if (next) return void show(next);
       clearMarks();
       $code.replaceChildren();
@@ -651,17 +669,56 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       if (tab.gone) el.classList.add('gone'); // 파일이 없어졌다(보던 내용은 그대로 둔다)
       // 이름이 같은 파일이 여럿 열려 있으면 폴더 이름을 붙여 가린다.
       const twin = names.get(nameOf(tab.path).toLowerCase()) > 1;
-      el.append(make('span', '', twin ? `${nameOf(dirOf(tab.path))}/${nameOf(tab.path)}` : nameOf(tab.path)));
+      el.append(fileIcon(tab.path), make('span', '', twin ? `${nameOf(dirOf(tab.path))}/${nameOf(tab.path)}` : nameOf(tab.path)));
       const close = make('button', 'close', '×');
       close.title = '닫기 (가운데 단추로 눌러도 닫힙니다)';
       close.onclick = (ev) => { ev.stopPropagation(); closeTab(tab); };
       el.append(close);
-      el.title = tab.path;
+      el.title = `${tab.path}
+오른쪽 클릭: 탭 닫기 메뉴`;
       el.onclick = () => { if (tab !== current) { remember(); show(tab); } };
       el.onauxclick = (ev) => { if (ev.button === 1) { ev.preventDefault(); closeTab(tab); } };
+      el.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); tabMenu(tab, ev); };
       return el;
     }));
     $tabs.querySelector('.code-tab.on')?.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+  }
+
+  /** 탭의 오른쪽 클릭 메뉴: 탭을 닫는 여러 방법과 그 파일의 경로를 쓰는 일. 닫을 것이 없는 줄은 내지 않는다. */
+  function tabMenu(tab, ev) {
+    const at = tabs.indexOf(tab);
+    if (at < 0) return;
+    const left = tabs.slice(0, at), right = tabs.slice(at + 1);
+    // git 기준으로 바뀌지 않은 파일(고치지도 새로 만들지도 않은 것). 바뀐 파일만 남겨 두고 볼 때 쓴다.
+    // 프로젝트 밖의 파일은 바뀌었는지 알 수 없으니 치지 않는다(닫지 않는다).
+    const unchanged = git.root ? tabs.filter((other) => lower(other.path).startsWith(rootPrefix()) && !statusClass(other.path)) : [];
+    const inProject = lower(tab.path).startsWith(rootPrefix());
+    const items = [{ label: '탭 닫기', action: () => closeTabs([tab]) }];
+    if (left.length + right.length) items.push({ label: `다른 탭 모두 닫기 (${left.length + right.length}개)`, action: () => closeTabs([...left, ...right]) });
+    if (left.length && right.length) {
+      items.push({ label: `왼쪽 탭 모두 닫기 (${left.length}개)`, action: () => closeTabs(left) });
+      items.push({ label: `오른쪽 탭 모두 닫기 (${right.length}개)`, action: () => closeTabs(right) });
+    }
+    if (unchanged.length && unchanged.length < tabs.length) items.push({ label: `바뀌지 않은 파일의 탭 닫기 (${unchanged.length}개)`, action: () => closeTabs(unchanged) });
+    if (tabs.length > 1) items.push({ label: `모든 탭 닫기 (${tabs.length}개)`, action: () => closeTabs(tabs) });
+    items.push({ caption: '이 파일' });
+    if (inProject && !changedOnly && !tab.gone) {
+      items.push({
+        label: '나무에서 보기',
+        action: async () => {
+          focusedPath = lower(tab.path);
+          await revealInTree(tab.path);
+          $tree.querySelector('.code-row.focus')?.scrollIntoView({ block: 'nearest' });
+        },
+      });
+    }
+    items.push(
+      { label: '경로 복사', action: () => copyText(tab.path) },
+      ...(inProject ? [{ label: '프로젝트 기준 경로 복사', action: () => copyText(relative(tab.path)) }] : []),
+      { label: 'Claude에 넣기 (경로)', action: () => api.toClaude?.(item, `${inProject ? relative(tab.path) : tab.path} `, ev) },
+      { label: '탐색기에서 보기', action: () => outside(tab.path) },
+    );
+    showMenu(ev, items);
   }
 
   /** 그 줄을 감싸고 있는 정의들(바깥 것부터). */

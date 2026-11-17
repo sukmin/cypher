@@ -860,6 +860,9 @@ li.tone-fail .dot.kind, li.tone-fail .sub { color: var(--dead); }
   --c-com: #7a7e85; --c-doc: #5f826b; --c-ann: #b3ae60; --c-mac: #57aaf7; --c-tag: #d5b778; --c-attr: #bababa; --c-prop: #c77dbb;
   --c-sel: #d5b778; --c-var: #56a8f5; --c-esc: #cf8e6d;
   --c-add: #549159; --c-mod: #5d8bc9; --c-del: #c75450; --c-same: rgba(120, 140, 180, 0.28);
+  /* 파일 종류 표식의 색(IntelliJ의 아이콘 색을 따름). 밝은 테마는 theme.css가 바꾼다. */
+  --fi-sky: #40b6e0; --fi-blue: #6d9df1; --fi-cyan: #3fc1b0; --fi-green: #62b543; --fi-yellow: #d9a343; --fi-orange: #e8894a;
+  --fi-red: #e06c6c; --fi-purple: #b99bf8; --fi-pink: #f98b9e; --fi-grey: #9aa7b0;
   --code-lh: 19px;
 }
 .doc.code .doc-title { color: var(--text); direction: rtl; text-align: left; }
@@ -882,7 +885,11 @@ li.tone-fail .dot.kind, li.tone-fail .sub { color: var(--dead); }
 .code-row.focus { outline: 1px dotted var(--dim); outline-offset: -1px; }
 .code-row.current { background: var(--select); }
 .code-row.dim { opacity: 0.55; }
-.code-twist { flex: none; width: 12px; color: var(--dim); font-size: 10px; text-align: center; }
+.code-twist { flex: none; width: 16px; color: var(--dim); font-size: 10px; text-align: center; }
+/* 파일 종류의 표식: 옅은 바탕 위에 그 종류의 색으로 적은 한두 글자. 이름의 글자색은 git 상태가 쓴다. */
+.code-ico { flex: none; width: 16px; height: 14px; overflow: hidden; font: bold 9px/14px var(--mono-font); font-style: normal; letter-spacing: -0.5px; text-align: center; color: var(--fi, var(--fi-grey)); background: color-mix(in srgb, var(--fi, var(--fi-grey)) 16%, transparent); border-radius: 3px; }
+.fi-sky { --fi: var(--fi-sky); } .fi-blue { --fi: var(--fi-blue); } .fi-cyan { --fi: var(--fi-cyan); } .fi-green { --fi: var(--fi-green); } .fi-yellow { --fi: var(--fi-yellow); }
+.fi-orange { --fi: var(--fi-orange); } .fi-red { --fi: var(--fi-red); } .fi-purple { --fi: var(--fi-purple); } .fi-pink { --fi: var(--fi-pink); } .fi-grey { --fi: var(--fi-grey); }
 .code-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .code-row.dir > .code-name { font-weight: bold; }
 .code-row.mod > .code-name { color: var(--c-mod); }

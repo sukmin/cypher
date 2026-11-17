@@ -116,7 +116,10 @@ export function langOf(path) {
   if (name === 'dockerfile' || name.startsWith('dockerfile.')) return 'docker';
   if (name === 'makefile' || name === '.gitignore' || name === '.dockerignore' || name === '.editorconfig' || name.startsWith('.env')) return name === '.editorconfig' || name.startsWith('.env') ? 'ini' : 'shell';
   const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : '';
-  return {
+  return LANG_BY_EXT[ext] || 'plain';
+}
+
+const LANG_BY_EXT = table({
     rs: 'rust', java: 'java', kt: 'kotlin', kts: 'kotlin', gradle: 'groovy', groovy: 'groovy',
     js: 'js', mjs: 'js', cjs: 'js', jsx: 'js', ts: 'js', tsx: 'js', mts: 'js', cts: 'js',
     vue: 'vue', html: 'html', htm: 'html', xhtml: 'html', svelte: 'vue', xml: 'xml', svg: 'xml', pom: 'xml', xsd: 'xml', xsl: 'xml', plist: 'xml', fxml: 'xml', jsp: 'html',
@@ -126,8 +129,60 @@ export function langOf(path) {
     sql: 'sql', sh: 'shell', bash: 'shell', zsh: 'shell', ps1: 'powershell', psm1: 'powershell', psd1: 'powershell', bat: 'batch', cmd: 'batch',
     json: 'json', jsonc: 'json', json5: 'json', yaml: 'yaml', yml: 'yaml', toml: 'toml', lock: 'toml', ini: 'ini', cfg: 'ini', conf: 'ini', properties: 'ini',
     md: 'markdown', markdown: 'markdown', mdx: 'markdown',
-  }[ext] || 'plain';
+});
+
+/**
+ * 파일 종류의 표식: 나무와 탭에서 이름 앞에 붙여 종류를 색으로 가린다. `[글자, 색 이름]`을 준다.
+ * 이름의 글자색은 git 상태(고친 파일·새 파일)에 쓰므로, IntelliJ처럼 종류는 아이콘의 색으로 가린다.
+ * 색 이름은 items.css의 `.fi-<이름>`이고, 색은 IntelliJ의 아이콘 색(하늘·파랑·녹색·노랑·주황·보라·분홍·회색)을 따랐다.
+ */
+export function fileBadge(path) {
+  const name = String(path).split(/[\\/]/).pop().toLowerCase();
+  if (name === 'dockerfile' || name.startsWith('dockerfile.') || name === '.dockerignore') return ['D', 'sky'];
+  if (name === 'makefile') return ['Mk', 'grey'];
+  if (name === 'cargo.toml' || name === 'cargo.lock') return ['=', 'orange'];
+  if (name.startsWith('.')) return ['=', 'grey']; // .gitignore, .env, .editorconfig …
+  const ext = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1) : '';
+  return FILE_BADGES[ext] || ['·', 'grey'];
 }
+
+/** 확장자로 찾는 표는 물려받은 속성이 없는 객체로 둔다(`a.constructor` 같은 이름에서 엉뚱한 것이 읽히지 않게). */
+function table(entries) {
+  return Object.assign(Object.create(null), entries);
+}
+
+const FILE_BADGES = (() => {
+  const all = table({});
+  const put = (exts, mark, tone) => { for (const ext of exts.split(' ')) all[ext] = [mark, tone]; };
+  put('java', 'J', 'sky');
+  put('kt kts', 'K', 'purple');
+  put('rs', 'R', 'orange');
+  put('js mjs cjs jsx', 'JS', 'yellow');
+  put('ts mts cts tsx', 'TS', 'blue');
+  put('vue', 'V', 'green');
+  put('svelte', 'S', 'orange');
+  put('html htm xhtml jsp', '<>', 'orange');
+  put('xml pom xsd xsl plist fxml', '<>', 'red');
+  put('css', '#', 'blue');
+  put('scss sass less', '#', 'pink');
+  put('go', 'Go', 'cyan');
+  put('py pyi', 'Py', 'sky');
+  put('c h m mm', 'C', 'blue');
+  put('cc cpp cxx hpp hh', 'C+', 'blue');
+  put('cs', 'C#', 'green');
+  put('sql', 'DB', 'purple');
+  put('sh bash zsh', '>_', 'green');
+  put('ps1 psm1 psd1', '>_', 'sky');
+  put('bat cmd', '>_', 'grey');
+  put('json jsonc json5', '{}', 'yellow');
+  put('yaml yml', 'Y', 'pink');
+  put('toml ini cfg conf properties lock', '=', 'grey');
+  put('gradle groovy', 'G', 'green');
+  put('md markdown mdx', 'M', 'sky');
+  put('txt log csv tsv', '≡', 'grey');
+  put('png jpg jpeg gif webp bmp ico svg', '▣', 'green');
+  return all;
+})();
 
 /** 사람이 읽는 언어 이름(상태 줄에 보인다). */
 export const LANG_NAMES = {

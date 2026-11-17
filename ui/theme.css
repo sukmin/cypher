@@ -230,10 +230,20 @@
   --c-com: #8c8c8c; --c-doc: #6a8759; --c-ann: #9e880d; --c-mac: #0550ae; --c-tag: #0033b3; --c-attr: #174ad4; --c-prop: #871094;
   --c-sel: #7a3e9d; --c-var: #0550ae; --c-esc: #0037a6;
   --c-add: #2da44e; --c-mod: #0969da; --c-del: #cf222e; --c-same: rgba(9, 105, 218, 0.16);
+  --fi-sky: #2b93c2; --fi-blue: #3f76e0; --fi-cyan: #1a9a8a; --fi-green: #4a9a2f; --fi-yellow: #b9800f; --fi-orange: #d2691e;
+  --fi-red: #cc4b4b; --fi-purple: #8a63d8; --fi-pink: #d95f7a; --fi-grey: #7a8791;
 }
+/* Windows 고전 테마는 바탕이 회색(#c0c0c0)이라 표식의 색을 더 짙게 한다. 고른 줄(남색 바탕)에서는 흰 글자로 적는다. */
+:root[data-theme="win32"] .doc.code {
+  --fi-sky: #0b5f8a; --fi-blue: #1f4fb8; --fi-cyan: #0a6b5e; --fi-green: #2c6a14; --fi-yellow: #7a5200; --fi-orange: #9a4508;
+  --fi-red: #a12a2a; --fi-purple: #5b3aa8; --fi-pink: #a8324f; --fi-grey: #4a545c;
+}
+:root[data-theme="win32"] .code-row.current .code-ico { color: #ffffff; background: rgba(255, 255, 255, 0.22); }
 :root[data-theme="matrix"] .doc.code {
   --c-kw: #c8ff3d; --c-ty: #7dffb0; --c-def: #ffffff; --c-call: #39f57a; --c-cn: #d6ffe2; --c-num: #9dffcf; --c-str: #1fd65f;
   --c-com: #167a38; --c-doc: #1fa34e; --c-ann: #c8ff3d; --c-mac: #d6ffe2; --c-tag: #c8ff3d; --c-attr: #7dffb0; --c-prop: #d6ffe2;
   --c-sel: #c8ff3d; --c-var: #9dffcf; --c-esc: #c8ff3d;
+  --fi-sky: #7dffb0; --fi-blue: #9dffcf; --fi-cyan: #7dffb0; --fi-green: #39f57a; --fi-yellow: #c8ff3d; --fi-orange: #c8ff3d;
+  --fi-red: #d6ffe2; --fi-purple: #9dffcf; --fi-pink: #d6ffe2; --fi-grey: #1fa34e;
 }
 :root[data-theme="win32"] .code-row.current, :root[data-theme="win32"] .code-pick-row.on, :root[data-theme="win32"] .cl.flash { color: #ffffff; }
