@@ -85,6 +85,13 @@ async function createKind(kind, opts = {}) {
   if (!KINDS[kind]) return null;
   const group = groupFor(opts);
   if (!group) return null;
+  // 코드 보기는 볼 폴더를 먼저 고른다: 그 폴더 아래의 파일을 색인하므로, 너무 넓은 폴더(사용자 폴더 등)를 열면 느려진다.
+  // 고르기 창은 워크스페이스 폴더에서 시작한다. 취소하면 만들지 않는다.
+  if (kind === 'code' && opts.saved === undefined) {
+    const picked = await invoke('pick_folder', { start: groupFolderOf(group) || startFolderHint(), title: '코드 보기로 열 폴더 (이 폴더 아래의 파일을 색인합니다)' }).catch(() => null);
+    if (!picked) return null;
+    return newItem(kind, { ...opts, group, cwd: picked, saved: { root: picked } });
+  }
   return newItem(kind, { ...opts, group });
 }
 
@@ -1965,7 +1972,7 @@ function addItems(group) {
     { caption: `폴더: ${opts.cwd}${group.logical && groupFolderOf(group.name) ? ' (워크스페이스 폴더)' : ''}` },
     // SSH 세션은 접속할 곳을 고르는 창이 먼저 뜬다.
     ...config.profiles.map((p) => ({ label: isSshProfile(p) ? `+ ${p.label} 세션… (서버에 접속)` : `+ ${p.label} 세션`, action: () => newSession(p.id, forSession) })),
-    ...Object.entries(KINDS).map(([kind, def]) => ({ label: `+ ${def.label}`, action: () => createKind(kind, opts) })),
+    ...Object.entries(KINDS).map(([kind, def]) => ({ label: kind === 'code' ? `+ ${def.label}… (볼 폴더를 고름)` : `+ ${def.label}`, action: () => createKind(kind, opts) })),
   ];
 }
 

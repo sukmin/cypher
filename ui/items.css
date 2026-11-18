@@ -866,6 +866,8 @@ li.tone-fail .dot.kind, li.tone-fail .sub { color: var(--dead); }
   --code-lh: 19px;
 }
 .doc.code .doc-title { color: var(--text); direction: rtl; text-align: left; }
+/* 색인을 만드는 동안의 진행 */
+.code-index { flex: none; padding: 1px 8px; font-size: 11px; color: var(--accent); border: 1px solid var(--accent); border-radius: 9px; white-space: nowrap; font-variant-numeric: tabular-nums; }
 .doc.code .doc-bar { flex-wrap: wrap; row-gap: 4px; overflow: visible; }
 .doc.code .doc-bar button:disabled { opacity: 0.4; }
 /* 코드의 글꼴(이름·크기)을 따로 정하는 칸 */

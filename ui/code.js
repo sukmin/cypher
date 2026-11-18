@@ -29,6 +29,7 @@ const MAX_FIND = 5000;          // 이 파일에서 찾기가 세는 자리 수
 const MAX_MARK_LINE = 5000;     // 이보다 긴 줄에는 찾은 곳·같은 이름 표시를 걸지 않는다(지금 자리 하나만 표시)
 const MAX_FILE_HUNKS = 12;      // 바뀐 곳 목록에서 파일 하나에 처음 보이는 수(더 있으면 "더 보기")
 const WATCH_MS = 2000;          // 보고 있는 파일이 바뀌었는지 살피는 간격
+const INDEX_MS = 30000;         // 색인을 파일들과 다시 맞춰 보는 가장 짧은 간격(바뀐 것이 보이면 바로 맞춘다)
 const GIT_MS = 6000;            // 바뀐 파일(git)과 나무를 다시 읽는 간격
 const KIND_ICONS = {
   function: 'ƒ', method: 'ƒ', constructor: 'ƒ', class: 'C', interface: 'I', enum: 'E', struct: 'S', trait: 'T', type: 'T', module: 'M',
@@ -136,6 +137,15 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   let lastScroll = 0;             // 마지막으로 보던 스크롤 자리(숨기면 브라우저가 맨 위로 되돌린다)
   let heldScroll = null;          // 화면 배치를 다시 짓는 동안 지켜 둔 스크롤 자리(창을 떼었다 붙이면 맨 위로 돌아간다)
   let focusedPath = '';           // 나무에서 키보드로 고른 줄(나무를 다시 그려도 지킨다)
+  /** 색인: 프로젝트의 파일마다 정의와 낱말을 적어 둔 것(앱이 디스크에 두고, 다시 켜도 그대로 쓴다). 정의로 가기·쓰는 곳·기호 찾기가 이것으로 금방 답한다. */
+  let indexRoot = '';             // 색인을 열어 둔 폴더(닫을 때 쓴다)
+  let indexing = null;            // 색인을 만들거나 맞추는 중이면 그 일(끝나면 null)
+  let indexInfo = null;           // 마지막으로 맞춘 결과 { files, defs, parsed, cached, bytes, ms }
+  let touching = Promise.resolve(); // Claude 세션이 쓴 파일을 색인에 다시 넣는 일(차례대로)
+  let indexedAt = 0;              // 마지막으로 맞춘 때
+  let indexMs = 0;                // 마지막으로 "모두 맞추기"에 걸린 시간(다음에 얼마나 쉴지 정한다)
+  let indexLater = 0;             // 쉬는 중에 바뀐 것이 보였을 때, 쉬는 시간이 끝나면 맞추려고 걸어 둔 타이머
+  let indexFailed = false;        // 색인을 디스크에 쓰지 못했다(찾을 때마다 파일을 모두 읽는다)
   let gitSeq = 0;                 // 바뀐 파일 읽기의 차례(겹쳐 돈 읽기는 나중에 시작한 것만 쓴다)
   let epoch = 0;                  // 프로젝트 폴더를 바꿀 때마다 오른다(옛 폴더의 늦은 결과를 가려낸다)
   let openSeq = 0;                // 파일 열기의 차례(먼저 연 느린 파일이 나중에 연 파일을 덮지 않게)
@@ -176,11 +186,15 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     $size,
     button('+', '글자 크게 (Ctrl++, Ctrl+휠) · 기본 크기 (Ctrl+0)', () => setCodeFont({ size: codeFont.size + 1 })),
   );
+  const $index = make('span', 'code-index');
+  $index.hidden = true;
   const bar = make('div', 'doc-bar');
   bar.append(
     $title,
+    $index,
     fontBox,
     button('폴더…', '볼 프로젝트 폴더 바꾸기', () => pickRoot()),
+    button('재색인', '이 폴더의 색인을 지우고 처음부터 다시 만들기 (정의로 가기·쓰는 곳 찾기가 어긋난 것 같을 때)', () => rebuildIndex()),
     $changed, $back, $forward,
     button('파일 찾기', '이름으로 파일 찾기 (Ctrl+P)', () => pickFile()),
     button('기호 찾기', '함수·클래스 이름으로 찾기 (Ctrl+T)', () => pickSymbol()),
@@ -260,11 +274,137 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
 
   function refreshBar() {
     $title.textContent = `${root}${git.branch ? `  ⎇ ${git.branch}` : ''}`;
-    $title.title = `프로젝트 폴더: ${root}${git.branch ? `\n브랜치: ${git.branch}` : ''}${git.files.size ? `\n바뀐 파일 ${git.files.size}개` : ''}`;
+    $title.title = `프로젝트 폴더: ${root}${git.branch ? `\n브랜치: ${git.branch}` : ''}${git.files.size ? `\n바뀐 파일 ${git.files.size}개` : ''}${indexInfo ? `\n색인: 파일 ${indexInfo.files.toLocaleString('ko-KR')}개 · 정의 ${indexInfo.defs.toLocaleString('ko-KR')}개 · 디스크 ${megabytes(indexInfo.bytes)}` : ''}`;
     $changed.textContent = git.files.size ? `바뀐 파일 ${git.files.size}` : '바뀐 파일';
     $changed.classList.toggle('on', changedOnly);
     $back.disabled = !back.length;
     $forward.disabled = !forward.length;
+  }
+
+  // ── 색인 ──
+
+  const megabytes = (bytes) => (bytes >= 1 << 20 ? `${(bytes / (1 << 20)).toFixed(bytes >= 10 << 20 ? 0 : 1)}MB` : `${Math.max(1, Math.round(bytes / 1024))}KB`);
+
+  /**
+   * 프로젝트 폴더의 색인을 만든다(처음 열 때·폴더를 바꿀 때) 또는 지금의 파일들과 맞춘다. 만드는 동안 위쪽 줄에 진행을 보여 준다.
+   * 색인이 있으면 정의로 가기·쓰는 곳 찾기·기호 찾기가 프로젝트를 다시 훑지 않고 답한다. 만드는 중에 찾으면 앱이 다 만들 때까지 기다린다.
+   */
+  function loadIndex(open, rebuild = false) {
+    if (!root || disposed) return Promise.resolve(null);
+    if (indexing && !open && !rebuild) return indexing; // 맞추는 중이면 그 일을 함께 기다린다
+    const mine = epoch, at = root;
+    if (open) indexRoot = root;
+    clearTimeout(indexLater);
+    indexLater = 0;
+    const first = open || rebuild || !indexInfo;
+    // 처음 만들 때는 오래 걸릴 수 있다: 얼마나 읽었는지 보여 준다.
+    const tick = first ? setInterval(async () => {
+      const state = await invoke('code_index_state', { root: at }).catch(() => null);
+      if (!state || mine !== epoch || disposed || indexing !== work) return;
+      // 전에 만들어 둔 색인을 디스크에서 읽어 왔으면(이미 쓸 수 있다) 바뀐 파일이 있는지 확인하는 중이다.
+      const doing = state.ready ? '색인 확인 중' : '색인 중';
+      $index.hidden = false;
+      $index.textContent = state.total ? `${doing} ${state.done.toLocaleString('ko-KR')}/${state.total.toLocaleString('ko-KR')}` : `${doing}…`;
+    }, 400) : 0;
+    if (first) {
+      $index.hidden = false;
+      $index.textContent = rebuild ? '색인 중…' : '색인 여는 중…';
+      $index.title = '프로젝트의 파일을 읽어 정의와 낱말을 적어 두는 중입니다(전에 만들어 둔 색인이 있으면 그것을 읽어 오고 바뀐 파일만 다시 읽습니다). 끝나면 정의로 가기·쓰는 곳 찾기가 금방 됩니다.';
+    }
+    const work = (rebuild ? invoke('code_index_rebuild', { root: at }) : invoke('code_index', { root: at, open: !!open }))
+      .then((info) => {
+        if (mine !== epoch || disposed) return null;
+        indexInfo = info;
+        indexMs = info.ms;
+        indexedAt = Date.now();
+        indexFailed = false;
+        refreshBar();
+        const size = `파일 ${info.files.toLocaleString('ko-KR')}개 · 정의 ${info.defs.toLocaleString('ko-KR')}개`;
+        const took = `${(info.ms / 1000).toFixed(1)}초`;
+        // 디스크에 있던 색인을 읽어 왔으면(전에 이 폴더를 열었다) 그사이 바뀐 파일만 다시 읽는다.
+        if (first) setStatus(info.cached ? `전에 만든 색인을 읽어 왔습니다: ${size} (다시 읽은 파일 ${info.parsed.toLocaleString('ko-KR')}개, ${took})` : `색인을 ${rebuild ? '다시 ' : ''}만들었습니다: ${size} (${took})`);
+        return info;
+      })
+      .catch((error) => {
+        if (mine !== epoch || disposed) return null;
+        // 색인을 쓰지 못했다(디스크에 자리가 없다, 색인 파일이 잠겼다 등): 앱은 찾을 때마다 파일을 모두 읽는 길로 물러난다. 다음 차례에 다시 해 본다.
+        indexInfo = null;
+        indexedAt = Date.now();
+        if (!indexFailed || rebuild) setStatus(`색인을 쓰지 못했습니다. 정의로 가기·쓰는 곳 찾기는 되지만 찾을 때마다 파일을 모두 읽어 느립니다(잠시 뒤 다시 해 봅니다): ${error}`);
+        indexFailed = true;
+        refreshBar();
+        return null;
+      })
+      .finally(() => {
+        clearInterval(tick);
+        if (indexing === work) indexing = null;
+        if (mine !== epoch) return;
+        $index.hidden = !indexFailed;
+        if (indexFailed) {
+          $index.textContent = '색인 없음';
+          $index.title = '색인을 디스크에 쓰지 못했습니다(자리가 모자라거나 색인 파일이 잠겼을 수 있습니다). 찾을 때마다 파일을 모두 읽습니다. 잠시 뒤 스스로 다시 해 보고, [재색인]으로 바로 해 볼 수도 있습니다.';
+        }
+      });
+    indexing = work;
+    return work;
+  }
+
+  /** [재색인]: 색인을 지우고 처음부터 다시 만든다. */
+  function rebuildIndex() {
+    if (!root) return null;
+    if (!indexRoot) { setStatus('색인을 아직 열지 않았습니다. 잠시 뒤에 다시 눌러 주세요.'); return null; }
+    if (indexing) { setStatus('색인을 만들거나 맞추는 중입니다. 끝난 뒤에 다시 눌러 주세요.'); return null; }
+    setStatus('색인을 처음부터 다시 만듭니다…');
+    return loadIndex(false, true);
+  }
+
+  /** 열어 둔 색인을 놓는다(폴더를 바꾸거나 항목을 닫을 때). 같은 폴더를 보는 다른 코드 항목이 없으면 앱이 색인을 버린다. */
+  function closeIndex() {
+    if (indexRoot) invoke('code_index_close', { root: indexRoot }).catch(() => {});
+    clearTimeout(indexLater);
+    indexLater = 0;
+    indexRoot = '';
+    indexInfo = null;
+    indexing = null;
+    indexMs = 0;
+    indexFailed = false;
+    $index.hidden = true;
+  }
+
+  /**
+   * Claude 세션이 방금 쓴 파일만 색인에 다시 넣는다(파일 목록을 다시 읽지 않아 금방 끝난다). 새 파일이면 더하고, 지운 파일이면 뺀다.
+   * 색인을 만드는 중이면 그 뒤에 한다(앱이 차례를 지킨다).
+   */
+  function touchIndex(path) {
+    if (!indexRoot || disposed) return;
+    const mine = epoch, at = root;
+    touching = touching
+      .then(() => invoke('code_index_touch', { root: at, paths: [path] }))
+      .then((info) => {
+        if (!info || mine !== epoch || disposed) return null;
+        indexInfo = info;
+        refreshBar();
+        return info;
+      })
+      // 쓰지 못했다: 앱이 색인을 내렸다(파일을 모두 읽는 길로 물러났다). 곧 모두 맞추면서 다시 해 본다.
+      .catch(() => { if (mine === epoch && !disposed) refreshIndexSoon(true); return null; });
+  }
+
+  /**
+   * 파일이 바뀐 것이 보이면(`force`) 또는 가끔씩 색인을 맞춘다. 너무 자주 하지 않게, 지난번에 걸린 시간의 몇 배는 쉰다.
+   * 가끔씩 맞추는 간격은 작은 프로젝트에서는 짧고(6초) 큰 프로젝트에서는 길다(30초 넘게): git이 못 알아채는 변화(새 파일의 내용만
+   * 바뀐 것 등)도 그 안에 반영된다.
+   */
+  function refreshIndexSoon(force) {
+    if (!indexRoot || disposed) return;
+    const later = (wait) => { if (!indexLater) indexLater = setTimeout(() => { indexLater = 0; if (shown) refreshIndexSoon(true); }, wait); };
+    // 맞추는 중에 또 바뀌었다: 돌고 있는 일은 그 변화를 못 봤을 수 있으니 끝난 뒤에 한 번 더 맞춘다.
+    if (indexing) { if (force) later(1500); return; }
+    const rest = force ? Math.max(1500, indexMs * 5) : Math.max(Math.min(INDEX_MS, indexMs * 50), GIT_MS, indexMs * 20);
+    const left = indexedAt + rest - Date.now();
+    if (left <= 0) loadIndex(false);
+    // 방금 맞춘 직후에 바뀐 것이 보였다: 쉬는 시간이 끝나면 맞춘다(그냥 넘기면 다음 차례까지 묵는다).
+    else if (force) later(left + 50);
   }
 
   // ── 프로젝트 나무 ──
@@ -538,6 +678,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     git = next;
     diffs = found;
     if (same) return;
+    refreshIndexSoon(true); // 파일이 바뀌었다: 색인도 맞춘다
     // 보고 있던 바뀐 곳이 없어졌으면(되돌렸거나 줄이 밀렸다) 이전 내용 창을 닫는다.
     if (peek && !hunkAt(peek.path, peek.line)) peek = null;
     refreshBar();
@@ -1318,8 +1459,9 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       const local = localDeclaration(name, found.line, around.line, clicked);
       if (local) { remember(); return jump(local); }
     }
-    // 2. 프로젝트 전체의 정의
+    // 2. 프로젝트 전체의 정의(색인으로 찾는다. 색인을 만드는 중이면 다 만들 때까지 기다린다)
     let defs = [];
+    if (indexing && !indexInfo) setStatus('색인을 만드는 중입니다. 끝나면 정의로 갑니다…');
     try {
       defs = await invoke('code_defs', { root, name });
     } catch (err) {
@@ -1641,6 +1783,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     root = norm(next).replace(/\\+$/, '');
     if (/^[A-Za-z]:$/.test(root)) root += '\\'; // 드라이브 맨 위
     item.cwd = root; // 스테이지 맨 위의 경로와 "폴더 열기"도 새 폴더를 따른다
+    closeIndex(); // 옛 폴더의 색인을 놓는다
     epoch += 1; // 읽고 있던 옛 프로젝트의 결과는 버린다
     openSeq += 1;
     panelSeq += 1;
@@ -1666,6 +1809,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     renderCrumbs();
     renderOutline();
     refreshBar();
+    loadIndex(true);
     await list(root);
     renderTree();
     refreshGit();
@@ -1926,16 +2070,19 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     if (now && heldScroll != null) { lastScroll = heldScroll; heldScroll = null; }
     if (now && !shown) {
       shown = true;
+      // 색인은 처음 보일 때 만든다(앱을 켤 때 숨겨진 코드 항목까지 한꺼번에 색인하지 않게). 만드는 동안에도 파일은 볼 수 있다.
+      if (!indexRoot && root) loadIndex(true);
       if (Math.abs($scroll.scrollTop - lastScroll) > 1) $scroll.scrollTop = lastScroll;
       check();
       refreshSoon();
+      refreshIndexSoon(false); // 숨겨져 있던 동안 바뀐 것(git이 못 알아채는 것도)을 색인에 반영한다
     } else if (!now) {
       shown = false;
     }
   });
   watcher.observe($scroll);
   const watchTimer = setInterval(() => { if (shown && !document.hidden) check(); }, WATCH_MS);
-  const slowTimer = setInterval(() => { if (shown && !document.hidden) refreshSoon(); }, GIT_MS);
+  const slowTimer = setInterval(() => { if (shown && !document.hidden) { refreshSoon(); refreshIndexSoon(false); } }, GIT_MS);
 
   const view = {
     ready: null,
@@ -1954,6 +2101,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     }),
     close: () => Promise.resolve(true),
     dispose() {
+      closeIndex();
       disposed = true;
       clearInterval(watchTimer);
       clearInterval(slowTimer);
@@ -1983,6 +2131,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     fileChanged(path) {
       if (!lower(path).startsWith(rootPrefix())) return;
       touched.set(lower(path), Date.now());
+      touchIndex(path); // 그 파일의 정의와 낱말을 색인에 바로 다시 넣는다
       refreshSoon();
       if (current && lower(current.path) === lower(path)) check();
     },
@@ -1992,6 +2141,11 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     current: () => current,
     wordAt, setCaret: (line, col) => { caret = { line, col }; },
     goChange, stepChange, hunksOf, refreshGit,
+    index: () => ({ info: indexInfo, busy: !!indexing, shown: !$index.hidden, text: $index.textContent }),
+    indexed: () => indexing || Promise.resolve(indexInfo),
+    refreshIndex: () => loadIndex(false),
+    rebuildIndex,
+    touched: () => touching,
     peek: () => (peek ? { ...peek, shown: !$peek.hidden } : null),
     setChangedOnly: (on) => { changedOnly = !!on; renderTree(); changedState(); },
   };
