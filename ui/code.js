@@ -27,6 +27,7 @@ const MAX_HISTORY = 60;         // 뒤로 가기 기록 수
 const MAX_PICK = 80;            // 고르기 창에 보이는 줄 수
 const MAX_FIND = 5000;          // 이 파일에서 찾기가 세는 자리 수
 const MAX_MARK_LINE = 5000;     // 이보다 긴 줄에는 찾은 곳·같은 이름 표시를 걸지 않는다(지금 자리 하나만 표시)
+const MAX_FILE_HUNKS = 12;      // 바뀐 곳 목록에서 파일 하나에 처음 보이는 수(더 있으면 "더 보기")
 const WATCH_MS = 2000;          // 보고 있는 파일이 바뀌었는지 살피는 간격
 const GIT_MS = 6000;            // 바뀐 파일(git)과 나무를 다시 읽는 간격
 const KIND_ICONS = {
@@ -121,6 +122,10 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   const expanded = new Set((Array.isArray(saved.expanded) ? saved.expanded : []).map(lower));
   const listed = new Map();       // 폴더(소문자 경로) → 그 안의 항목들
   let git = { root: '', branch: '', files: new Map() }; // 바뀐 파일: 소문자 전체 경로 → { status, untracked, rel }
+  /** 바뀐 곳(git 기준): 소문자 전체 경로 → { path, deleted, hunks: [{ line, added, removed, old, old_cut, text }] }. `stamp`는 달라졌는지 견줄 값. */
+  let diffs = { stamp: '', files: new Map(), cut: false };
+  let peek = null;                // 보고 있는 바뀐 곳 { path, line }(이전 내용 창과 목록의 표시)
+  const allHunks = new Set();     // 바뀐 곳 목록에서 "더 보기"를 누른 파일(소문자 경로)
   const touched = new Map();      // Claude 세션이 이번에 쓴 파일: 소문자 전체 경로 → 쓴 때
   let changedOnly = !!saved.changedOnly;
   let back = [], forward = [];
@@ -131,6 +136,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   let lastScroll = 0;             // 마지막으로 보던 스크롤 자리(숨기면 브라우저가 맨 위로 되돌린다)
   let heldScroll = null;          // 화면 배치를 다시 짓는 동안 지켜 둔 스크롤 자리(창을 떼었다 붙이면 맨 위로 돌아간다)
   let focusedPath = '';           // 나무에서 키보드로 고른 줄(나무를 다시 그려도 지킨다)
+  let gitSeq = 0;                 // 바뀐 파일 읽기의 차례(겹쳐 돈 읽기는 나중에 시작한 것만 쓴다)
   let epoch = 0;                  // 프로젝트 폴더를 바꿀 때마다 오른다(옛 폴더의 늦은 결과를 가려낸다)
   let openSeq = 0;                // 파일 열기의 차례(먼저 연 느린 파일이 나중에 연 파일을 덮지 않게)
   let panelSeq = 0;               // 아래 결과 창에 넣을 찾기의 차례
@@ -145,7 +151,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
 
   // ── 틀 ──
   const $title = make('span', 'doc-title');
-  const $changed = button('바뀐 파일', '바뀐 파일만 보기 (git 기준) ↔ 프로젝트 전체', () => { changedOnly = !changedOnly; renderTree(); changedState(); if (!changedOnly && current) revealInTree(current.path); });
+  const $changed = button('바뀐 파일', '바뀐 파일과 바뀐 곳만 모아 보기 (git 기준) ↔ 프로젝트 전체 · F7 / Shift+F7: 다음·이전 바뀐 곳', () => { changedOnly = !changedOnly; renderTree(); changedState(); if (!changedOnly && current) revealInTree(current.path); });
   const $back = button('←', '뒤로 (Alt+←)', () => travel(-1));
   const $forward = button('→', '앞으로 (Alt+→)', () => travel(1));
   // 글꼴: 이름(비우면 앱의 고정폭 글꼴)과 크기. 여기서 바꾼 것은 코드 보기에만 적용된다.
@@ -207,7 +213,10 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   const $empty = make('div', 'code-empty');
   const $scroll = make('div', 'code-scroll');
   $scroll.tabIndex = 0;
-  $scroll.append($empty, $code);
+  // 이전 내용 창: 바뀐 곳의 지운 줄을 그 자리 아래에 띄운다. 줄 목록($code)의 자식이 아니다(줄 번호 셈을 흩뜨리지 않게).
+  const $peek = make('div', 'code-peek');
+  $peek.hidden = true;
+  $scroll.append($empty, $code, $peek);
   const $panelHead = make('div', 'code-panel-head');
   const $panelBody = make('div', 'code-panel-body');
   $panelBody.tabIndex = 0;
@@ -284,6 +293,67 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     return make('i', `code-ico fi-${tone}`, mark);
   }
 
+  /** 나무의 줄을 가리키는 값(키보드로 고른 줄을 다시 그려도 지키는 데 쓴다). 바뀐 곳의 줄은 경로 뒤에 줄 번호가 붙는다. */
+  const rowKey = (row) => `${lower(row.dataset.path)}${row.dataset.line ? `#${row.dataset.line}` : row.dataset.more ? '#more' : ''}`;
+  const samePath = (a, b) => lower(a) === lower(b);
+
+  /** 바뀐 파일들(바뀐 곳 목록의 차례): Claude 세션이 방금 쓴 것이 앞, 그 뒤로 이름순. */
+  function changedFiles() {
+    const files = [...git.files.entries()].filter(([path]) => path.startsWith(rootPrefix()) || path === lower(root));
+    files.sort((a, b) => (touched.get(b[0]) || 0) - (touched.get(a[0]) || 0) || a[1].rel.localeCompare(b[1].rel));
+    return files.map(([, change]) => change);
+  }
+
+  /** 그 파일의 바뀐 곳들(줄 차례). 새 파일은 파일 전체가 한 곳이다(`whole`). */
+  function hunksOf(path) {
+    const found = diffs.files.get(lower(path));
+    if (found) return found.hunks;
+    return git.files.get(lower(path))?.untracked ? [{ line: 1, added: 0, removed: 0, old: [], text: '', whole: true }] : [];
+  }
+  const hunkAt = (path, line) => hunksOf(path).find((hunk) => hunk.line === line) || null;
+  const isDeleted = (path) => !!diffs.files.get(lower(path))?.deleted;
+  /** 바뀐 곳이 차지하는 줄의 범위 글(`12`, `12–18`). */
+  const hunkRange = (hunk, dash = '–') => (hunk.added > 1 ? `${hunk.line}${dash}${hunk.line + hunk.added - 1}` : String(hunk.line));
+
+  /**
+   * 그 줄(단추들이 든 머리)을 눌러도 초점이 코드 창 밖으로 나가지 않게 한다. 다시 그리면 누른 단추가 없어져 초점이 창 밖으로 나가고,
+   * 그러면 단축키(F7, Esc)가 듣지 않는다. 초점이 창 밖에 있었으면 `fallback`에 둔다.
+   */
+  function keepFocus(el, fallback) {
+    el.addEventListener('mousedown', (ev) => {
+      ev.preventDefault();
+      if (!rootEl.contains(document.activeElement) || document.activeElement === document.body) fallback.focus({ preventScroll: true });
+    });
+  }
+
+  /** 바뀐 곳 목록의 머리: 모두 몇 곳인지와 이전·다음 단추. */
+  function changesHead(files) {
+    let places = 0, plus = 0, minus = 0;
+    for (const change of files) for (const hunk of hunksOf(change.path)) { places += 1; plus += hunk.added; minus += hunk.removed; }
+    const head = make('div', 'code-changes-head');
+    keepFocus(head, $tree);
+    const text = make('span', '', `바뀐 곳 ${places}`);
+    text.title = `바뀐 파일 ${files.length}개 · 바뀐 곳 ${places}곳 · 더한 줄 ${plus} · 지운 줄 ${minus}\n(새 파일은 파일 전체를 한 곳으로 세고, 더한 줄 수에는 넣지 않습니다)`;
+    head.append(text, make('span', 'code-hunk-add', `+${plus}`), make('span', 'code-hunk-del', `−${minus}`),
+      button('↑', '이전 바뀐 곳 (Shift+F7)', () => stepChange(-1)), button('↓', '다음 바뀐 곳 (F7)', () => stepChange(1)));
+    return head;
+  }
+
+  /** 바뀐 곳 하나의 줄: 줄 범위, 더한·지운 줄 수, 그 자리의 첫 줄. 누르면 그 자리로 간다. */
+  function hunkRow(path, hunk) {
+    const row = make('div', 'code-row hunk');
+    row.dataset.path = path;
+    row.dataset.line = hunk.line;
+    if (focusedPath === rowKey(row)) row.classList.add('focus');
+    if (peek && samePath(peek.path, path) && peek.line === hunk.line) row.classList.add('current');
+    row.append(make('span', 'code-hunk-range', isDeleted(path) ? '지움' : hunkRange(hunk)));
+    if (hunk.added) row.append(make('span', 'code-hunk-add', `+${hunk.added}`));
+    if (hunk.removed) row.append(make('span', 'code-hunk-del', `−${hunk.removed}`));
+    row.append(make('span', 'code-hunk-text', hunk.text));
+    row.title = `${relative(path)}:${hunkRange(hunk, '-')}${hunk.added ? ` · 더한 줄 ${hunk.added}` : ''}${hunk.removed ? ` · 지운 줄 ${hunk.removed}` : ''}\n누르면 이 자리로 갑니다${hunk.removed ? '(지운 줄은 그 자리 아래에 이전 내용으로 보입니다)' : ''}`;
+    return row;
+  }
+
   function treeRow(path, name, depth, { dir = false, dim = false, note = '' } = {}) {
     const row = make('div', `code-row${dir ? ' dir' : ''}${dim ? ' dim' : ''}`);
     row.dataset.path = path;
@@ -304,13 +374,24 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   function renderTree() {
     const rows = [];
     if (changedOnly) {
-      // 바뀐 파일만: Claude 세션이 방금 쓴 것이 앞, 그 뒤로 이름순.
-      const files = [...git.files.entries()].filter(([path]) => path.startsWith(rootPrefix()) || path === lower(root));
-      files.sort((a, b) => (touched.get(b[0]) || 0) - (touched.get(a[0]) || 0) || a[1].rel.localeCompare(b[1].rel));
-      for (const [, change] of files) {
+      // 바뀐 파일과 그 안의 바뀐 곳: Claude 세션이 방금 쓴 것이 앞, 그 뒤로 이름순.
+      const files = changedFiles();
+      if (files.length) rows.push(changesHead(files));
+      for (const change of files) {
         const path = change.path;
         rows.push(treeRow(path, nameOf(path), 0, { note: `${slash(dirOf(relative(path)))}${change.status ? `  ${change.status}` : ''}` }));
+        const hunks = hunksOf(path).filter((hunk) => !hunk.whole);
+        const every = allHunks.has(lower(path));
+        for (const hunk of every ? hunks : hunks.slice(0, MAX_FILE_HUNKS)) rows.push(hunkRow(path, hunk));
+        if (!every && hunks.length > MAX_FILE_HUNKS) {
+          const more = make('div', 'code-row more', `… 바뀐 곳 ${hunks.length - MAX_FILE_HUNKS}곳 더 보기`);
+          more.dataset.path = path;
+          more.dataset.more = '1';
+          if (focusedPath === rowKey(more)) more.classList.add('focus');
+          rows.push(more);
+        }
       }
+      if (diffs.cut) rows.push(make('div', 'code-note-row', '바뀐 곳이 아주 많아 앞의 것만 보입니다.'));
       if (!rows.length) rows.push(make('div', 'code-note-row', git.root ? '바뀐 파일이 없습니다.' : 'git 저장소가 아니라 바뀐 파일을 알 수 없습니다.'));
     } else {
       const walk = (dir, depth) => {
@@ -356,8 +437,16 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   $tree.addEventListener('click', (ev) => {
     const row = ev.target.closest('.code-row');
     if (!row) return;
-    focusedPath = lower(row.dataset.path);
-    if (row.classList.contains('dir')) toggleDir(row.dataset.path); else openFile(row.dataset.path);
+    focusedPath = rowKey(row);
+    if (row.dataset.more) {
+      const next = hunksOf(row.dataset.path).filter((hunk) => !hunk.whole)[MAX_FILE_HUNKS];
+      allHunks.add(lower(row.dataset.path));
+      if (next) focusedPath = `${lower(row.dataset.path)}#${next.line}`; // 펼친 뒤 새로 나온 첫 줄
+      renderTree();
+    }
+    else if (row.dataset.line) goChange(row.dataset.path, Number(row.dataset.line));
+    else if (row.classList.contains('dir')) toggleDir(row.dataset.path);
+    else openFile(row.dataset.path);
   });
   $tree.addEventListener('contextmenu', (ev) => {
     const row = ev.target.closest('.code-row');
@@ -365,7 +454,16 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     ev.stopPropagation();
     if (!row) return;
     const path = row.dataset.path;
+    const hunk = row.dataset.line ? hunkAt(path, Number(row.dataset.line)) : null;
     showMenu(ev, [
+      ...(hunk ? [
+        { caption: `${nameOf(path)}:${hunkRange(hunk, '-')}` },
+        { label: '이 자리로 가기', action: () => goChange(path, hunk.line) },
+        ...(hunk.old.length ? [{ label: `이전 내용 복사 (지운 줄 ${hunk.removed})`, action: () => copyText(hunk.old.join('\n')) }] : []),
+        { label: 'Claude에 넣기: 이 자리', action: () => api.toClaude?.(item, `${relative(path)}:${hunkRange(hunk, '-')} `, ev) },
+        { label: 'Claude에 넣기: 바뀐 내용', action: () => changeText(path, hunk).then((text) => api.toClaude?.(item, text, ev)) },
+        { caption: '이 파일' },
+      ] : []),
       { label: '경로 복사', action: () => copyText(path) },
       { label: '프로젝트 기준 경로 복사', action: () => copyText(relative(path)) },
       { label: 'Claude에 넣기 (경로)', action: () => api.toClaude?.(item, `${relative(path)} `, ev) },
@@ -380,7 +478,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       const next = rows[Math.max(0, Math.min(rows.length - 1, to))];
       if (!next) return;
       next.classList.add('focus');
-      focusedPath = lower(next.dataset.path);
+      focusedPath = rowKey(next);
       next.scrollIntoView({ block: 'nearest' });
     };
     const row = rows[at];
@@ -415,7 +513,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
 
   async function refreshGit() {
     if (!root || disposed) return;
-    const mine = epoch;
+    const mine = epoch, seq = ++gitSeq;
     let next = { root: '', branch: '', files: new Map() };
     try {
       const changes = await invoke('git_changes', { cwd: root });
@@ -425,15 +523,144 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
         next.files.set(lower(path), { status: file.status, untracked: file.untracked, rel: file.path, path });
       }
     } catch { /* git 저장소가 아니다 */ }
-    if (mine !== epoch || disposed) return; // 그사이 프로젝트 폴더를 바꿨다
+    // 바뀐 곳(줄 단위)도 함께 읽는다. 파일의 상태는 그대로인데 내용만 더 바뀌는 일이 흔하므로 따로 견준다.
+    let found = { stamp: '', files: new Map(), cut: false };
+    if (next.root) {
+      try {
+        const hunks = await invoke('git_hunks', { root: next.root });
+        found = { stamp: hunks.stamp, cut: hunks.cut, files: new Map(hunks.files.map((file) => [lower(`${next.root}\\${file.path}`), file])) };
+      } catch { /* 읽지 못하면 바뀐 곳 없이 둔다 */ }
+    }
+    if (mine !== epoch || seq !== gitSeq || disposed) return; // 그사이 프로젝트 폴더를 바꿨거나, 더 나중에 시작한 읽기가 있다
     const same = next.root === git.root && next.branch === git.branch && next.files.size === git.files.size
-      && [...next.files].every(([path, change]) => git.files.get(path)?.status === change.status);
+      && [...next.files].every(([path, change]) => git.files.get(path)?.status === change.status)
+      && found.stamp === diffs.stamp;
     git = next;
+    diffs = found;
     if (same) return;
+    // 보고 있던 바뀐 곳이 없어졌으면(되돌렸거나 줄이 밀렸다) 이전 내용 창을 닫는다.
+    if (peek && !hunkAt(peek.path, peek.line)) peek = null;
     refreshBar();
     renderTree();
     renderTabs();
+    drawPeek();
     if (current) loadMarks(current).then(() => { if (current) applyMarks(current); });
+  }
+
+  // ── 바뀐 곳 보기 ──
+
+  /** 그 바뀐 곳으로 간다: 파일을 열어 그 줄로 가고, 지운 줄이 있으면 이전 내용을 그 아래에 띄운다. */
+  async function goChange(path, line) {
+    const hunk = hunkAt(path, line);
+    if (!hunk) return openFile(path);
+    await openFile(path, { line: hunk.line });
+    if (!current || !samePath(current.path, path)) return;
+    if (current.lines) caret = { line: Math.max(1, Math.min(hunk.line, current.lines.length)), col: 0 };
+    if (visibleNow()) $scroll.scrollLeft = 0; // 이전 내용 창은 왼쪽에 뜬다
+    showPeek(path, hunk);
+  }
+
+  function showPeek(path, hunk) {
+    peek = { path, line: hunk.line };
+    drawPeek();
+    // 목록에서 접혀 있는 곳("더 보기" 뒤)이면 그 파일의 바뀐 곳을 모두 펴서 지금 보는 곳이 보이게 한다.
+    const at = hunksOf(path).filter((each) => !each.whole).findIndex((each) => each.line === hunk.line);
+    if (changedOnly && at >= MAX_FILE_HUNKS && !allHunks.has(lower(path))) { allHunks.add(lower(path)); renderTree(); }
+    markPeekRow(true);
+  }
+
+  function closePeek() {
+    peek = null;
+    drawPeek();
+    markPeekRow(false);
+  }
+
+  /** 바뀐 곳 목록에서 지금 보는 곳의 줄을 표시한다. */
+  function markPeekRow(reveal) {
+    for (const row of $tree.querySelectorAll('.code-row.hunk')) {
+      const on = !!peek && samePath(row.dataset.path, peek.path) && Number(row.dataset.line) === peek.line;
+      row.classList.toggle('current', on);
+      if (on && reveal) row.scrollIntoView({ block: 'nearest' });
+    }
+  }
+
+  /** 줄 번호 칸의 너비(색 표시까지). 글자 크기와 줄 수에 따라 달라진다. */
+  function gutterWidth(el) {
+    if (!el) return 56;
+    const before = getComputedStyle(el, '::before');
+    return (parseFloat(before.width) || 0) + (parseFloat(before.paddingRight) || 0) + (parseFloat(before.borderRightWidth) || 0);
+  }
+
+  /** 이전 내용 창을 그린다(보고 있는 바뀐 곳에 지운 줄이 있을 때만 보인다). 지워진 파일은 화면 전체가 이전 내용이라 띄우지 않는다. */
+  function drawPeek() {
+    const hunk = peek && current?.lines && samePath(current.path, peek.path) ? hunkAt(peek.path, peek.line) : null;
+    if (!hunk || !hunk.old.length || current.deleted) {
+      $peek.hidden = true;
+      $peek.replaceChildren();
+      return;
+    }
+    const path = peek.path;
+    const close = make('button', 'close', '×');
+    close.title = '닫기 (Esc)';
+    close.onclick = () => { closePeek(); $scroll.focus({ preventScroll: true }); };
+    const head = make('div', 'code-peek-head');
+    keepFocus(head, $scroll);
+    head.append(
+      make('b', '', '이전 내용'),
+      make('span', '', `지운 줄 ${hunk.removed}${hunk.added ? ` → 지금 ${hunk.added}줄` : ' (지우기만 함)'}`),
+      button('↑', '이전 바뀐 곳 (Shift+F7)', () => stepChange(-1)),
+      button('↓', '다음 바뀐 곳 (F7)', () => stepChange(1)),
+      button('복사', '이전 내용(지운 줄)을 복사', () => copyText(hunk.old.join('\n'))),
+      button('Claude에 넣기', '이 바뀐 곳의 자리와 내용을 Claude 세션 입력창에 넣기', (ev) => changeText(path, hunk).then((text) => api.toClaude?.(item, text, ev))),
+      close,
+    );
+    const body = make('div', 'code-peek-body');
+    const tokens = current.lang && current.lang !== 'plain' ? tokenize(current.lang, hunk.old) : null;
+    hunk.old.forEach((text, index) => {
+      const el = make('div', 'cl-old');
+      fillLine(el, text, tokens?.[index]);
+      body.append(el);
+    });
+    if (hunk.old_cut) body.append(make('div', 'code-note-row', `… 지운 줄이 많아 앞의 ${hunk.old.length}줄만 보입니다.`));
+    $peek.replaceChildren(head, body);
+    // 바뀐 곳의 마지막 줄 바로 아래(지우기만 한 곳은 지운 자리)에 놓는다.
+    const below = Math.min(current.lines.length, hunk.line - 1 + hunk.added);
+    $peek.style.top = `${(parseFloat(getComputedStyle($code).paddingTop) || 0) + below * lineHeight()}px`;
+    $peek.style.left = `${(visibleNow() ? $scroll.scrollLeft : 0) + gutterWidth($code.querySelector('.cl'))}px`;
+    $peek.hidden = false;
+  }
+
+  /** 바뀐 곳 하나를 글로: 자리와, 지운 줄(-)·지금 줄(+). Claude 세션에 넣을 때 쓴다. */
+  async function changeText(path, hunk) {
+    // 보고 있는 탭은 늘 지금 내용이다. 다른 탭은 열어 둔 뒤로 파일이 바뀌었을 수 있으니 파일에서 새로 읽는다.
+    let lines = current && samePath(current.path, path) && !current.deleted ? current.lines : null;
+    if (!lines && hunk.added) lines = await read(path).then((file) => file.lines).catch(() => null);
+    const now = hunk.added && lines ? lines.slice(hunk.line - 1, hunk.line - 1 + hunk.added) : [];
+    const body = [...hunk.old.map((text) => `-${text}`), ...(hunk.old_cut ? ['…'] : []), ...now.map((text) => `+${text}`)];
+    return `${relative(path)}:${hunkRange(hunk, '-')}\n\`\`\`diff\n${body.join('\n')}\n\`\`\`\n`;
+  }
+
+  /** 다음(+1)·이전(-1) 바뀐 곳으로 간다. 바뀐 곳 목록의 차례를 따르고, 파일을 넘어간다. */
+  async function stepChange(step) {
+    const all = [];
+    for (const change of changedFiles()) for (const hunk of hunksOf(change.path)) all.push({ path: change.path, hunk });
+    if (!all.length) { setStatus('바뀐 곳이 없습니다.'); return; }
+    const at = peek ? all.findIndex((each) => samePath(each.path, peek.path) && each.hunk.line === peek.line) : -1;
+    let next;
+    if (at >= 0) next = at + step;
+    else if (current && all.some((each) => samePath(each.path, current.path))) {
+      // 보고 있는 파일 안에서, 지금 자리의 다음(이전) 바뀐 곳부터.
+      // 캐럿이 없으면(파일을 막 열었다) 화면 맨 윗줄의 바뀐 곳도 "다음"에 든다.
+      const line = caret?.line || topLine() - 1;
+      const mine = all.map((each, index) => ({ ...each, index })).filter((each) => samePath(each.path, current.path));
+      const ahead = step > 0 ? mine.find((each) => each.hunk.line > line) : mine.filter((each) => each.hunk.line < line).pop();
+      next = ahead ? ahead.index : step > 0 ? mine[mine.length - 1].index + 1 : mine[0].index - 1;
+    } else next = step > 0 ? 0 : all.length - 1;
+    if (next < 0 || next >= all.length) { setStatus(step > 0 ? '마지막 바뀐 곳입니다.' : '첫 바뀐 곳입니다.'); return; }
+    await goChange(all[next].path, all[next].hunk.line);
+    setStatus(`바뀐 곳 ${next + 1}/${all.length} · ${relative(all[next].path)}`);
+    // 단추로 불렀으면 초점이 창 밖에 있을 수 있다: 이어서 F7·Esc가 듣게 코드에 둔다.
+    if (!rootEl.contains(document.activeElement) || document.activeElement === document.body) $scroll.focus({ preventScroll: true });
   }
 
   /** 그 파일의 바뀐 줄(git 기준): 줄 번호 → 'add'(더한 줄) | 'mod'(고친 줄) | 'del'(이 줄 앞에서 지웠다) */
@@ -442,6 +669,14 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     tab.marks = new Map();
     if (!change || !tab.lines) return;
     if (change.untracked) { for (let n = 1; n <= tab.lines.length; n++) tab.marks.set(n, 'add'); return; }
+    if (change.status === '이름 변경' || change.status === '복사') {
+      for (const hunk of diffs.files.get(lower(tab.path))?.hunks || []) {
+        for (let i = 0; i < hunk.added; i++) tab.marks.set(hunk.line + i, i < hunk.removed ? 'mod' : 'add');
+        const after = hunk.line + hunk.added;
+        if (hunk.removed > hunk.added && after <= tab.lines.length && !tab.marks.has(after)) tab.marks.set(after, 'del');
+      }
+      return;
+    }
     try {
       const diff = await invoke('git_diff', { root: git.root, path: change.rel, untracked: false });
       let line = 0, removed = 0;
@@ -531,8 +766,10 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       chunks.push(chunk);
     }
     $code.replaceChildren(...chunks);
+    $code.classList.toggle('deleted', !!tab.deleted); // 지워진 파일의 이전 내용
     if (tab.tokens) for (const chunk of chunks) dresser.observe(chunk);
     applyMarks(tab);
+    drawPeek(); // 줄 높이가 바뀌었을 수 있다(글꼴): 이전 내용 창을 제자리에 다시 놓는다
   }
 
   async function read(path) {
@@ -544,6 +781,17 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     return { lines, lang, tokens, modified: file.modified, bytes: file.bytes };
   }
 
+  /** 지워진 파일의 지우기 전 내용(바뀐 곳에 담겨 온 지운 줄들). 지워진 파일이 아니면 null. */
+  function deletedContent(path) {
+    const file = diffs.files.get(lower(path));
+    if (!file?.deleted) return null;
+    const lines = file.hunks.flatMap((hunk) => hunk.old);
+    if (!lines.length) return null;
+    if (file.hunks.some((hunk) => hunk.old_cut)) lines.push('… (지운 파일이 길어 여기까지만 보입니다)');
+    const lang = langOf(path);
+    return { lines, lang, tokens: lang !== 'plain' ? tokenize(lang, lines) : null, modified: 0, gone: true, deleted: true };
+  }
+
   /** 파일을 연다(이미 열려 있으면 그 탭으로 간다). `at`을 주면 그 줄·칸으로 가고 잠깐 표시한다. */
   async function openFile(path, at = null, { record = true } = {}) {
     path = norm(path);
@@ -551,6 +799,11 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     const mine = epoch, seq = ++openSeq;
     const same = (other) => lower(other.path) === lower(path);
     let tab = tabs.find(same);
+    if (tab && !tab.lines) {
+      // 볼 수 없는 탭으로 열려 있었는데 지워진 파일이면 지우기 전의 내용으로 채운다.
+      const before = deletedContent(path);
+      if (before) Object.assign(tab, before, { missing: '' });
+    }
     if (!tab) {
       // 같은 파일을 읽는 중이면 그 읽기를 함께 기다린다.
       let pending = opening.get(lower(path));
@@ -560,7 +813,10 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
           try {
             Object.assign(fresh, await read(path));
           } catch (err) {
-            fresh.missing = String(err);
+            // 지워진 파일(git 기준)은 지우기 전의 내용을 보여 준다.
+            const before = deletedContent(path);
+            if (before) Object.assign(fresh, before);
+            else fresh.missing = String(err);
           }
           return fresh;
         })();
@@ -596,11 +852,14 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     current = tab;
     tab.usedAt = Date.now();
     caret = null;
+    if (peek && !samePath(peek.path, tab.path)) { peek = null; markPeekRow(false); } // 다른 파일로 왔다
+    if (tab.deleted) setStatus(`지워진 파일입니다. 지우기 전의 내용을 보여 줍니다: ${relative(tab.path)}`);
     clearMarks();
     renderTabs();
     $empty.hidden = !!tab.lines;
     $code.hidden = !tab.lines;
     if (!tab.lines) {
+      drawPeek(); // 줄이 없는 화면에는 이전 내용 창을 두지 않는다
       $empty.replaceChildren(make('b', '', '이 파일은 볼 수 없습니다'), make('span', '', tab.missing || ''), button('탐색기에서 보기', '탐색기에서 이 파일 보기', () => outside(tab.path)));
       $code.replaceChildren();
     } else {
@@ -638,6 +897,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     if (closedCurrent) {
       current = null;
       if (next) return void show(next);
+      closePeek();
       clearMarks();
       $code.replaceChildren();
       $code.hidden = true;
@@ -1393,6 +1653,9 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     expanded.clear();
     touched.clear();
     git = { root: '', branch: '', files: new Map() };
+    diffs = { stamp: '', files: new Map(), cut: false };
+    allHunks.clear();
+    closePeek();
     clearMarks();
     closePanel();
     $code.replaceChildren();
@@ -1496,7 +1759,27 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     api.toClaude?.(item, `${where}${code}`, ev);
   }
 
+  /** 줄 번호 칸을 눌렀는지(줄 번호 칸은 가로로 밀어도 왼쪽에 붙어 있다). */
+  function inGutter(ev, el) {
+    return ev.clientX - $scroll.getBoundingClientRect().left <= gutterWidth(el);
+  }
+
   $code.addEventListener('click', (ev) => {
+    // 바뀐 줄의 줄 번호 칸(색 표시)을 누르면 그 바뀐 곳의 이전 내용을 보여 준다.
+    const marked = ev.target.closest?.('.cl.add, .cl.mod, .cl.del');
+    if (marked && current && !ev.ctrlKey && inGutter(ev, marked)) {
+      const line = Number(marked.dataset.n);
+      const hunk = hunksOf(current.path).find((each) => !each.whole
+        && ((line >= each.line && line < each.line + Math.max(1, each.added)) || (each.removed > each.added && line === each.line + each.added)));
+      if (hunk) {
+        if (peek && samePath(peek.path, current.path) && peek.line === hunk.line && !$peek.hidden) closePeek();
+        else {
+          showPeek(current.path, hunk);
+          if (!hunk.old.length) setStatus(`더한 줄 ${hunk.added}줄입니다(이전 내용 없음).`);
+        }
+        return;
+      }
+    }
     const at = pointAt(ev);
     if (!at) return;
     caret = at;
@@ -1559,11 +1842,13 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     let handled = true;
     if (key === 'escape' && !$pick.hidden) { pickSeq += 1; $pick.hidden = true; $scroll.focus({ preventScroll: true }); }
     else if (key === 'escape' && findOpen) closeFind();
+    else if (key === 'escape' && peek && !$peek.hidden) closePeek();
     else if (key === 'escape' && panel) closePanel();
     else if (typing && !(ctrl && ['p', 't', 'g', 'f'].includes(key)) && key !== 'f12') handled = false;
     else if (key === 'f12' && ev.ctrlKey) pickOutline();
     else if ((key === 'f12' && plain) || (ctrl && key === 'b')) goToDefinition();
     else if ((key === 'f7' && ev.altKey) || (key === 'f12' && ev.shiftKey)) findUsages();
+    else if (key === 'f7' && !ev.ctrlKey) stepChange(ev.shiftKey ? -1 : 1);
     else if (ctrl && key === 'f') openFind();
     else if (ctrl && key === 'p') pickFile();
     else if (ctrl && key === 't') pickSymbol();
@@ -1601,7 +1886,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       if (tab !== current || disposed) return;
       const keepCaret = caret;
       const wasGone = tab.gone;
-      Object.assign(tab, fresh, { missing: '', gone: false, triedAt: undefined });
+      Object.assign(tab, fresh, { missing: '', gone: false, deleted: false, triedAt: undefined });
       if (wasGone) renderTabs();
       $empty.hidden = true;
       $code.hidden = false;
@@ -1613,6 +1898,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       invoke('code_outline', { path: tab.path }).then((outline) => { tab.outline = outline; if (current === tab) { renderOutline(); renderCrumbs(); } }).catch(() => {});
       await loadMarks(tab);
       applyMarks(tab);
+      refreshSoon(); // 바뀐 곳 목록과 이전 내용도 새 내용에 맞춘다
     } catch { /* 읽지 못하면 다음에 다시 본다 */ } finally {
       checking = false;
     }
@@ -1705,6 +1991,9 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     goToDefinition, findUsages, pickFile, pickSymbol, openSearch, openFind, setRoot, setFont: setCodeFont, font: () => ({ ...codeFont }),
     current: () => current,
     wordAt, setCaret: (line, col) => { caret = { line, col }; },
+    goChange, stepChange, hunksOf, refreshGit,
+    peek: () => (peek ? { ...peek, shown: !$peek.hidden } : null),
+    setChangedOnly: (on) => { changedOnly = !!on; renderTree(); changedState(); },
   };
 
   welcome();
@@ -1720,7 +2009,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       if (!(listed.get(dir) || []).length) expanded.delete(dir);
     }
     renderTree();
-    refreshGit();
+    await refreshGit(); // 지워진 파일의 탭을 되살리려면 바뀐 곳을 먼저 알아야 한다
     // 같은 파일이 표기만 달리 두 번 적혀 있으면 하나만 연다.
     const seen = new Set();
     const wanted = (Array.isArray(saved.tabs) ? saved.tabs : [])
@@ -1731,7 +2020,11 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     const last = wanted.find((path) => lower(path) === lower(saved.current || '')) || wanted[wanted.length - 1];
     for (const path of wanted.filter((path) => path !== last)) {
       const tab = { path: norm(path), lines: null, tokens: null, lang: langOf(path), modified: 0, top: 1, outline: [], marks: new Map(), usedAt: 0, missing: '' };
-      try { Object.assign(tab, await read(tab.path)); tabs.push(tab); } catch { /* 없어진 파일은 건너뛴다 */ }
+      try { Object.assign(tab, await read(tab.path)); tabs.push(tab); } catch {
+        // 없어진 파일은 건너뛴다. 지워진 파일(git 기준)은 지우기 전의 내용으로 되살린다.
+        const before = deletedContent(tab.path);
+        if (before) { Object.assign(tab, before); tabs.push(tab); }
+      }
     }
     if (last) {
       await openFile(last, null, { record: false });

@@ -239,6 +239,10 @@
   --fi-red: #a12a2a; --fi-purple: #5b3aa8; --fi-pink: #a8324f; --fi-grey: #4a545c;
 }
 :root[data-theme="win32"] .code-row.current .code-ico { color: #ffffff; background: rgba(255, 255, 255, 0.22); }
+:root[data-theme="win32"] .code-row.hunk.current > span { color: #ffffff; }
+:root[data-theme="win32"] .code-hunk-add { color: #17642a; }
+:root[data-theme="win32"] .code-hunk-del { color: #a01420; }
+:root[data-theme="matrix"] .code-peek { background: rgba(1, 14, 5, 0.97); }
 :root[data-theme="matrix"] .doc.code {
   --c-kw: #c8ff3d; --c-ty: #7dffb0; --c-def: #ffffff; --c-call: #39f57a; --c-cn: #d6ffe2; --c-num: #9dffcf; --c-str: #1fd65f;
   --c-com: #167a38; --c-doc: #1fa34e; --c-ann: #c8ff3d; --c-mac: #d6ffe2; --c-tag: #c8ff3d; --c-attr: #7dffb0; --c-prop: #d6ffe2;

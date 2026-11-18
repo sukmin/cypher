@@ -381,6 +381,7 @@ fn main() {
             commands::link_open,
             extras::git_changes,
             extras::git_diff,
+            extras::git_hunks,
             extras::save_text,
             extras::git_revert,
             extras::git_commit,

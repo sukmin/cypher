@@ -142,6 +142,212 @@ pub async fn git_diff(root: String, path: String, untracked: bool) -> Result<Str
     Ok(text)
 }
 
+// ───────────────────────── 바뀐 곳 모아 보기 ────────────────────────
+
+/// 바뀐 곳을 읽는 차이 글의 크기(넘으면 앞부분만 읽는다).
+const MAX_HUNK_BYTES: usize = 8 << 20;
+/// 한 번에 돌려주는 바뀐 곳의 수.
+const MAX_HUNKS: usize = 3000;
+/// 바뀐 곳 하나에 담는 "지운 줄"의 수와 한 줄의 길이.
+const MAX_OLD_LINES: usize = 400;
+const MAX_OLD_CHARS: usize = 1000;
+/// 목록에 보일 한 줄의 길이.
+const MAX_HUNK_TEXT: usize = 160;
+
+/// 바뀐 곳 하나: 붙어 있는 지운 줄과 더한 줄의 묶음.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct Hunk {
+    /// 지금 파일에서 바뀐 곳이 시작하는 줄. 지우기만 한 곳은 지운 자리 바로 다음 줄.
+    line: u32,
+    /// 더한 줄 수(지금 파일의 `line`부터 이만큼이 새 줄이다).
+    added: u32,
+    /// 지운 줄 수.
+    removed: u32,
+    /// 지운 줄들(이전 내용). 많으면 앞의 것만 담는다.
+    old: Vec<String>,
+    old_cut: bool,
+    /// 목록에 보일 한 줄: 더한 첫 줄(지우기만 했으면 지운 첫 줄).
+    text: String,
+}
+
+/// 파일 하나의 바뀐 곳들.
+#[derive(Serialize, Debug, PartialEq)]
+pub struct FileHunks {
+    /// 저장소 맨 위 폴더 기준 경로.
+    path: String,
+    /// 지운 파일인지(`hunks`의 지운 줄이 그 파일의 이전 내용이다).
+    deleted: bool,
+    hunks: Vec<Hunk>,
+}
+
+#[derive(Serialize)]
+pub struct Hunks {
+    /// 차이가 그대로인지 견줄 값(차이 글의 해시).
+    stamp: String,
+    files: Vec<FileHunks>,
+    /// 많아서 다 담지 못했는지.
+    cut: bool,
+}
+
+/// 차이 글의 경로 줄(`--- a/경로`, `+++ b/경로`)에서 경로를 꺼낸다. `/dev/null`이면 None.
+fn diff_path(rest: &str, prefix: &str) -> Option<String> {
+    // 빈칸이 든 경로 뒤에는 git이 탭을 붙인다.
+    let rest = rest.trim_end_matches(['\t', '\r']);
+    if rest == "/dev/null" {
+        return None;
+    }
+    let path = if rest.starts_with('"') && rest.ends_with('"') && rest.len() >= 2 {
+        // 따옴표·제어 글자가 든 경로는 git이 C 문자열처럼 적는다.
+        let mut out: Vec<u8> = Vec::new();
+        let bytes = &rest.as_bytes()[1..rest.len() - 1];
+        let mut at = 0;
+        while at < bytes.len() {
+            if bytes[at] != b'\\' || at + 1 >= bytes.len() {
+                out.push(bytes[at]);
+                at += 1;
+                continue;
+            }
+            let next = bytes[at + 1];
+            if next.is_ascii_digit() && at + 3 < bytes.len() && bytes[at + 1..at + 4].iter().all(|b| (b'0'..=b'7').contains(b)) {
+                let value = bytes[at + 1..at + 4].iter().fold(0u32, |sum, b| sum * 8 + u32::from(b - b'0'));
+                out.push(value as u8);
+                at += 4;
+                continue;
+            }
+            out.push(match next {
+                b't' => b'\t',
+                b'n' => b'\n',
+                b'r' => b'\r',
+                other => other,
+            });
+            at += 2;
+        }
+        String::from_utf8_lossy(&out).into_owned()
+    } else {
+        rest.to_string()
+    };
+    path.strip_prefix(prefix).map(str::to_string)
+}
+
+/// `@@ -a,b +c,d @@`에서 (지운 줄 수, 새 파일의 시작 줄, 더한 줄 수)를 읽는다. 줄 수를 적지 않았으면 1이다.
+fn hunk_header(line: &str) -> Option<(u32, u32, u32)> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old, rest) = rest.split_once(" +")?;
+    let (new, _) = rest.split_once(" @@")?;
+    let count = |part: &str| -> Option<(u32, u32)> {
+        match part.split_once(',') {
+            Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
+            None => Some((part.parse().ok()?, 1)),
+        }
+    };
+    let (_, removed) = count(old)?;
+    let (start, added) = count(new)?;
+    Some((removed, start, added))
+}
+
+fn clip(text: &str, max: usize) -> String {
+    text.chars().take(max).collect()
+}
+
+/// `git diff -U0`의 출력을 파일별 바뀐 곳으로 읽는다. 문맥 줄이 없으므로 갈래(@@) 하나가 바뀐 곳 하나다.
+/// 갈래의 몸통은 머리에 적힌 줄 수만큼만 읽는다(내용이 `-- `로 시작하는 지운 줄을 파일 머리로 잘못 읽지 않게).
+fn parse_hunks(diff: &str) -> (Vec<FileHunks>, bool) {
+    let mut files: Vec<FileHunks> = Vec::new();
+    let mut total = 0usize;
+    let mut cut = false;
+    let mut from: Option<String> = None; // `--- a/경로`
+    let mut open = false; // 지금 파일이 files의 마지막에 있는지
+    let (mut old_left, mut new_left) = (0u32, 0u32);
+    for line in diff.split('\n') {
+        if old_left > 0 || new_left > 0 {
+            // 갈래의 몸통
+            let Some(hunk) = files.last_mut().and_then(|file| file.hunks.last_mut()) else {
+                old_left = 0;
+                new_left = 0;
+                continue;
+            };
+            if let Some(text) = line.strip_prefix('-').filter(|_| old_left > 0) {
+                old_left -= 1;
+                let text = text.strip_suffix('\r').unwrap_or(text);
+                if hunk.old.len() < MAX_OLD_LINES {
+                    hunk.old.push(clip(text, MAX_OLD_CHARS));
+                } else {
+                    hunk.old_cut = true;
+                }
+                if hunk.added == 0 && hunk.text.is_empty() {
+                    hunk.text = clip(text.trim(), MAX_HUNK_TEXT);
+                }
+            } else if let Some(text) = line.strip_prefix('+').filter(|_| new_left > 0) {
+                new_left -= 1;
+                if hunk.text.is_empty() {
+                    hunk.text = clip(text.trim(), MAX_HUNK_TEXT);
+                }
+            } else if !line.starts_with('\\') {
+                // 머리의 줄 수와 맞지 않는다(잘린 차이): 이 갈래는 여기까지로 본다.
+                old_left = 0;
+                new_left = 0;
+            }
+            continue;
+        }
+        if line.starts_with("diff --git ") {
+            from = None;
+            open = false;
+        } else if let Some(rest) = line.strip_prefix("--- ") {
+            from = diff_path(rest, "a/");
+        } else if let Some(rest) = line.strip_prefix("+++ ") {
+            let to = diff_path(rest, "b/");
+            let deleted = to.is_none();
+            if let Some(path) = to.or_else(|| from.take()) {
+                files.push(FileHunks { path, deleted, hunks: Vec::new() });
+                open = true;
+            }
+        } else if let Some((removed, start, added)) = hunk_header(line).filter(|_| open) {
+            if total >= MAX_HUNKS {
+                cut = true;
+                break;
+            }
+            total += 1;
+            let line = if added > 0 { start } else { start + 1 };
+            files.last_mut().expect("열린 파일").hunks.push(Hunk { line: line.max(1), added, removed, old: Vec::new(), old_cut: false, text: String::new() });
+            old_left = removed;
+            new_left = added;
+        }
+    }
+    files.retain(|file| !file.hunks.is_empty());
+    (files, cut)
+}
+
+/// 저장소에서 바뀐 곳을 모두 읽는다(마지막 커밋과 견줘, 추적하는 파일만. 새 파일은 `git_changes`가 알려 준다).
+/// 코드 보기의 "바뀐 곳 모아 보기"와 줄 번호 옆의 표시를 눌렀을 때 보이는 이전 내용에 쓴다.
+#[tauri::command]
+pub async fn git_hunks(root: String) -> Result<Hunks, String> {
+    let root = Path::new(&root);
+    // 문맥 줄 없이(-U0), 사용자의 설정과 상관없이 같은 꼴로(바깥 차이 도구·접두어 설정을 끈다).
+    // 갈래를 합치는 설정(diff.interHunkContext)과 글 변환 도구(textconv)도 끈다: 갈래 하나가 바뀐 곳 하나여야 한다.
+    let base = ["diff", "--no-color", "--no-ext-diff", "--no-textconv", "--src-prefix=a/", "--dst-prefix=b/", "-U0", "--inter-hunk-context=0"];
+    let with_head: Vec<&str> = base.iter().copied().chain(["HEAD", "--"]).collect();
+    let without: Vec<&str> = base.iter().copied().chain(["--"]).collect();
+    // 커밋이 하나도 없는 저장소에서는 HEAD가 없으므로 색인과 비교한다.
+    let mut text = git(root, &with_head, &[0]).or_else(|_| git(root, &without, &[0]))?;
+    let mut cut = false;
+    if text.len() > MAX_HUNK_BYTES {
+        let mut end = MAX_HUNK_BYTES;
+        while !text.is_char_boundary(end) {
+            end -= 1;
+        }
+        text.truncate(end);
+        cut = true;
+    }
+    let stamp = {
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        text.hash(&mut hasher);
+        format!("{:x}", hasher.finish())
+    };
+    let (files, more) = parse_hunks(&text);
+    Ok(Hunks { stamp, files, cut: cut || more })
+}
+
 // ───────────────────────── 되돌리기 ─────────────────────────
 
 /// 파일 이름으로 쓸 수 없는 글자를 `_`로 바꾼다.
@@ -346,6 +552,70 @@ mod tests {
                 ("추가", "added.rs", false, None, "A "),
             ]
         );
+    }
+
+    #[test]
+    fn 바뀐_곳을_읽는다() {
+        let diff = concat!(
+            "diff --git a/src/main.rs b/src/main.rs\n",
+            "index 111..222 100644\n",
+            "--- a/src/main.rs\n",
+            "+++ b/src/main.rs\n",
+            "@@ -3 +3,2 @@ fn main() {\n",
+            "-    old();\r\n",
+            "+    new();\n",
+            "+    more();\n",
+            "@@ -10,2 +10,0 @@\n",
+            "--- 지운 줄이 줄표로 시작\n",
+            "-둘째\n",
+            "@@ -20,0 +19,3 @@\n",
+            "+++ 더한 줄이 더하기로 시작\n",
+            "+b\n",
+            "+c\n",
+            "\\ No newline at end of file\n",
+            "diff --git a/gone file.txt b/gone file.txt\n",
+            "deleted file mode 100644\n",
+            "--- a/gone file.txt\t\n",
+            "+++ /dev/null\n",
+            "@@ -1,2 +0,0 @@\n",
+            "-하나\n",
+            "-둘\n",
+            "diff --git a/img.png b/img.png\n",
+            "Binary files a/img.png and b/img.png differ\n",
+            "diff --git a/new.rs b/new.rs\n",
+            "new file mode 100644\n",
+            "--- /dev/null\n",
+            "+++ b/new.rs\n",
+            "@@ -0,0 +1 @@\n",
+            "+fn added() {}\n",
+        );
+        let (files, cut) = parse_hunks(diff);
+        assert!(!cut);
+        let got: Vec<_> = files
+            .iter()
+            .map(|file| (file.path.as_str(), file.deleted, file.hunks.iter().map(|h| (h.line, h.added, h.removed, h.old.join("|"), h.text.as_str())).collect::<Vec<_>>()))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (
+                    "src/main.rs",
+                    false,
+                    vec![
+                        (3, 2, 1, "    old();".to_string(), "new();"),
+                        (11, 0, 2, "-- 지운 줄이 줄표로 시작|둘째".to_string(), "-- 지운 줄이 줄표로 시작"),
+                        (19, 3, 0, String::new(), "++ 더한 줄이 더하기로 시작"),
+                    ]
+                ),
+                ("gone file.txt", true, vec![(1, 0, 2, "하나|둘".to_string(), "하나")]),
+                ("new.rs", false, vec![(1, 1, 0, String::new(), "fn added() {}")]),
+            ]
+        );
+        // 따옴표로 적힌 경로, 많은 지운 줄.
+        assert_eq!(diff_path("\"b/a\\\"b\\352\\260\\200.txt\"", "b/").as_deref(), Some("a\"b\u{ac00}.txt"));
+        let many = format!("--- a/x\n+++ b/x\n@@ -1,{} +0,0 @@\n{}", MAX_OLD_LINES + 5, "-줄\n".repeat(MAX_OLD_LINES + 5));
+        let (files, _) = parse_hunks(&many);
+        assert_eq!((files[0].hunks[0].old.len(), files[0].hunks[0].old_cut, files[0].hunks[0].removed), (MAX_OLD_LINES, true, MAX_OLD_LINES as u32 + 5));
     }
 
     #[test]
