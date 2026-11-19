@@ -1333,6 +1333,12 @@ export function createNav(env) {
     /** 자료형으로 가리지 못했을 때: 이 자료형의 멤버, import한 것, 그리고 이름이 같은 정의를 가까운 순서로. */
     async function byName() {
       let all = await defsOf(name);
+      // 이 파일의 정의는 색인을 기다리지 않는다(방금 만든 파일은 색인에 아직 없을 수 있다): 화면이 읽어 둔 구조에서 더한다.
+      const here = env.relative(tab.path);
+      for (const def of tab.outline || []) {
+        if (def.name !== name || (def.line === line && def.col === where.from) || ['heading', 'section'].includes(def.kind)) continue;
+        if (!all.some((each) => each.file === here && each.line === def.line && each.col === def.col)) all = [...all, { ...def, file: here, text: (tab.lines[def.line - 1] || '').trim().slice(0, 200), sig: '', supers: [] }];
+      }
       // 색인에 아직 없는 새 파일의 정의일 수 있다: 한 번은 색인을 맞추고 다시 찾는다.
       if (!all.length) all = await env.invoke('code_defs', { root: env.root(), name, within: null, fresh: true }).catch(() => []);
       // 같은 이름이 다른 언어의 파일에도 있으면 이 언어의 것만 본다.
