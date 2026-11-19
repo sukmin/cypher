@@ -23,6 +23,8 @@ pub enum Lang {
     C,
     Markdown,
     Config,
+    /// XML: id 속성과 MyBatis 매퍼의 구문(select·insert·update·delete)을 정의로 본다.
+    Xml,
     Text,
 }
 
@@ -43,7 +45,8 @@ pub fn lang_of(file_name: &str) -> Option<Lang> {
         "c" | "h" | "cc" | "cpp" | "cxx" | "hpp" | "hh" | "m" | "mm" => Lang::C,
         "md" | "markdown" | "mdx" => Lang::Markdown,
         "toml" | "ini" | "cfg" | "conf" | "properties" => Lang::Config,
-        "json" | "jsonc" | "json5" | "yaml" | "yml" | "xml" | "svg" | "sql" | "sh" | "bash" | "zsh" | "ps1" | "psm1" | "bat" | "cmd" | "txt" | "lock"
+        "xml" => Lang::Xml,
+        "json" | "jsonc" | "json5" | "yaml" | "yml" | "svg" | "sql" | "sh" | "bash" | "zsh" | "ps1" | "psm1" | "bat" | "cmd" | "txt" | "lock"
         | "http" | "env" | "graphql" | "proto" | "tf" | "rb" | "php" | "swift" | "dart" | "lua" | "pl" | "r" | "scala" | "ex" | "exs" | "erl" | "hs"
         | "clj" | "fxml" | "pom" | "xsd" | "csv" | "tsv" | "log" => Lang::Text,
         "" if matches!(name.as_str(), "dockerfile" | "makefile" | "license" | "readme" | ".gitignore" | ".editorconfig" | ".env") => Lang::Text,
@@ -72,6 +75,7 @@ pub fn mask(lang: Lang, text: &str) -> Vec<u8> {
                 mask_braces(inner, bytes, from, to, &mut kinds);
             }
         }
+        Lang::Xml => mask_html_comments(text.as_bytes(), &mut kinds),
         Lang::Markdown | Lang::Config | Lang::Text => {}
     }
     kinds
@@ -462,6 +466,7 @@ pub fn definitions(lang: Lang, text: &str) -> Vec<Def> {
         }
         Lang::Python => python_defs(text, &code_only(text, &mask(lang, text))),
         Lang::Markdown | Lang::Config => line_defs(lang, text, text),
+        Lang::Xml => line_defs(lang, text, &code_only(text, &mask(lang, text))),
         Lang::Text => Vec::new(),
         _ => brace_defs(lang, text, &code_only(text, &mask(lang, text)), 0),
     }
@@ -474,9 +479,9 @@ macro_rules! re {
 }
 
 // Rust
-re!(RS_FN, r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:(?:default|const|async|unsafe|extern)\s+)*fn\s+([\p{L}_]\w*)");
-re!(RS_TYPE, r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:unsafe\s+)?(struct|enum|trait|union|mod|type)\s+([\p{L}_]\w*)");
-re!(RS_CONST, r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:const|static)\s+(?:mut\s+)?([\p{L}_]\w*)\s*:");
+re!(RS_FN, r"^\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\s*\([^)]*\))?\s+)?(?:(?:default|const|async|unsafe|extern)\s+)*fn\s+([\p{L}_]\w*)");
+re!(RS_TYPE, r"^\s*(?:#\[[^\]]*\]\s*)*(?:pub(?:\s*\([^)]*\))?\s+)?(?:unsafe\s+)?(struct|enum|trait|union|mod|type)\s+([\p{L}_]\w*)");
+re!(RS_CONST, r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?(?:const|static)\s+(?:(?:mut|ref)\s+)?([\p{L}_]\w*)\s*:");
 re!(RS_MACRO, r"^\s*macro_rules!\s*([\p{L}_]\w*)");
 re!(RS_IMPL, r"^\s*(?:unsafe\s+)?impl\b(.*)$");
 re!(RS_FIELD, r"^\s*(?:pub(?:\s*\([^)]*\))?\s+)?([\p{Ll}\p{Lo}_]\w*)\s*:");
@@ -489,13 +494,14 @@ re!(
 );
 re!(
     JV_METHOD,
-    r"^\s*(?:@[\w.]+(?:\([^)]*\))?\s+)*((?:(?:public|protected|private|internal|static|final|abstract|synchronized|native|default|strictfp|virtual|override|async|inline|extern|unsafe|sealed|partial|readonly|constexpr|explicit|friend)\s+)*)(?:<[^>]*>\s*)?([\w$.<>\[\],?&*: ]*?)[\s*&]*\b([\p{L}_$~][\w$]*)\s*\("
+    r"^\s*(?:@[\w.]+(?:\([^)]*\))?\s+)*((?:(?:public|protected|private|internal|static|final|abstract|synchronized|native|default|strictfp|virtual|override|async|inline|extern|unsafe|sealed|partial|readonly|constexpr|explicit|friend)\s+|@[\w.]+(?:\([^)]*\))?\s+)*)(?:<(?:[^<>]|<[^<>]*>)*>\s*)?(?:@[\w.]+(?:\([^)]*\))?\s+)*([\w$.<>\[\],?&*: @]*?)[\s*&]*\b([\p{L}_$~][\w$]*)\s*\("
 );
 re!(
     JV_FIELD,
-    r"^\s*(?:@[\w.]+(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|internal|static|final|volatile|transient|readonly|const|mutable)\s+)*([\w$.<>\[\],? ]+?)\s+([\p{L}_$][\w$]*)\s*(?:=|;|,)"
+    r"^\s*(?:@[\w.]+(?:\([^)]*\))?\s+)*(?:(?:public|protected|private|internal|static|final|volatile|transient|readonly|const|mutable)\s+|@[\w.]+(?:\([^)]*\))?\s+)*([\w$.<>\[\],?@ ]+?)\s+([\p{L}_$][\w$]*)\s*(?:=|;|,)"
 );
 re!(JV_ENUM_CONST, r"^\s*([A-Z_][A-Z0-9_]*)\s*(?:[({,;=]|$)");
+re!(JV_ENUM_LIST, r"^\s*[A-Z_][A-Z0-9_]*(?:\s*,\s*[A-Z_][A-Z0-9_]*)+\s*[,;]?\s*$");
 re!(C_DEFINE, r"^\s*#\s*define\s+([\p{L}_]\w*)");
 // Kotlin
 re!(KT_TYPE, r"(?:^|[^.\w])(class|interface|object)\s+([\p{L}_]\w*)");
@@ -531,6 +537,9 @@ re!(CSS_VAR, r"(?:^|[{;\s])(--[\w-]+|\$[\w-]+)\s*:");
 re!(CSS_AT, r"@(mixin|keyframes|function)\s+([\w-]+)");
 // HTML
 re!(HTML_ID, r#"(?:^|[\s"'])(id|ref)\s*=\s*["']([^"'\s{}]+)["']"#);
+// XML
+re!(XML_ID, r#"<([\w:.-]+)\b[^<>]*?\sid\s*=\s*["']([\p{L}_][^"'\s{}$#]*)["']"#);
+re!(XML_NAMESPACE, r#"<mapper\b[^<>]*?\snamespace\s*=\s*["']([^"']+)["']"#);
 // Python
 re!(PY_DEF, r"^(\s*)(?:async\s+)?(def|class)\s+([\p{L}_]\w*)");
 re!(PY_VAR, r"^([\p{L}_]\w*)\s*(?::[^=]+)?=[^=]");
@@ -768,6 +777,9 @@ fn java_line(finder: &mut Finder, line: &str, depth: i32, top_level_functions: b
             };
             finder.add(name.as_str(), kind, name.start());
             finder.open(name.as_str(), kind, depth, true);
+            if word == "record" {
+                record_fields(finder, line, name.end());
+            }
             return;
         }
     }
@@ -776,6 +788,18 @@ fn java_line(finder: &mut Finder, line: &str, depth: i32, top_level_functions: b
         return;
     }
     if let Some((_, "enum")) = member {
+        // 한 줄에 여럿 적은 상수(`RED, GREEN, BLUE;`)는 하나씩 적는다.
+        if JV_ENUM_LIST.is_match(line) {
+            let mut at = 0;
+            for part in line.split(',') {
+                let name = part.trim().trim_end_matches(';').trim();
+                if !name.is_empty() {
+                    finder.add(name, "constant", at + part.find(name).unwrap_or(0));
+                }
+                at += part.len() + 1;
+            }
+            return;
+        }
         if let Some(name) = JV_ENUM_CONST.captures(line).and_then(|found| found.get(1)) {
             finder.add(name.as_str(), "constant", name.start());
             return;
@@ -785,8 +809,14 @@ fn java_line(finder: &mut Finder, line: &str, depth: i32, top_level_functions: b
         let (modifiers, returns, name) = (found[1].trim(), found[2].trim(), found.get(3).unwrap());
         let first = returns.split([' ', '<', '.']).next().unwrap_or("");
         let constructor = member.as_ref().is_some_and(|(owner, _)| owner == name.as_str().trim_start_matches('~'));
-        let ok = !JV_NOT_NAMES.contains(&name.as_str())
+        // (`delete`는 C++에서만 예약어다. Java·C#에서는 흔한 메서드 이름이다.)
+        let ok = (!JV_NOT_NAMES.contains(&name.as_str()) || (!top_level_functions && name.as_str() == "delete"))
             && !JV_NOT_TYPES.contains(&first)
+            // 인자가 붙은 애노테이션 줄(`@Value("…")`)은 선언이 아니다.
+            && !returns.starts_with('@')
+            // 앞줄에서 이어진 호출(`Props.getFlag(…)`, `.and(…)`)도 선언이 아니다.
+            && !returns.ends_with('.')
+            && !returns.starts_with('.')
             // 반환형이 없으면 생성자여야 한다(그렇지 않으면 `foo(x);` 같은 호출이다). 한정어만 붙은 것도 마찬가지다.
             && (!returns.is_empty() || constructor)
             && !(returns.is_empty() && modifiers.is_empty() && !constructor);
@@ -806,9 +836,45 @@ fn java_line(finder: &mut Finder, line: &str, depth: i32, top_level_functions: b
         if let Some(found) = JV_FIELD.captures(line) {
             let (kind, name) = (found[1].trim(), found.get(2).unwrap());
             let first = kind.split([' ', '<', '.']).next().unwrap_or("");
-            if !JV_NOT_TYPES.contains(&first) && !JV_NOT_NAMES.contains(&first) && !kind.is_empty() {
+            if !JV_NOT_TYPES.contains(&first) && !JV_NOT_NAMES.contains(&first) && !kind.is_empty() && !kind.starts_with('@') {
                 let constant = name.as_str().chars().all(|c| c.is_ascii_uppercase() || c.is_ascii_digit() || c == '_');
                 finder.add(name.as_str(), if constant { "constant" } else { "field" }, name.start());
+            }
+        }
+    }
+}
+
+/// `record Point(int x, List<String> names)`의 구성 요소를 필드로 적는다(같은 줄에 적힌 것만).
+fn record_fields(finder: &mut Finder, line: &str, from: usize) {
+    let Some(open) = line[from..].find('(').map(|at| from + at) else { return };
+    let mut depth = 0;
+    let mut start = open + 1;
+    let mut parts: Vec<(usize, usize)> = Vec::new();
+    for (at, ch) in line[open..].char_indices().map(|(at, ch)| (open + at, ch)) {
+        match ch {
+            '(' | '<' | '[' => depth += 1,
+            ')' | '>' | ']' => {
+                depth -= 1;
+                if depth == 0 {
+                    parts.push((start, at));
+                    break;
+                }
+            }
+            ',' if depth == 1 => {
+                parts.push((start, at));
+                start = at + 1;
+            }
+            _ => {}
+        }
+    }
+    for (from, to) in parts {
+        let part = line[from..to].trim_end();
+        let name_at = part.char_indices().rev().find(|(_, ch)| !(ch.is_alphanumeric() || *ch == '_' || *ch == '$')).map_or(0, |(at, ch)| at + ch.len_utf8());
+        let name = &part[name_at..];
+        if !name.is_empty() && name_at > 0 && !name.starts_with(|ch: char| ch.is_ascii_digit()) {
+            finder.add(name, "field", from + name_at);
+            if let Some(def) = finder.defs.last_mut() {
+                def.depth += 1;
             }
         }
     }
@@ -1080,6 +1146,22 @@ fn line_defs(lang: Lang, original: &str, code: &str) -> Vec<Def> {
                     }
                 }
             }
+            Lang::Xml => {
+                // MyBatis 매퍼: `<mapper namespace="a.b.OrderMapper">` 안의 구문은 그 인터페이스(OrderMapper)의 메서드와 짝이다.
+                if let Some(space) = XML_NAMESPACE.captures(line).and_then(|found| found.get(1)) {
+                    let owner = space.as_str().rsplit('.').next().unwrap_or("");
+                    finder.scopes.clear();
+                    finder.scopes.push(Scope { name: owner.to_string(), kind: "interface", depth: 0, entered: true, line: finder.line, typeish: true, def: None });
+                }
+                for found in XML_ID.captures_iter(line) {
+                    let name = found.get(2).unwrap();
+                    let kind = if matches!(&found[1], "select" | "insert" | "update" | "delete") { "method" } else { "id" };
+                    finder.add(name.as_str(), kind, name.start());
+                    if let Some(def) = finder.defs.last_mut() {
+                        def.depth = 0;
+                    }
+                }
+            }
             Lang::Config => {
                 // 여러 줄 배열의 한 줄(`["a", "b"],`)은 구역이 아니다.
                 if let Some(name) = CONFIG_SECTION.captures(line).and_then(|found| found.get(1)).filter(|name| !name.as_str().contains([',', '"', '\''])) {
@@ -1090,6 +1172,228 @@ fn line_defs(lang: Lang, original: &str, code: &str) -> Vec<Def> {
         }
     }
     finder.defs
+}
+
+// ───────────────────────── 서명, 상위 자료형, 구현 ─────────────────────────
+
+const MAX_SIGNATURE: usize = 600;
+
+/// 파일 하나에서 정의들의 서명을 읽어 주는 것(주석·문자열을 한 번만 가린다).
+pub struct Signer {
+    code: String,
+    starts: Vec<usize>,
+    python: bool,
+}
+
+impl Signer {
+    pub fn new(lang: Lang, text: &str) -> Self {
+        Self { code: code_only(text, &mask(lang, text)), starts: line_starts(text), python: lang == Lang::Python }
+    }
+
+    /// 정의의 서명: 정의한 줄의 처음부터 몸통이 시작하는 여는 중괄호나 문장이 끝나는 ';' 앞까지. 여러 줄이면 한 줄로 잇는다.
+    /// (반환형·인자 수·상위 자료형을 읽는 데 쓴다. 주석과 문자열은 빈칸이다.)
+    pub fn of(&self, def: &Def) -> String {
+        let Some(&from) = self.starts.get(def.line.saturating_sub(1) as usize) else { return String::new() };
+        let rest = &self.code[from..];
+        let one_line = !matches!(def.kind, "function" | "method" | "constructor" | "class" | "interface" | "enum" | "struct" | "trait" | "type");
+        let mut out = String::new();
+        let mut parens = 0i32;
+        let mut space = true;
+        for (lines, line) in rest.split('\n').enumerate() {
+            if lines >= 16 || (one_line && lines >= 1) {
+                break;
+            }
+            let mut done = false;
+            for ch in line.chars() {
+                match ch {
+                    '(' | '[' => parens += 1,
+                    ')' | ']' => parens = (parens - 1).max(0),
+                    '{' | ';' if parens == 0 => {
+                        done = true;
+                        break;
+                    }
+                    _ => {}
+                }
+                if ch.is_whitespace() {
+                    if !space {
+                        out.push(' ');
+                    }
+                    space = true;
+                } else {
+                    out.push(ch);
+                    space = false;
+                }
+            }
+            if done || out.len() >= MAX_SIGNATURE || (self.python && parens == 0 && line.trim_end().ends_with(':')) {
+                break;
+            }
+            if !space {
+                out.push(' ');
+                space = true;
+            }
+        }
+        let mut cut = out.trim_end().len().min(MAX_SIGNATURE);
+        while !out.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.truncate(cut);
+        out
+    }
+}
+
+/// 짝이 맞는 <…>(과 skip_parens이면 (…)) 안의 글을 뺀다.
+fn without_groups(text: &str, skip_parens: bool) -> String {
+    let mut out = String::new();
+    let (mut angle, mut paren) = (0i32, 0i32);
+    let mut before = ' ';
+    for ch in text.chars() {
+        let arrow = ch == '>' && (before == '-' || before == '=');
+        before = ch;
+        match ch {
+            '<' => angle += 1,
+            '>' if !arrow && angle > 0 => angle -= 1,
+            '(' if skip_parens => paren += 1,
+            ')' if skip_parens && paren > 0 => paren -= 1,
+            _ if angle == 0 && paren == 0 => out.push(ch),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn last_segment(path: &str) -> &str {
+    path.trim().rsplit(['.', ':']).next().unwrap_or("").trim()
+}
+
+fn is_type_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|ch| ch.is_alphanumeric() || ch == '_' || ch == '$') && !name.starts_with(|ch: char| ch.is_ascii_digit())
+}
+
+/// 자료형 정의의 서명에서 상위 자료형(물려받는 클래스, 구현하는 인터페이스, 트레이트의 상위 트레이트)의 이름을 읽는다.
+pub fn supertypes(lang: Lang, sig: &str, name: &str) -> Vec<String> {
+    // 이름 바로 뒤부터 본다.
+    let Some(at) = sig.match_indices(name).map(|(at, _)| at).find(|&at| {
+        let before = sig[..at].chars().next_back();
+        let after = sig[at + name.len()..].chars().next();
+        !before.is_some_and(|ch| ch.is_alphanumeric() || ch == '_') && !after.is_some_and(|ch| ch.is_alphanumeric() || ch == '_')
+    }) else {
+        return Vec::new();
+    };
+    let rest = &sig[at + name.len()..];
+    let mut found: Vec<String> = Vec::new();
+    let mut add = |part: &str| {
+        let part = part.trim();
+        let word = part.rsplit(' ').next().unwrap_or(""); // public Base, virtual Base
+        let word = last_segment(word);
+        if is_type_name(word) && !matches!(word, "public" | "private" | "protected" | "virtual" | "object" | "Object") && !found.iter().any(|each| each == word) {
+            found.push(word.to_string());
+        }
+    };
+    match lang {
+        Lang::Python => {
+            // class A(B, C, metaclass=M):
+            let rest = rest.trim_start();
+            if let Some(inner) = rest.strip_prefix('(').and_then(|inner| inner.split(')').next()) {
+                for part in without_groups(inner, false).split(',').filter(|part| !part.contains('=')) {
+                    add(part);
+                }
+            }
+        }
+        Lang::Rust => {
+            // trait A: B + C<T> where …
+            let rest = without_groups(rest, true);
+            let rest = rest.split(" where ").next().unwrap_or("");
+            if let Some(bounds) = rest.trim_start().strip_prefix(':') {
+                for part in bounds.split('+').filter(|part| !part.trim_start().starts_with(['\'', '?'])) {
+                    add(part);
+                }
+            }
+        }
+        Lang::Java | Lang::Kotlin | Lang::Js | Lang::Vue | Lang::C => {
+            // class A<T> extends B<T> implements C, D / class A(…) : B(), C / class A : public B
+            let rest = without_groups(rest, true);
+            let rest = rest.split(" permits ").next().unwrap_or("");
+            let rest = rest.split(" where ").next().unwrap_or("");
+            let start = [" extends ", " implements ", ":"].iter().filter_map(|mark| rest.find(mark).map(|at| at + mark.len())).min();
+            if let Some(start) = start {
+                for part in rest[start..].replace(" extends ", ",").replace(" implements ", ",").split(',') {
+                    add(part);
+                }
+            }
+        }
+        _ => {}
+    }
+    found
+}
+
+/// impl 뒤의 글에서 구현하는 트레이트의 이름을 고른다: <T> fmt::Display for Type<T> → Display. 트레이트 구현이 아니면 빈 글.
+fn impl_trait(rest: &str) -> &str {
+    let rest = rest.trim_start();
+    // 맨 앞의 <…>를 건너뛴다.
+    let rest = if rest.starts_with('<') {
+        let mut depth = 0;
+        let mut end = rest.len();
+        let mut before = ' ';
+        for (at, ch) in rest.char_indices() {
+            let arrow = ch == '>' && before == '-'; // Fn() -> u32
+            before = ch;
+            match ch {
+                '<' => depth += 1,
+                '>' if arrow => {}
+                '>' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = at + 1;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        &rest[end..]
+    } else {
+        rest
+    };
+    let Some(at) = rest.find(" for ") else { return "" };
+    let head = rest[..at].trim().trim_start_matches('!');
+    let path = head.split(['<', ' ', '(']).next().unwrap_or("");
+    path.rsplit("::").next().unwrap_or("")
+}
+
+/// 이 파일에서 name을 물려받거나 구현하는 것들: 자료형 정의(클래스·인터페이스·트레이트)와, Rust의 impl name for 자료형.
+/// impl은 종류가 "impl"이고 이름이 구현하는 자료형, 감싼 이름이 트레이트다. 함께 내놓는 글은 그 서명이다.
+pub fn subtypes(lang: Lang, text: &str, name: &str) -> Vec<(Def, String)> {
+    if name.is_empty() || !text.contains(name) {
+        return Vec::new();
+    }
+    let signer = Signer::new(lang, text);
+    let mut found: Vec<(Def, String)> = definitions(lang, text)
+        .into_iter()
+        .filter(|def| matches!(def.kind, "class" | "interface" | "enum" | "struct" | "trait"))
+        .filter_map(|def| {
+            let sig = signer.of(&def);
+            supertypes(lang, &sig, &def.name).iter().any(|each| each == name).then_some((def, sig))
+        })
+        .collect();
+    if lang == Lang::Rust {
+        for (index, line) in signer.code.split('\n').enumerate() {
+            let Some(rest) = RS_IMPL.captures(line).and_then(|found| found.get(1)) else { continue };
+            if impl_trait(rest.as_str()) != name {
+                continue;
+            }
+            let target = impl_target(rest.as_str());
+            if target.is_empty() {
+                continue;
+            }
+            let at = rest.start() + rest.as_str().rfind(target).unwrap_or(0);
+            let col = line.get(..at).map_or(0, |before| before.encode_utf16().count()) as u32;
+            let line_number = index as u32 + 1;
+            let def = Def { name: target.to_string(), kind: "impl", line: line_number, col, container: name.to_string(), depth: 0, end: line_number };
+            found.push((def, line.trim().chars().take(MAX_SIGNATURE).collect()));
+        }
+        found.sort_by_key(|(def, _)| (def.line, def.col));
+    }
+    found
 }
 
 // ───────────────────────── 쓰인 곳 찾기 ─────────────────────────
@@ -1107,6 +1411,8 @@ pub struct Hit {
     pub text: String,
     /// `text`에서 이름이 시작하는 칸(UTF-16 단위).
     pub at: u32,
+    /// 그 자리를 감싼 정의(`클래스.메서드`). 쓰는 곳 찾기에서만 채운다. 없으면 빈 글.
+    pub within: String,
 }
 
 const MAX_LINE_SHOWN: usize = 200;
@@ -1186,12 +1492,31 @@ pub fn occurrences(lang: Lang, text: &str, name: &str) -> Vec<Hit> {
             }
         };
         let (shown, shown_at) = shown_line(line, at - line_start, name.len());
-        hits.push(Hit { line: line_number, col, len: name.encode_utf16().count() as u32, role, text: shown, at: shown_at });
+        hits.push(Hit { line: line_number, col, len: name.encode_utf16().count() as u32, role, text: shown, at: shown_at, within: String::new() });
         if hits.len() >= MAX_FILE_HITS {
             break;
         }
     }
+    // 찾은 자리마다 어느 정의 안인지 적는다(누가 부르는지 한눈에 보인다).
+    if !hits.is_empty() && lang != Lang::Text {
+        let defs = defs.unwrap_or_else(|| definitions(lang, text));
+        for hit in &mut hits {
+            hit.within = within(&defs, hit.line, hit.col);
+        }
+    }
     hits
+}
+
+/// 그 자리를 감싼 가장 안쪽의 정의 이름(`감싼 것.이름`). 그 자리가 바로 그 정의의 이름이면 그것을 감싼 것을 내놓는다.
+fn within(defs: &[Def], line: u32, col: u32) -> String {
+    defs.iter()
+        .filter(|def| matches!(def.kind, "function" | "method" | "constructor" | "class" | "interface" | "enum" | "struct" | "trait" | "module"))
+        .filter(|def| def.line <= line && def.end >= line && !(def.line == line && def.col == col))
+        .max_by_key(|def| (def.line, def.depth))
+        .map(|def| if def.container.is_empty() || def.container == def.name { def.name.clone() } else { format!("{}.{}", def.container, def.name) })
+        // 감싼 정의가 없는 정의 줄(impl 안의 메서드 — impl은 정의가 아니다)은 그 감싼 이름을 적는다.
+        .or_else(|| defs.iter().find(|def| def.line == line && def.col == col).map(|def| def.container.clone()))
+        .unwrap_or_default()
 }
 
 /// 글 찾기: 정규식(`pattern`)에 맞는 자리를 모두 찾는다. 빈 글에 맞는 것은 뺀다.
@@ -1217,6 +1542,7 @@ pub fn search(text: &str, pattern: &Regex, limit: usize) -> Vec<Hit> {
             role: "text",
             text: shown,
             at: shown_at,
+            within: String::new(),
         });
         if hits.len() >= limit {
             break;
@@ -1587,5 +1913,103 @@ exports.legacy = 1;
         assert_eq!(rank("gto", "getFoo"), Some(5));
         assert_eq!(rank("xyz", "getFoo"), None);
         assert_eq!(rank("", "getFoo"), None);
+    }
+
+    #[test]
+    fn java의_요즘_꼴_선언을_찾는다() {
+        // 한정어 사이·자료형 안의 애노테이션, 겹친 제네릭 인자, delete라는 이름, record의 구성 요소
+        let text = "public class Tag {\n\t@Value(\"${redis.key}\")\n\t@Scheduled(cron = \"0 0 * * * ?\")\n\tprivate @Nullable UrlType type;\n\tprivate String @Nullable [] names;\n\tpublic final @Nullable Object getSource() {\n\t\treturn null;\n\t}\n\tpublic <T extends Temporal & Comparable<? super T>> @Nullable T next(T temporal) {\n\t\treturn null;\n\t}\n\tpublic CommonResult delete(@PathVariable(\"id\") Long id) {\n\t\treturn null;\n\t}\n}\npublic record Point(int x, List<String> names) implements Shape {\n}\n";
+        assert_eq!(
+            names(Lang::Java, text),
+            [
+                "class:Tag",
+                "field:Tag.type",
+                "field:Tag.names",
+                "method:Tag.getSource",
+                "method:Tag.next",
+                "method:Tag.delete",
+                "class:Point",
+                "field:Point.x",
+                "field:Point.names",
+            ]
+        );
+        // 한 줄에 여럿 적은 열거 상수, 앞줄에서 이어진 호출
+        let text = "enum Color {\n    RED, GREEN, BLUE;\n}\nclass A {\n    private static final boolean FLAG =\n            Props.getFlag(\"x\");\n    private final Spec spec = Spec.where(a)\n            .and(b);\n}\n";
+        assert_eq!(names(Lang::Java, text), ["enum:Color", "constant:Color.RED", "constant:Color.GREEN", "constant:Color.BLUE", "class:A", "constant:A.FLAG", "field:A.spec"]);
+        // C++에서는 delete가 예약어다(메서드 이름으로 보지 않는다).
+        assert!(!names(Lang::C, "class A {\n  void run() {\n  }\n  delete(x);\n};\n").iter().any(|name| name.ends_with("delete")));
+    }
+
+    #[test]
+    fn rust의_같은_줄_속성과_static_ref를_찾는다() {
+        let text = "#[inline] pub fn fast() {}\n#[cfg(test)] mod tests {\n}\nlazy_static! {\n    static ref TABLE: Vec<u8> = Vec::new();\n}\n";
+        assert_eq!(names(Lang::Rust, text), ["function:fast", "module:tests", "constant:TABLE"]);
+    }
+
+    #[test]
+    fn xml의_id와_매퍼_구문을_찾는다() {
+        let text = "<?xml version=\"1.0\"?>\n<mapper namespace=\"com.shop.mapper.OrderMapper\">\n  <resultMap id=\"BaseResultMap\" type=\"com.shop.Order\">\n  </resultMap>\n  <!-- <select id=\"old\"> -->\n  <sql id=\"Base_Column_List\">id, name</sql>\n  <select id=\"selectByPrimaryKey\" resultMap=\"BaseResultMap\">\n    select <include refid=\"Base_Column_List\" /> from t where id = #{id}\n  </select>\n  <insert id=\"insert\" parameterType=\"com.shop.Order\">\n  </insert>\n</mapper>\n";
+        assert_eq!(
+            names(Lang::Xml, text),
+            ["id:OrderMapper.BaseResultMap", "id:OrderMapper.Base_Column_List", "method:OrderMapper.selectByPrimaryKey", "method:OrderMapper.insert"]
+        );
+        assert_eq!(lang_of("a/OrderMapper.xml"), Some(Lang::Xml));
+        assert_eq!(names(Lang::Xml, "<beans>\n  <bean id=\"dataSource\" class=\"x.Y\"/>\n</beans>\n"), ["id:dataSource"]);
+    }
+
+    #[test]
+    fn 서명과_상위_자료형을_읽는다() {
+        let java = "@Service\npublic class OrderServiceImpl<T extends Base<T>>\n        extends AbstractService<Order>\n        implements OrderService, java.io.Serializable {\n    @Override\n    public List<Order> list(Long memberId,\n            List<Long> ids) throws IOException {\n        return null;\n    }\n    private final OrderMapper orderMapper;\n}\ninterface OrderService extends BaseService<Order>, Closeable {\n    List<Order> list(Long memberId, List<Long> ids);\n}\n";
+        let signer = Signer::new(Lang::Java, java);
+        let defs = definitions(Lang::Java, java);
+        let of = |name: &str| signer.of(defs.iter().find(|def| def.name == name).unwrap());
+        assert_eq!(of("OrderServiceImpl"), "public class OrderServiceImpl<T extends Base<T>> extends AbstractService<Order> implements OrderService, java.io.Serializable");
+        assert_eq!(supertypes(Lang::Java, &of("OrderServiceImpl"), "OrderServiceImpl"), ["AbstractService", "OrderService", "Serializable"]);
+        assert_eq!(supertypes(Lang::Java, &of("OrderService"), "OrderService"), ["BaseService", "Closeable"]);
+        // 여러 줄에 걸친 서명은 한 줄로 잇고, 필드는 그 줄만 읽는다.
+        assert_eq!(signer.of(defs.iter().find(|def| def.name == "list" && def.container == "OrderServiceImpl").unwrap()), "public List<Order> list(Long memberId, List<Long> ids) throws IOException");
+        assert_eq!(of("orderMapper"), "private final OrderMapper orderMapper");
+
+        let rust = "pub trait Sink: Send + Sync + 'static {\n    fn matched(&self) -> bool;\n}\npub(crate) fn search_path<M: Matcher, W: WriteColor>(\n    matcher: M, // 주석 { ;\n    path: &Path,\n) -> io::Result<SearchResult>\nwhere\n    M: Matcher,\n{\n    todo!()\n}\nstruct Config {\n    globs: Override,\n}\n";
+        let signer = Signer::new(Lang::Rust, rust);
+        let defs = definitions(Lang::Rust, rust);
+        let of = |name: &str| signer.of(defs.iter().find(|def| def.name == name).unwrap());
+        assert_eq!(supertypes(Lang::Rust, &of("Sink"), "Sink"), ["Send", "Sync"]);
+        assert_eq!(of("search_path"), "pub(crate) fn search_path<M: Matcher, W: WriteColor>( matcher: M, path: &Path, ) -> io::Result<SearchResult> where M: Matcher,");
+        assert_eq!(of("globs"), "globs: Override,");
+        // 그 밖의 언어
+        assert_eq!(supertypes(Lang::Python, "class A(Base, mixins.Other, metaclass=Meta)", "A"), ["Base", "Other"]);
+        assert_eq!(supertypes(Lang::Kotlin, "class A(val x: Int) : Base(x), Runnable", "A"), ["Base", "Runnable"]);
+        assert_eq!(supertypes(Lang::Js, "export class A<T> extends Base<T> implements One, Two", "A"), ["Base", "One", "Two"]);
+        assert_eq!(supertypes(Lang::C, "class A : public Base, private detail::Other", "A"), ["Base", "Other"]);
+        assert!(supertypes(Lang::Java, "public class A", "A").is_empty());
+    }
+
+    #[test]
+    fn 물려받거나_구현한_것을_찾는다() {
+        let java = "class A implements Shape {\n}\nclass B extends A {\n}\ninterface Solid extends Shape, Other {\n}\nclass C {\n    Shape shape;\n}\n";
+        let found: Vec<String> = subtypes(Lang::Java, java, "Shape").into_iter().map(|(def, _)| format!("{}:{}", def.kind, def.name)).collect();
+        assert_eq!(found, ["class:A", "interface:Solid"]);
+        let rust = "struct Circle;\nimpl Shape for Circle {\n    fn area(&self) -> f64 { 1.0 }\n}\nimpl<'a, T: Shape> Shape for &'a T {\n}\nimpl fmt::Display for Circle {\n}\nimpl Circle {\n}\ntrait Solid: Shape {\n}\n";
+        let found: Vec<String> = subtypes(Lang::Rust, rust, "Shape").into_iter().map(|(def, _)| format!("{}:{}@{}", def.kind, def.name, def.line)).collect();
+        assert_eq!(found, ["impl:Circle@2", "impl:T@5", "trait:Solid@11"]);
+        assert!(subtypes(Lang::Rust, rust, "Display").iter().any(|(def, _)| def.name == "Circle" && def.container == "Display"));
+        // impl 머리의 <…> 안에 화살표가 있어도 트레이트를 읽는다.
+        assert_eq!(subtypes(Lang::Rust, "impl<F: Fn() -> u32> Shape for Lazy<F> {\n}\n", "Shape")[0].0.name, "Lazy");
+        // 숫자로 시작하는 XML의 id는 정의가 아니다.
+        assert!(names(Lang::Xml, "<rows>\n  <row id=\"123\"/>\n</rows>\n").is_empty());
+    }
+
+    #[test]
+    fn 쓰인_곳이_어느_정의_안인지_적는다() {
+        let java = "class OrderService {\n    void place() {\n        save(1);\n    }\n    void save(int n) {\n    }\n}\n";
+        let hits = occurrences(Lang::Java, java, "save");
+        let seen: Vec<(u32, &str, &str)> = hits.iter().map(|hit| (hit.line, hit.role, hit.within.as_str())).collect();
+        assert_eq!(seen, [(3, "use", "OrderService.place"), (5, "def", "OrderService")]);
+        let rust = "impl Worker {\n    fn run(&self) {\n        helper();\n    }\n}\nfn helper() {}\n";
+        let hits = occurrences(Lang::Rust, rust, "helper");
+        assert_eq!(hits.iter().map(|hit| hit.within.as_str()).collect::<Vec<_>>(), ["Worker.run", ""]);
+        // impl 안의 메서드를 정의한 줄은 그 자료형을 적는다.
+        assert_eq!(occurrences(Lang::Rust, rust, "run")[0].within, "Worker");
     }
 }

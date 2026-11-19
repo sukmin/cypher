@@ -91,7 +91,7 @@
 
 <nav class="toc">
   <b>Cypher 사용 설명서</b>
-  <small>0.17.3 기준</small>
+  <small>0.17.4 기준</small>
   <ol>
     <li><a href="#start">1. 시작하기</a></li>
     <li><a href="#screen">2. 화면 한눈에 보기</a></li>
@@ -384,8 +384,9 @@
   <tr><td>탭 정리하기</td><td>탭을 오른쪽 클릭하면 <b>탭 닫기</b>, <b>다른 탭 모두 닫기</b>, <b>왼쪽·오른쪽 탭 모두 닫기</b>, <b>바뀌지 않은 파일의 탭 닫기</b>(git 기준으로 고치지 않은 파일만 닫아, 바뀐 파일만 남깁니다. 프로젝트 밖의 파일은 닫지 않습니다), <b>모든 탭 닫기</b>를 고를 수 있습니다. 같은 메뉴에서 그 파일을 나무에서 찾거나 경로를 복사합니다. 탭 하나는 ×, 가운데 단추, <kbd>Ctrl+F4</kbd>로도 닫습니다.</td></tr>
   <tr><td>무엇이 바뀌었는지 보기</td><td>고친 파일은 파랑, 새 파일은 녹색으로 보이고, 줄 번호 옆의 색 줄이 더한 줄(녹색)·고친 줄(파랑)·지운 자리(빨강)입니다. <b>[바뀐 파일]</b>을 누르면 바뀐 파일만 모아 봅니다(Claude가 방금 쓴 파일이 앞에 옵니다).</td></tr>
   <tr><td>바뀐 곳만 모아 보기</td><td><b>[바뀐 파일]</b> 보기에서는 파일마다 그 안의 <b>바뀐 곳</b>이 한 줄씩 나옵니다: 줄 범위(<code>24–28</code>), 더한 줄(<code>+5</code>)·지운 줄(<code>−2</code>) 수, 그 자리의 첫 줄. 누르면 그 자리로 가고, 지운 줄이 있으면 바로 아래에 <b>이전 내용</b>이 뜹니다(복사하거나 Claude 세션에 넣을 수 있고, <kbd>Esc</kbd>로 닫습니다). <kbd>F7</kbd> / <kbd>Shift+F7</kbd>로 다음·이전 바뀐 곳으로 파일을 넘어가며 훑습니다(맨 위의 ↑ ↓ 단추도 같습니다). 코드에서 줄 번호 옆의 색 표시를 눌러도 그곳의 이전 내용이 뜹니다. 지워진 파일을 누르면 지우기 전의 내용을 보여 줍니다. 커밋과 되돌리기는 사이드바 아래의 [변경 내용]에서 합니다.</td></tr>
-  <tr><td>정의로 가기</td><td>이름을 <kbd>Ctrl</kbd>을 누른 채 누르거나, 이름을 누른 뒤 <kbd>F12</kbd>. 같은 이름의 정의가 여럿이면 고르는 창이 뜹니다. <kbd>Alt+←</kbd>로 돌아옵니다.</td></tr>
-  <tr><td>쓰는 곳 찾기</td><td>이름을 누른 뒤 <kbd>Alt+F7</kbd>(또는 오른쪽 클릭 → 쓰는 곳 찾기). 아래 창에 정의·쓰는 곳·주석과 문자열 안으로 나눠 보여 주고, 누르면 그 자리로 갑니다.</td></tr>
+  <tr><td>정의로 가기</td><td>이름을 <kbd>Ctrl</kbd>을 누른 채 누르거나, 이름을 누른 뒤 <kbd>F12</kbd>. <kbd>Alt+←</kbd>(또는 마우스의 뒤로 단추)로 돌아옵니다. 이름만 보지 않고 받는 쪽의 자료형을 따라갑니다: <code>orderMapper.insert(…)</code>면 <code>orderMapper</code>를 선언한 곳(지역 변수·인자·필드)에서 자료형을 읽어 그 자료형의 <code>insert</code>로 갑니다. <code>getName()</code>처럼 Lombok·record가 만들어 정의가 없는 접근자는 그 필드로 갑니다. 라이브러리(<code>java.util</code>, <code>std</code> 등)의 것이면 "이 폴더 밖의 것"이라고 아래 상태 줄에 알립니다(라이브러리의 코드는 열지 못합니다). 자료형을 알 수 없을 때만 이름이 같은 정의를 고르는 창이 뜹니다.</td></tr>
+  <tr><td>구현으로 가기</td><td>이름을 누른 뒤 <kbd>Ctrl+Alt+B</kbd>(또는 오른쪽 클릭 → 구현으로 가기). 인터페이스·트레이트를 구현한 것, 클래스를 물려받은 것, 그 메서드의 구현으로 갑니다. 인터페이스의 메서드 선언 위에서 정의로 가기를 해도 구현으로 갑니다. MyBatis 매퍼는 인터페이스의 메서드와 XML의 구문(<code>&lt;select id="…"&gt;</code>)을 정의로 가기로 서로 오갑니다.</td></tr>
+  <tr><td>쓰는 곳 찾기</td><td>이름을 누른 뒤 <kbd>Alt+F7</kbd>(또는 오른쪽 클릭 → 쓰는 곳 찾기). 아래 창에 정의·쓰는 곳·주석과 문자열 안으로 나눠 보여 주고, 누르면 그 자리로 갑니다. 줄마다 오른쪽에 어느 클래스·메서드 안에서 쓰는지 보입니다(누가 부르는지 볼 때). 쓰는 곳은 이름으로 찾으므로, 이름이 같은 다른 자료형의 것도 함께 나옵니다.</td></tr>
   <tr><td>함수·클래스 찾기</td><td><kbd>Ctrl+T</kbd>로 이름을 칩니다(머리글자만 쳐도 됩니다: <code>gU</code> → <code>getUser</code>). 이 파일의 구조는 왼쪽 아래나 <kbd>Ctrl+F12</kbd>.</td></tr>
   <tr><td>글 찾기</td><td><kbd>Ctrl+F</kbd>는 이 파일에서, <kbd>Ctrl+Shift+F</kbd>는 프로젝트 전체에서 찾습니다.</td></tr>
   <tr><td>글꼴 바꾸기</td><td>위쪽의 글꼴 칸에 글꼴 이름을 적거나 목록에서 고르고, 옆의 −/+로 글자 크기를 바꿉니다(<kbd>Ctrl+휠</kbd>도 됩니다). 코드에만 적용되고, 앱의 다른 글꼴은 그대로입니다.</td></tr>
@@ -489,7 +490,7 @@
   <tr><td><kbd>Ctrl+Shift+R</kbd></td><td>가장 나중에 닫은 항목 다시 열기</td></tr>
   <tr><td><kbd>Ctrl+Shift+O</kbd> / <kbd>H</kbd> / <kbd>M</kbd></td><td>새 사이트 / HTTP / 메모</td></tr>
   <tr><td><kbd>Ctrl+V</kbd></td><td>붙여넣기(그림 포함)</td></tr>
-  <tr><td>코드: <kbd>Ctrl+클릭</kbd>·<kbd>F12</kbd> / <kbd>Alt+F7</kbd> / <kbd>Alt+←</kbd></td><td>정의로 가기 / 쓰는 곳 찾기 / 뒤로</td></tr>
+  <tr><td>코드: <kbd>Ctrl+클릭</kbd>·<kbd>F12</kbd> / <kbd>Ctrl+Alt+B</kbd> / <kbd>Alt+F7</kbd> / <kbd>Alt+←</kbd></td><td>정의로 가기 / 구현으로 가기 / 쓰는 곳 찾기 / 뒤로</td></tr>
   <tr><td>코드: <kbd>Ctrl+P</kbd> / <kbd>Ctrl+T</kbd> / <kbd>Ctrl+Shift+F</kbd></td><td>파일 찾기 / 기호 찾기 / 전체에서 찾기</td></tr>
 </table>
 <figure class="narrow">

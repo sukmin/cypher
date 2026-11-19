@@ -72,7 +72,19 @@ pub async fn code_list(dir: String) -> Result<Vec<Entry>, String> {
                 let kind = entry.file_type().ok()?;
                 // 바로가기(심볼릭 링크)는 가리키는 것이 폴더인지 본다.
                 let is_dir = if kind.is_symlink() { entry.path().is_dir() } else { kind.is_dir() };
-                Some(Entry { dim: is_dir && is_plumbing(&name) || name == ".git", name, dir: is_dir })
+                let dim = is_dir && is_plumbing(&name) || name == ".git";
+                // 폴더 하나만 품은 폴더는 그 안의 폴더까지 한 줄로 잇는다(`main/java/com/example`): Java의 패키지 길을 한 칸씩 펼치지 않게.
+                let mut name = name;
+                if is_dir && !dim && !kind.is_symlink() {
+                    let mut path = entry.path();
+                    for _ in 0..16 {
+                        let Some(only) = only_dir(&path) else { break };
+                        path.push(&only);
+                        name.push('/');
+                        name.push_str(&only);
+                    }
+                }
+                Some(Entry { dim, name, dir: is_dir })
             })
             .take(MAX_ENTRIES)
             .collect();
@@ -81,6 +93,17 @@ pub async fn code_list(dir: String) -> Result<Vec<Entry>, String> {
     })
     .await
     .map_err(err)?
+}
+
+/// 그 폴더에 든 것이 폴더 하나뿐이면 그 이름(숨김·빌드 폴더와 바로가기는 치지 않는다).
+fn only_dir(dir: &Path) -> Option<String> {
+    let mut entries = std::fs::read_dir(dir).ok()?;
+    let first = entries.next()?.ok()?;
+    if entries.next().is_some() {
+        return None;
+    }
+    let name = first.file_name().to_string_lossy().into_owned();
+    (first.file_type().ok()?.is_dir() && !is_plumbing(&name)).then_some(name)
 }
 
 /// git이 아는 파일(추적하는 것과, 무시하지 않는 새 파일)을 프로젝트 폴더 기준 경로로. git 저장소가 아니면 None.
@@ -215,6 +238,17 @@ pub struct Found {
     def: Def,
     /// 그 줄의 글.
     text: String,
+    /// 서명: 정의한 줄부터 몸통 앞까지를 한 줄로 이은 것(반환형·인자·상위 자료형을 읽는 데 쓴다). 기호 찾기에서는 비워 둔다.
+    sig: String,
+    /// 자료형이면 그 상위 자료형들(물려받는 클래스, 구현하는 인터페이스).
+    supers: Vec<String>,
+}
+
+/// 찾은 정의에 그 줄의 글과 서명을 붙인다.
+fn found_of(file: &str, lang: Lang, text: &str, signer: &code::Signer, def: Def) -> Found {
+    let sig = signer.of(&def);
+    let supers = if matches!(def.kind, "class" | "interface" | "enum" | "struct" | "trait") { code::supertypes(lang, &sig, &def.name) } else { Vec::new() };
+    Found { file: file.to_string(), text: line_of(text, def.line), sig, supers, def }
 }
 
 fn line_of(text: &str, line: u32) -> String {
@@ -242,9 +276,10 @@ pub async fn code_outline(path: String) -> Result<Vec<Def>, String> {
     .map_err(err)?
 }
 
-/// 그 이름의 정의를 프로젝트 전체에서 찾는다(정의로 가기).
+/// 그 이름의 정의를 프로젝트 전체에서 찾는다(정의로 가기). `within`을 주면 감싼 이름(클래스, impl의 자료형)이 그 가운데 하나인 것만 내놓는다:
+/// 받는 쪽의 자료형을 아는 호출(`orderMapper.insert(…)`)에서 흔한 이름의 정의 수백 개에 묻히지 않게 한다.
 #[tauri::command]
-pub async fn code_defs(root: String, name: String) -> Result<Vec<Found>, String> {
+pub async fn code_defs(root: String, name: String, within: Option<Vec<String>>, fresh: Option<bool>) -> Result<Vec<Found>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let root = root_of(&root)?;
         if name.trim().is_empty() {
@@ -254,11 +289,15 @@ pub async fn code_defs(root: String, name: String) -> Result<Vec<Found>, String>
             if !text.contains(name.as_str()) {
                 return Vec::new();
             }
-            code::definitions(lang, text)
+            let defs: Vec<Def> = code::definitions(lang, text)
                 .into_iter()
-                .filter(|def| def.name == name)
-                .map(|def| Found { file: file.to_string(), text: line_of(text, def.line), def })
-                .collect()
+                .filter(|def| def.name == name && within.as_ref().is_none_or(|owners| owners.contains(&def.container)))
+                .collect();
+            if defs.is_empty() {
+                return Vec::new();
+            }
+            let signer = code::Signer::new(lang, text);
+            defs.into_iter().map(|def| found_of(file, lang, text, &signer, def)).collect()
         };
         // 색인이 있으면 그 이름의 정의가 든 파일만 읽는다(그 파일들은 지금 내용으로 다시 읽으니 줄 번호는 늘 맞다).
         let hash = word_hash(name.as_bytes());
@@ -267,7 +306,9 @@ pub async fn code_defs(root: String, name: String) -> Result<Vec<Found>, String>
             Some(files) => {
                 let mut found = scan_files(&root, &files, MAX_SYMBOLS * 4, visit);
                 // 색인에서 못 찾았는데 색인이 좀 묵었으면(방금 만든 파일의 정의일 수 있다) 색인을 새로 맞추고 한 번 더 찾는다.
-                if found.is_empty() && index_is_older(&root, Duration::from_secs(3)) {
+                // (`fresh`가 거짓이거나 감싼 이름으로 거른 물음이면 하지 않는다: 정의로 가기는 원래 없는 것 — 라이브러리의 자료형,
+                // 그 자료형에 없는 멤버 — 도 여러 번 묻는데, 그때마다 프로젝트를 다시 훑으면 안 된다.)
+                if found.is_empty() && fresh.unwrap_or(true) && within.is_none() && index_is_older(&root, Duration::from_secs(3)) {
                     refresh_index(&root, None);
                     // (맞추다 디스크에 쓰지 못해 색인이 내려갔으면 파일을 모두 읽어 찾는다.)
                     found = match indexed(&root, holders) {
@@ -277,6 +318,36 @@ pub async fn code_defs(root: String, name: String) -> Result<Vec<Found>, String>
                 }
                 found
             }
+            None => scan(&root, MAX_SYMBOLS * 4, visit),
+        };
+        found.truncate(MAX_SYMBOLS);
+        Ok(found)
+    })
+    .await
+    .map_err(err)?
+}
+
+/// 그 자료형을 물려받거나 구현하는 것들을 프로젝트 전체에서 찾는다(구현으로 가기): 클래스·인터페이스·트레이트의 정의와, Rust의
+/// `impl 트레이트 for 자료형`(종류가 "impl", 이름이 구현하는 자료형).
+#[tauri::command]
+pub async fn code_subtypes(root: String, name: String) -> Result<Vec<Found>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = root_of(&root)?;
+        if name.trim().is_empty() {
+            return Ok(Vec::new());
+        }
+        let visit = |file: &str, lang: Lang, text: &str| -> Vec<Found> {
+            code::subtypes(lang, text, &name)
+                .into_iter()
+                .map(|(def, sig)| Found { file: file.to_string(), text: line_of(text, def.line), supers: code::supertypes(lang, &sig, &def.name), sig, def })
+                .collect()
+        };
+        // 색인이 있으면 그 이름이 든 파일만 읽는다.
+        let holders = simple_name(&name)
+            .then(|| word_hash(name.as_bytes()))
+            .and_then(|hash| indexed(&root, |index| word_holders(index, hash)).flatten());
+        let mut found = match holders {
+            Some(files) => scan_files(&root, &files, MAX_SYMBOLS * 4, visit),
             None => scan(&root, MAX_SYMBOLS * 4, visit),
         };
         found.truncate(MAX_SYMBOLS);
@@ -383,13 +454,13 @@ pub async fn code_symbols(root: String, query: String) -> Result<Vec<Found>, Str
                 });
                 let text = text.as_deref().unwrap_or_default();
                 match fresh {
-                    None => found.push(Found { text: line_of(text, def.line), file, def }),
+                    None => found.push(Found { text: line_of(text, def.line), sig: String::new(), supers: Vec::new(), file, def }),
                     Some(defs) if first => {
                         let names = &wanted[&file];
                         found.extend(
                             defs.iter()
                                 .filter(|def| !matches!(def.kind, "heading" | "section") && names.contains(&def.name))
-                                .map(|def| Found { file: file.clone(), text: line_of(text, def.line), def: def.clone() }),
+                                .map(|def| Found { file: file.clone(), text: line_of(text, def.line), sig: String::new(), supers: Vec::new(), def: def.clone() }),
                         );
                     }
                     Some(_) => {}
@@ -403,7 +474,7 @@ pub async fn code_symbols(root: String, query: String) -> Result<Vec<Found>, Str
                 .into_iter()
                 // 제목·구역·선택자는 기호로 치지 않는다(문서와 스타일의 것이 코드의 기호를 묻어 버린다).
                 .filter(|def| !matches!(def.kind, "heading" | "section"))
-                .filter_map(|def| Some((code::rank(&query, &def.name)?, Found { file: file.to_string(), text: line_of(text, def.line), def })))
+                .filter_map(|def| Some((code::rank(&query, &def.name)?, Found { file: file.to_string(), text: line_of(text, def.line), sig: String::new(), supers: Vec::new(), def })))
                 .collect()
         });
         ranked.sort_by(|a, b| a.0.cmp(&b.0).then_with(|| a.1.def.name.len().cmp(&b.1.def.name.len())).then_with(|| a.1.file.cmp(&b.1.file)));
@@ -435,7 +506,7 @@ const TABLE_SAVE_EVERY: Duration = Duration::from_secs(30);
 const COMPACT_OVER: u64 = 16 << 20;
 /// 쓰지 않은 지 이만큼 된 색인 폴더는 지운다(열어 보지 않는 프로젝트의 색인이 쌓이지 않게).
 const INDEX_KEEP: Duration = Duration::from_secs(30 * 24 * 3600);
-const TABLE_MAGIC: &[u8; 8] = b"CYIDX\0\x02\0";
+const TABLE_MAGIC: &[u8; 8] = b"CYIDX\0\x03\0";
 /// 정의 하나의 기록 크기(blocks.bin).
 const ITEM_BYTES: usize = 24;
 
@@ -1420,7 +1491,7 @@ mod tests {
         let store = index_dir(&dir).unwrap();
         let _ = std::fs::remove_dir_all(&store);
         let run = |name: &str| -> Vec<String> {
-            let mut found: Vec<String> = tauri::async_runtime::block_on(code_defs(root.clone(), name.into())).unwrap().into_iter().map(|f| format!("{}:{}:{}", f.file, f.def.line, f.text)).collect();
+            let mut found: Vec<String> = tauri::async_runtime::block_on(code_defs(root.clone(), name.into(), None, None)).unwrap().into_iter().map(|f| format!("{}:{}:{}", f.file, f.def.line, f.text)).collect();
             found.sort();
             found
         };
@@ -1642,5 +1713,49 @@ mod tests {
         }
         assert!(root_of("상대 경로").is_err());
         assert!(root_of(r"C:\이런 폴더는 없다 cypher").is_err());
+    }
+
+    #[test]
+    fn 자료형을_따라_정의를_고른다() {
+        let dir = project("cypher-code-nav-test");
+        let java = dir.join("app").join("src").join("main").join("java").join("shop");
+        std::fs::create_dir_all(java.join("impl")).unwrap();
+        std::fs::write(java.join("OrderService.java"), "package shop;\npublic interface OrderService extends BaseService<Order> {\n    Order find(Long id);\n}\n").unwrap();
+        std::fs::write(java.join("CartService.java"), "package shop;\npublic interface CartService {\n    Cart find(Long id);\n}\n").unwrap();
+        std::fs::write(
+            java.join("impl").join("OrderServiceImpl.java"),
+            "package shop.impl;\npublic class OrderServiceImpl implements OrderService {\n    @Override\n    public Order find(Long id) {\n        return null;\n    }\n}\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("src").join("shape.rs"), "pub trait Shape {\n    fn area(&self) -> f64;\n}\npub struct Circle;\nimpl Shape for Circle {\n    fn area(&self) -> f64 { 1.0 }\n}\n").unwrap();
+        let root = dir.to_string_lossy().into_owned();
+        let defs = |name: &str, within: Option<&[&str]>| -> Vec<Found> {
+            let within = within.map(|owners| owners.iter().map(|owner| owner.to_string()).collect());
+            let mut found = tauri::async_runtime::block_on(code_defs(root.clone(), name.into(), within, Some(false))).unwrap();
+            found.sort_by(|a, b| a.file.cmp(&b.file));
+            found
+        };
+        let shown = |found: &[Found]| -> Vec<String> { found.iter().map(|f| format!("{}.{}@{}", f.def.container, f.def.name, f.file.rsplit('/').next().unwrap())).collect() };
+        // 감싼 이름으로 거른다: 받는 쪽의 자료형을 알면 그 자료형의 것만 본다.
+        assert_eq!(shown(&defs("find", None)).len(), 3);
+        assert_eq!(shown(&defs("find", Some(&["OrderService"]))), ["OrderService.find@OrderService.java"]);
+        assert!(defs("find", Some(&["Nothing"])).is_empty());
+        // 서명과 상위 자료형
+        let service = &defs("OrderService", None)[0];
+        assert_eq!((service.sig.as_str(), service.supers.as_slice()), ("public interface OrderService extends BaseService<Order>", ["BaseService".to_string()].as_slice()));
+        assert_eq!(defs("find", Some(&["OrderServiceImpl"]))[0].sig, "public Order find(Long id)");
+        assert_eq!(defs("area", Some(&["Circle"]))[0].sig, "fn area(&self) -> f64");
+        // 구현 찾기: 인터페이스를 구현한 클래스, 트레이트를 구현한 자료형
+        let subtypes = |name: &str| -> Vec<String> {
+            tauri::async_runtime::block_on(code_subtypes(root.clone(), name.into())).unwrap().iter().map(|f| format!("{}:{}@{}:{}", f.def.kind, f.def.name, f.file.rsplit('/').next().unwrap(), f.def.line)).collect()
+        };
+        assert_eq!(subtypes("OrderService"), ["class:OrderServiceImpl@OrderServiceImpl.java:2"]);
+        assert_eq!(subtypes("Shape"), ["impl:Circle@shape.rs:5"]);
+        assert!(subtypes("CartService").is_empty());
+        // 나무: 폴더 하나만 품은 폴더는 한 줄로 잇는다(빌드·숨김 폴더는 잇지 않는다).
+        let names: Vec<String> = tauri::async_runtime::block_on(code_list(root.clone())).unwrap().into_iter().map(|entry| entry.name).collect();
+        assert!(names.contains(&"app/src/main/java/shop".to_string()), "{names:?}");
+        assert!(names.contains(&"node_modules".to_string()) && names.contains(&"src".to_string()), "{names:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

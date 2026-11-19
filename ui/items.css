@@ -1003,6 +1003,7 @@ li.tone-fail .dot.kind, li.tone-fail .sub { color: var(--dead); }
 .code-hit:hover, .code-hit:focus { background: var(--hover); }
 .code-hit-line { flex: none; width: 44px; text-align: right; color: var(--idle); }
 .code-hit-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.code-hit-in { flex: none; max-width: 45%; margin-left: auto; overflow: hidden; text-overflow: ellipsis; color: var(--idle); font: 11px var(--ui-font); }
 .code-hit-text b { color: var(--text); background: var(--hit); font-weight: normal; }
 .code-hit.def .code-hit-text b { background: var(--hit-cur); }
 .code-hit.comment, .code-hit.string { opacity: 0.7; }

@@ -2,17 +2,18 @@
 //
 // Claude 세션이 작업한 내용을 편집기를 따로 띄우지 않고 그 자리에서 살펴보려는 것이다:
 // - 문법 강조(code-lex.js), 줄 번호, 바뀐 줄 표시(git 기준: 더한 줄·고친 줄·지운 자리)
-// - 정의로 가기(Ctrl+클릭, F12), 쓰는 곳 찾기(Alt+F7), 뒤로·앞으로(Alt+←/→)
+// - 정의로 가기(Ctrl+클릭, F12), 구현으로 가기(Ctrl+Alt+B), 쓰는 곳 찾기(Alt+F7), 뒤로·앞으로(Alt+←/→, 마우스의 뒤로·앞으로 단추)
 // - 파일 찾기(Ctrl+P), 기호 찾기(Ctrl+T), 이 파일의 구조(Ctrl+F12), 줄로 가기(Ctrl+G)
 // - 이 파일에서 찾기(Ctrl+F), 프로젝트 전체에서 찾기(Ctrl+Shift+F)
 // - 파일이 바뀌면 스스로 다시 읽는다(보던 자리는 지킨다).
 // - 위쪽의 글꼴 칸에서 코드의 글꼴과 글자 크기를 앱의 글꼴과 따로 정한다(Ctrl+휠, Ctrl+더하기/빼기/0).
 //
-// 정의와 쓰는 곳은 언어 서버 없이 글자의 모양으로 찾는다(앱의 code.rs). 그래서 이름이 같은 정의가 여럿이면
-// 가까운 것(같은 파일, 같은 폴더, `자료형.이름`의 자료형이 감싼 것)을 앞에 세워 고르게 한다.
+// 정의와 쓰는 곳은 언어 서버 없이 글자의 모양으로 찾는다(앱의 code.rs). 정의로 가기는 받는 쪽의 자료형을 선언·필드·반환형에서
+// 따라가 그 자료형의 것을 고른다(code-nav.js). 자료형을 알 수 없을 때만 이름이 같은 정의를 가까운 순서로 늘어놓아 고르게 한다.
 // 파일 내용은 신뢰할 수 없는 입력이다: 글자는 모두 textContent로만 넣는다.
 
 import { tokenize, langOf, fileBadge, LANG_NAMES, wordPattern } from './code-lex.js';
+import { createNav } from './code-nav.js';
 
 let api = null; // { invoke, make, setStatus, showMenu, baseName, toClaude(item, text, ev) }
 
@@ -536,7 +537,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     } else {
       const walk = (dir, depth) => {
         for (const entry of listed.get(lower(dir)) || []) {
-          const path = `${dir}\\${entry.name}`;
+          const path = norm(`${dir}\\${entry.name}`); // 이어 붙인 폴더(`java/com/shop`)의 구분자도 맞춘다
           rows.push(treeRow(path, entry.name, depth, { dir: entry.dir, dim: entry.dim }));
           if (entry.dir && expanded.has(lower(path))) walk(path, depth + 1);
         }
@@ -886,6 +887,24 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     for (let i = 0; i < chunk.children.length; i++) fillLine(chunk.children[i], tab.lines[first + i], tab.tokens[first + i]);
   }
 
+  /**
+   * 함수·메서드를 선언한 이름을 "선언"의 색으로 칠한다. 글자만 보는 강조기는 `fn 이름`·`def 이름`처럼 앞에 낱말이 붙는 언어에서만
+   * 선언을 알아보므로(Java·C·TypeScript의 메서드 선언은 부르는 곳과 같은 색이 된다), 구조에서 읽은 자리로 다시 칠한다.
+   */
+  function markDefs(tab) {
+    if (!tab.tokens) return;
+    let redrawn = false;
+    for (const def of tab.outline || []) {
+      if (!['function', 'method', 'constructor'].includes(def.kind)) continue;
+      const token = tab.tokens[def.line - 1]?.find((each) => each[0] === def.col);
+      if (!token || token[2] !== 'call') continue;
+      token[2] = 'def';
+      const el = tab === current ? lineEl(def.line) : null;
+      if (el?.parentElement?.dataset.dressed) { fillLine(el, tab.lines[def.line - 1], tab.tokens[def.line - 1]); redrawn = true; }
+    }
+    if (redrawn) repaint(); // 다시 그린 줄에 걸려 있던 표시(찾은 곳, 같은 이름)를 다시 건다
+  }
+
   function renderCode(tab) {
     dresser.disconnect();
     const chunks = [];
@@ -1014,7 +1033,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     onChange();
     if (findOpen) runFind(true);
     // 구조와 바뀐 줄은 뒤이어 읽는다(읽지 못한 파일은 구조도 묻지 않는다).
-    if (tab.lines) invoke('code_outline', { path: tab.path }).then((outline) => { tab.outline = outline; if (current === tab) { renderOutline(); renderCrumbs(); } }).catch(() => {});
+    if (tab.lines) invoke('code_outline', { path: tab.path }).then((outline) => { tab.outline = outline; markDefs(tab); if (current === tab) { renderOutline(); renderCrumbs(); } }).catch(() => {});
     loadMarks(tab).then(() => applyMarks(tab));
     renderOutline();
     // 다른 탭을 보는 동안 밖에서 고쳐졌을 수 있다. 다음 살핌을 기다리지 않고 바로 견준다.
@@ -1382,15 +1401,24 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     const esc = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
     const word = `(?<![\\w$])${esc}(?![\\w$])`;
     const patterns = [
-      new RegExp(`\\b(?:const|let|var|val|mut|auto|final)\\s+(?:mut\\s+)?${word}`),          // const x, let mut x, val x
+      new RegExp(`(?<!&\\s{0,3})\\b(?:const|let|var|val|mut|auto|final)\\s+(?:mut\\s+)?${word}`), // const x, let mut x, val x (`&mut Type`은 선언이 아니다)
       new RegExp(`\\b(?:const|let|var|val)\\s*[\\[{(][^=]*${word}[^=]*[\\]})]\\s*=`),          // const { x } =, let (a, x) =
       new RegExp(`\\b(?:for|foreach)\\s*\\(?\\s*(?:(?:const|let|var|final|auto)\\s+)?(?:[\\w<>\\[\\]]+\\s+)?${word}\\s*(?:in\\b|of\\b|:|=)`), // for x in / for (const x of
       new RegExp(`\\b(?:fn|function|def|func|fun)\\b[^(]*\\([^)]*${word}\\s*[:,)=]`),           // 함수의 인자
       new RegExp(`\\((?:[^()]*[,(]\\s*)?(?:[\\w.<>\\[\\]?]+\\s+)?${word}\\s*(?:[:,=][^()]*)?\\)\\s*(?:=>|\\{|->|:)`), // (a, x) => / 메서드의 인자
       new RegExp(`${word}\\s*=>`),                                                            // x =>
+      // Java의 람다: x -> (앞에 낱말이 붙은 것 — `case RED ->` — 은 선언이 아니다)
+      ...(['java', 'kotlin', 'groovy'].includes(lang) ? [new RegExp(`(?<![\\w$.)\\]]\\s{0,8})${word}\\s*->`)] : []),
       // |x| (Rust의 클로저). 다른 언어의 `a || x || b`·`A | x | B`는 선언이 아니다.
-      ...(lang === 'rust' ? [new RegExp(`(?:^|[^|])\\|(?:[^|]*[\\s,(&])?${word}(?:\\s*:[^|]*)?(?:\\s*,[^|]*)?\\|(?!\\|)`)] : []),
+      ...(lang === 'rust' ? [
+        new RegExp(`(?:^|[^|])\\|(?:[^|]*[\\s,(&])?${word}(?:\\s*:[^|]*)?(?:\\s*,[^|]*)?\\|(?!\\|)`),
+        // 무늬에서 꺼낸 이름: `Printer::Standard(ref mut p) =>`, `Some(x) =>`, `Config { name, .. } =>`
+        // (부르는 식 `match Command::parse(input) {`, 인자로 넘긴 구조체 `f(Options { root })`는 무늬가 아니다: 무늬 뒤에는 =>·=·|·if가 온다.)
+        new RegExp(`\\b[A-Z][\\w:]*\\s*\\((?:[^()]*[\\s,(&])?${word}\\s*(?:@[^()]*)?(?:,[^()]*)?\\)+\\s*(?:=>|=(?!=)|\\||if\\b)`),
+        new RegExp(`\\b[A-Z][\\w:]*\\s*\\{(?:[^{}]*[\\s,:&])?${word}\\s*(?:,[^{}]*)?\\}\\s*\\)*\\s*(?:=>|=(?!=)|if\\b)`),
+      ] : []),
       new RegExp(`\\bcatch\\s*\\(\\s*(?:[\\w.<>|\\s]+\\s)?\\s*${word}\\s*\\)`),              // catch (e), catch (IOException e)
+      new RegExp(`\\b(?:try|using)\\s*\\((?:[^()=]*;\\s*)?(?:final\\s+)?(?:[\\w$.<>\\[\\], ?]+\\s+)?${word}\\s*=`), // try (Reader r = …), using (var x = …)
       new RegExp(`\\bexcept\\b[^:]*\\bas\\s+${word}`),                                        // except E as e
       new RegExp(`\\b(?:if|while)\\s+let\\b[^=]*${word}[^=]*=`),                              // if let Some(x) =
       new RegExp(`^\\s*(?:pub(?:\\([^)]*\\))?\\s+)?(?:import|use|from|export)\\b.*${word}`),     // 줄 머리의 import { x }, use a::x;
@@ -1406,7 +1434,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     const step = until >= from ? 1 : -1;
     for (let line = from; step > 0 ? line <= until : line >= until; line += step) {
       const text = current.lines[line - 1];
-      if (text == null || !text.includes(name)) continue;
+      if (text == null || text.length > 4000 || !text.includes(name)) continue;
       for (const pattern of patterns) {
         const m = pattern.exec(text);
         if (!m) continue;
@@ -1447,54 +1475,70 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     return defs.map((def) => ({ def, value: score(def) })).sort((a, b) => b.value - a.value || a.def.file.localeCompare(b.def.file) || a.def.line - b.def.line);
   }
 
+  // 받는 쪽의 자료형을 따라가 정의를 고르는 해석기(code-nav.js). 색인으로 찾는다(색인을 만드는 중이면 다 만들 때까지 기다린다).
+  const nav = createNav({
+    invoke, root: () => root, tab: () => current, full, relative, lower, dirOf, nameOf, langOf, enclosing, localDeclaration, rank: rankDefs,
+    files: () => (fileList ? Promise.resolve(fileList) : invoke('code_files', { root }).then((files) => { fileList = files; return files; }).catch(() => [])),
+    lines: (path) => invoke('reader_read', { path }).then((file) => file.text.split('\n')),
+  });
+  const defRow = (def) => ({
+    icon: KIND_ICONS[def.kind] || (def.kind === 'impl' ? 'I' : '·'),
+    title: def.kind === 'impl' ? `impl ${def.container} for ${def.name}` : `${def.container ? `${def.container}.` : ''}${def.name}`,
+    note: `${def.file}:${def.line}`, sub: def.text,
+  });
+  const openDef = (def) => openFile(full(def.file), { line: def.line, col: def.col, len: def.name.length });
+
+  /** 해석기의 답대로 움직인다: 바로 가거나, 고르게 하거나, 왜 못 가는지 알린다. */
+  function follow(result, found, title = '') {
+    const name = found.word;
+    if (['local', 'def', 'file', 'pick'].includes(result.kind)) setStatus(result.kind === 'def' ? result.note || '' : ''); // 앞서 남은 알림("밖의 것입니다" 등)을 지운다
+    if (result.kind === 'local') { remember(); return jump(result.at); }
+    if (result.kind === 'def') return openDef(result.def);
+    if (result.kind === 'file') return openFile(result.path);
+    if (result.kind === 'usages') return findUsages(found);
+    if (result.kind === 'pick') {
+      const { defs } = result;
+      return pick({
+        title: `${result.note || title || `"${name}"의 정의`} ${defs.length}개`,
+        placeholder: '걸러 보기',
+        source: (query) => defs.filter((def) => !query || matchRank(query, `${def.file} ${def.container} ${def.name}`) >= 0),
+        row: defRow,
+        choose: openDef,
+      });
+    }
+    if (result.kind === 'external') return setStatus(`"${name}": 이 폴더 밖의 것입니다(${result.what || '라이브러리'}). 라이브러리의 코드는 이 폴더에 없어 열 수 없습니다.`);
+    if (result.kind === 'missing') return setStatus(`"${name}": ${result.owner}에 정의가 없습니다(매크로·derive·Lombok이 만들었거나 라이브러리에서 물려받은 것일 수 있습니다). 이름이 같은 정의는 기호 찾기(Ctrl+T)로 볼 수 있습니다.`);
+    return setStatus(`"${name}"의 정의를 찾지 못했습니다. 쓰는 곳은 Alt+F7로 찾습니다.`);
+  }
+
   async function goToDefinition(found = caretWord()) {
     if (!found || !current?.lines) return setStatus('이름 위에서 누르거나(Ctrl+클릭), 이름을 누른 뒤 F12를 누르세요.');
-    const name = found.word;
     const tab = current;
-    const clicked = { line: found.line, col: found.from };
-    // 1. 이 함수 안의 지역 변수·인자: 감싼 함수의 첫 줄부터 지금 줄 사이에서 선언을 찾는다.
-    const around = enclosing(current, found.line).filter((def) => ['function', 'method', 'constructor'].includes(def.kind)).pop();
-    const owner = qualifier(found);
-    if (around && !owner) {
-      const local = localDeclaration(name, found.line, around.line, clicked);
-      if (local) { remember(); return jump(local); }
-    }
-    // 2. 프로젝트 전체의 정의(색인으로 찾는다. 색인을 만드는 중이면 다 만들 때까지 기다린다)
-    let defs = [];
     if (indexing && !indexInfo) setStatus('색인을 만드는 중입니다. 끝나면 정의로 갑니다…');
+    let result;
     try {
-      defs = await invoke('code_defs', { root, name });
+      result = await nav.resolve(found);
     } catch (err) {
-      return setStatus(`정의를 찾지 못했습니다: ${err}`);
+      return disposed || current !== tab ? undefined : setStatus(`정의를 찾지 못했습니다: ${err}`);
     }
     if (disposed || current !== tab) return undefined; // 기다리는 사이 다른 파일로 갔다
-    // 지금 누른 자리가 바로 그 정의면, 갈 곳이 없으니 쓰는 곳을 보여 준다.
-    const onItself = (def) => lower(full(def.file)) === lower(current.path) && def.line === found.line && def.col === found.from;
-    if (defs.some(onItself)) {
-      const others = defs.filter((def) => !onItself(def));
-      if (!others.length) return findUsages(found);
-      defs = others;
+    return follow(result, found);
+  }
+
+  /** 구현으로 가기: 인터페이스·트레이트(와 그 메서드)를 구현한 것, 클래스를 물려받은 것. */
+  async function goToImplementation(found = caretWord()) {
+    if (!found || !current?.lines) return setStatus('이름을 누른 뒤 Ctrl+Alt+B를 누르세요(오른쪽 클릭 → 구현으로 가기).');
+    const tab = current;
+    setStatus('구현을 찾는 중…');
+    let result;
+    try {
+      result = await nav.implementations(found);
+    } catch (err) {
+      return disposed || current !== tab ? undefined : setStatus(`구현을 찾지 못했습니다: ${err}`);
     }
-    if (!defs.length) {
-      // 3. 프로젝트에서 못 찾았으면 이 파일의 위쪽 어디서든 선언을 찾아본다.
-      // 위쪽에 없으면 아래쪽도 본다(함수 안에서 쓰는 곳보다 아래에 선언한 `const f = () => …`).
-      const local = localDeclaration(name, found.line, 1, clicked) || localDeclaration(name, found.line + 1, tab.lines.length, clicked);
-      if (local) { remember(); return jump(local); }
-      return setStatus(`"${name}"의 정의를 찾지 못했습니다. 쓰는 곳은 Alt+F7로 찾습니다.`);
-    }
-    const ranked = rankDefs(defs, found);
-    // 하나뿐이거나 맨 앞의 것이 뚜렷이 가까우면 바로 간다. 아니면 고르게 한다.
-    if (ranked.length === 1 || ranked[0].value >= ranked[1].value + 40) {
-      const { def } = ranked[0];
-      return openFile(full(def.file), { line: def.line, col: def.col, len: name.length });
-    }
-    return pick({
-      title: `"${name}"의 정의 ${ranked.length}개`,
-      placeholder: '걸러 보기',
-      source: (query) => ranked.map(({ def }) => def).filter((def) => !query || matchRank(query, `${def.file} ${def.container}`) >= 0),
-      row: (def) => ({ icon: KIND_ICONS[def.kind] || '·', title: `${def.container ? `${def.container}.` : ''}${def.name}`, note: `${def.file}:${def.line}`, sub: def.text }),
-      choose: (def) => openFile(full(def.file), { line: def.line, col: def.col, len: name.length }),
-    });
+    if (disposed || current !== tab) return undefined;
+    if (result.kind === 'none') return setStatus(`"${found.word}": 물려받거나 구현한 것을 찾지 못했습니다.`);
+    return follow(result, found, `"${found.word}"의 구현`);
   }
 
   async function findUsages(found = caretWord()) {
@@ -1570,6 +1614,8 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       // 글에서 찾은 자리만 굵게 보인다(UTF-16 칸으로 자른다).
       text.append(hit.text.slice(0, hit.at), make('b', '', hit.text.slice(hit.at, hit.at + hit.len)), hit.text.slice(hit.at + hit.len));
       row.append(make('span', 'code-hit-line', String(hit.line)), text);
+      // 어느 함수·클래스 안에서 쓰는지(누가 부르는지 한눈에 보인다)
+      if (hit.within) { const within = make('span', 'code-hit-in', hit.within); within.title = `${hit.within} 안`; row.append(within); }
       row.tabIndex = -1;
       row.onclick = () => openFile(full(hit.file), { line: hit.line, col: hit.col, len: hit.len });
       rows.push(row);
@@ -1957,6 +2003,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       ...(found ? [
         { caption: found.word },
         { label: '정의로 가기  (Ctrl+클릭, F12)', action: () => goToDefinition(found) },
+        { label: '구현으로 가기  (Ctrl+Alt+B)', action: () => goToImplementation(found) },
         { label: '쓰는 곳 찾기  (Alt+F7)', action: () => findUsages(found) },
         { label: '전체에서 이 글 찾기', action: () => openSearch(found.word) },
       ] : []),
@@ -1975,6 +2022,13 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     ev.preventDefault();
     setCodeFont({ size: codeFont.size + (ev.deltaY < 0 ? 1 : -1) });
   }, { passive: false });
+  // 마우스의 뒤로·앞으로 단추: 건너오기 전의 자리로(Alt+←/→와 같다).
+  rootEl.addEventListener('mouseup', (ev) => {
+    if (ev.button !== 3 && ev.button !== 4) return;
+    ev.preventDefault();
+    ev.stopPropagation();
+    travel(ev.button === 3 ? -1 : 1);
+  });
   let crumbTimer = 0;
   const renderCrumbsSoon = () => { clearTimeout(crumbTimer); crumbTimer = setTimeout(renderCrumbs, 150); };
 
@@ -1990,6 +2044,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     else if (key === 'escape' && panel) closePanel();
     else if (typing && !(ctrl && ['p', 't', 'g', 'f'].includes(key)) && key !== 'f12') handled = false;
     else if (key === 'f12' && ev.ctrlKey) pickOutline();
+    else if (ev.ctrlKey && ev.altKey && !ev.shiftKey && key === 'b') goToImplementation();
     else if ((key === 'f12' && plain) || (ctrl && key === 'b')) goToDefinition();
     else if ((key === 'f7' && ev.altKey) || (key === 'f12' && ev.shiftKey)) findUsages();
     else if (key === 'f7' && !ev.ctrlKey) stepChange(ev.shiftKey ? -1 : 1);
@@ -2039,7 +2094,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       if (shown) $scroll.scrollTop = top;
       caret = keepCaret;
       if (findOpen) runFind(true); else repaint();
-      invoke('code_outline', { path: tab.path }).then((outline) => { tab.outline = outline; if (current === tab) { renderOutline(); renderCrumbs(); } }).catch(() => {});
+      invoke('code_outline', { path: tab.path }).then((outline) => { tab.outline = outline; markDefs(tab); if (current === tab) { renderOutline(); renderCrumbs(); } }).catch(() => {});
       await loadMarks(tab);
       applyMarks(tab);
       refreshSoon(); // 바뀐 곳 목록과 이전 내용도 새 내용에 맞춘다
@@ -2131,13 +2186,14 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     fileChanged(path) {
       if (!lower(path).startsWith(rootPrefix())) return;
       touched.set(lower(path), Date.now());
+      nav.forget(); // 찾아 둔 정의의 줄 번호가 묵었을 수 있다
       touchIndex(path); // 그 파일의 정의와 낱말을 색인에 바로 다시 넣는다
       refreshSoon();
       if (current && lower(current.path) === lower(path)) check();
     },
     open: (path, at) => openFile(path, at),
     // 시험·확인용
-    goToDefinition, findUsages, pickFile, pickSymbol, openSearch, openFind, setRoot, setFont: setCodeFont, font: () => ({ ...codeFont }),
+    goToDefinition, goToImplementation, resolve: (found) => nav.resolve(found), implementations: (found) => nav.implementations(found), findUsages, pickFile, pickSymbol, openSearch, openFind, setRoot, setFont: setCodeFont, font: () => ({ ...codeFont }),
     current: () => current,
     wordAt, setCaret: (line, col) => { caret = { line, col }; },
     goChange, stepChange, hunksOf, refreshGit,

@@ -405,6 +405,7 @@ fn main() {
             code::code_index,
             code::code_index_touch,
             code::code_index_rebuild,
+            code::code_subtypes,
             code::code_index_state,
             code::code_index_close,
             memory::memory_info,
