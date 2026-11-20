@@ -31,10 +31,14 @@ struct ExitPayload {
     code: Option<u32>,
 }
 
-/// SSH 세션의 셸이 열렸다(`session-ready`).
+/// SSH 세션의 셸이 열렸다(`session-ready`). 화면은 창 위쪽의 탭에 사용자 이름을 보이고, 복제가 같은 연결을 쓰는지 안다.
 #[derive(Clone, Serialize)]
 struct ReadyPayload {
     id: u32,
+    /// 로그인한 사용자 이름. ssh.exe가 묻는 사용자 이름은 앱이 모른다(그때는 None).
+    user: Option<String>,
+    /// 내장 SSH로 접속했는지(참이면 연결 복제가 다시 인증하지 않는다).
+    builtin: bool,
 }
 
 /// 출력 기록을 적지 못해 멈췄다(`session-log-failed`).
@@ -275,9 +279,9 @@ pub fn session_create(
                     tee.feed(bytes);
                     let _ = on_output.send(InvokeResponseBody::Raw(bytes.to_vec()));
                 },
-                move || {
-                    // 로그인을 마치고 셸이 열렸다: 화면은 이제 이 세션을 동시 입력에 넣는다.
-                    let _ = ready_app.emit("session-ready", ReadyPayload { id });
+                move |user: &str| {
+                    // 로그인을 마치고 셸이 열렸다: 화면은 이제 이 세션을 동시 입력에 넣고, 탭에 사용자 이름을 보인다.
+                    let _ = ready_app.emit("session-ready", ReadyPayload { id, user: Some(user.to_string()), builtin: true });
                 },
                 move |code| {
                     // 표에서 먼저 빼야 그사이 기록을 새로 시작하지 못한다.
@@ -445,8 +449,10 @@ pub fn session_create(
     .map_err(|e| format!("{e:#}"))?;
     sessions.insert(id, Arc::new(Term::pty(session, log)));
     // ssh.exe로 띄운 SSH 세션은 로그인을 마쳤는지 알 수 없다: 예전처럼 바로 동시 입력에 넣는다.
+    // 사용자 이름은 ~/.ssh/config에 적혀 있을 때만 안다(아니면 ssh를 띄우기 전에 PowerShell이 묻는데, 그 답은 앱이 모른다).
     if is_ssh {
-        let _ = app.emit("session-ready", ReadyPayload { id });
+        let user = ssh.as_ref().zip(ssh_env.as_ref()).and_then(|(target, env)| crate::sshc::login_user(target, env));
+        let _ = app.emit("session-ready", ReadyPayload { id, user, builtin: false });
     }
     Ok(id)
 }

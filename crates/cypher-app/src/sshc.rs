@@ -205,15 +205,15 @@ type Output = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
 impl SshTerm {
     /// 세션을 시작한다. 접속은 뒤에서 이어지고, 그동안의 안내와 물음은 `on_output`으로 화면에 나간다.
-    /// `share`가 살아 있는 연결이면 그 연결에 채널만 연다(다시 인증하지 않는다). 로그인을 마치고 셸이 열리면 `on_ready`가,
-    /// 끝나면 `on_exit`가 한 번 불린다.
+    /// `share`가 살아 있는 연결이면 그 연결에 채널만 연다(다시 인증하지 않는다). 로그인을 마치고 셸이 열리면 `on_ready`가
+    /// 로그인한 사용자 이름을 받아, 끝나면 `on_exit`가 한 번 불린다.
     pub fn start(
         spec: SshTarget,
         env: SshEnv,
         share: Option<Arc<Conn>>,
         size: (u16, u16),
         on_output: impl Fn(&[u8]) + Send + Sync + 'static,
-        on_ready: impl FnOnce() + Send + 'static,
+        on_ready: impl FnOnce(&str) + Send + 'static,
         on_exit: impl FnOnce(Option<u32>) + Send + 'static,
     ) -> SshTerm {
         let (input, input_rx) = mpsc::unbounded_channel();
@@ -259,8 +259,9 @@ struct Io {
     killed: watch::Receiver<bool>,
     /// 화면의 크기(가로, 세로). 접속·인증하는 동안 바뀐 크기도 적어 두었다가 터미널을 요청할 때 쓴다.
     size: (u16, u16),
-    /// 셸이 열렸을 때 한 번 부른다(화면은 그때까지 로그인 중으로 보고 동시 입력에서 뺀다).
-    ready: Option<Box<dyn FnOnce() + Send>>,
+    /// 셸이 열렸을 때 로그인한 사용자 이름을 넘겨 한 번 부른다(화면은 그때까지 로그인 중으로 보고 동시 입력에서 빼고,
+    /// 셸이 열리면 창 위쪽의 탭에 사용자 이름을 보인다).
+    ready: Option<Box<dyn FnOnce(&str) + Send>>,
 }
 
 const GRAY: &str = "\x1b[90m";
@@ -1196,7 +1197,7 @@ async fn shell(io: &mut Io, conn: &Arc<Conn>, mut paused: watch::Receiver<bool>)
         return None;
     }
     if let Some(ready) = io.ready.take() {
-        ready();
+        ready(&conn.user);
     }
 
     // 입력은 따로 보낸다: 서버가 입력을 받지 않아 보내기가 기다리는 동안에도 출력은 계속 읽어야 서로 기다리지 않는다.
@@ -1401,7 +1402,8 @@ mod tests {
         term: SshTerm,
         seen: Arc<Mutex<String>>,
         exit: Arc<Mutex<Option<Option<u32>>>>,
-        ready: Arc<std::sync::atomic::AtomicBool>,
+        /// 셸이 열렸을 때 받은 사용자 이름(열리기 전에는 None).
+        ready: Arc<Mutex<Option<String>>>,
     }
 
     impl Probe {
@@ -1414,7 +1416,7 @@ mod tests {
             let seen = Arc::new(Mutex::new(String::new()));
             let exit = Arc::new(Mutex::new(None));
             let (out, done) = (seen.clone(), exit.clone());
-            let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let ready = Arc::new(Mutex::new(None));
             let opened = ready.clone();
             let spec = SshTarget { target: target.into(), port: Some(port) };
             let term = SshTerm::start(
@@ -1423,10 +1425,15 @@ mod tests {
                 share,
                 (80, 24),
                 move |bytes| out.lock().unwrap().push_str(&String::from_utf8_lossy(bytes)),
-                move || opened.store(true, Ordering::SeqCst),
+                move |user: &str| *opened.lock().unwrap() = Some(user.to_string()),
                 move |code| *done.lock().unwrap() = Some(code),
             );
             Probe { term, seen, exit, ready }
+        }
+
+        /// 셸이 열렸을 때 받은 사용자 이름.
+        fn user(&self) -> Option<String> {
+            self.ready.lock().unwrap().clone()
         }
 
         /// 화면에 그 글이 나올 때까지 기다린다.
@@ -1494,12 +1501,12 @@ mod tests {
             // 틀린 비밀번호는 다시 묻고, 친 글은 화면에 보이지 않는다.
             probe.term.write(b"wrong\r");
             probe.wait_for("비밀번호가 맞지 않습니다").await;
-            assert!(!probe.ready.load(Ordering::SeqCst), "로그인 전에는 셸이 열렸다고 알리지 않는다");
+            assert_eq!(probe.user(), None, "로그인 전에는 셸이 열렸다고 알리지 않는다");
             probe.term.write(b"sec");
             probe.term.write(b"ret\r");
             probe.wait_for("pty:xterm-256color:80x24").await;
             probe.wait_for("welcome").await;
-            assert!(probe.ready.load(Ordering::SeqCst));
+            assert_eq!(probe.user().as_deref(), Some("tester"), "셸이 열리면 로그인한 사용자 이름을 알린다");
             assert!(!probe.seen.lock().unwrap().contains("secret") && !probe.seen.lock().unwrap().contains("wrong"));
             // 입력과 크기 바꾸기
             probe.term.write(b"ls\r");
@@ -1558,6 +1565,7 @@ mod tests {
             probe.term.write(b"secret\r");
             probe.wait_for("welcome").await;
             assert_eq!(auths.load(Ordering::SeqCst), 1);
+            assert_eq!(probe.user().as_deref(), Some("tester"), "물어서 받은 사용자 이름을 알린다");
 
             // 같은 서버에 같은 사용자로 여는 새 세션은 사용자 이름만 받고 그 연결을 같이 쓴다(비밀번호를 묻지 않는다).
             let second = Probe::open("127.0.0.1", port, &env, None);
@@ -1566,6 +1574,7 @@ mod tests {
             second.wait_for("연결을 같이 씁니다").await;
             second.wait_for("welcome").await;
             assert!(!second.saw("의 비밀번호: "));
+            assert_eq!(second.user().as_deref(), Some("tester"));
             assert_eq!(auths.load(Ordering::SeqCst), 1);
 
             // 다른 사용자는 그 연결을 쓰지 않고 새로 접속한다. 비밀번호를 묻는 중에 Ctrl+C면 사용자 이름부터 다시 묻는다.
@@ -1588,6 +1597,7 @@ mod tests {
             assert!(other.exit.lock().unwrap().is_none(), "세션은 끝나지 않고 다시 묻는다");
             other.term.write(b"tester\r");
             other.wait_for("welcome").await;
+            assert_eq!(other.user().as_deref(), Some("tester"), "다시 물어 바꾼 사용자 이름을 알린다");
             assert_eq!(auths.load(Ordering::SeqCst), 1);
             assert!(!other.saw("secret") && !other.saw("wrong"));
 
@@ -1601,6 +1611,7 @@ mod tests {
             let clone = Probe::open("127.0.0.1", port, &env, probe.term.connection());
             clone.wait_for("welcome").await;
             assert!(!clone.saw("사용자 이름"));
+            assert_eq!(clone.user().as_deref(), Some("tester"), "복제한 세션도 그 연결의 사용자 이름을 알린다");
             for p in [&probe, &second, &other, &clone] {
                 p.term.kill();
                 p.wait_exit().await;

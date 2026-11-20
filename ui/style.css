@@ -236,12 +236,51 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
   overflow: hidden;
 }
 #terms.multi .pane-head { display: flex; }
-/* SSH 세션은 한 창만 볼 때도 제목 줄을 보인다(출력 기록·동시 입력 단추). 나눠 볼 때만 쓰는 단추는 숨긴다.
-   한 창만 볼 때는 바로 위의 위치 줄과 같은 제목을 되풀이하지 않고 단추만 오른쪽에 둔다. 나눠 볼 때는 다른 창과 같은 높이. */
-.pane.ssh .pane-head { display: flex; }
-#terms:not(.multi) .pane.ssh .pane-head { height: 32px; justify-content: flex-end; }
+/* SSH 세션은 한 창만 볼 때도 제목 줄을 보인다(왼쪽에 계정·서버 탭, 오른쪽에 출력 기록·동시 입력 단추). 나눠 볼 때만 쓰는 단추는 숨긴다.
+   한 창만 볼 때는 바로 위의 위치 줄에 있는 워크스페이스 이름을 되풀이하지 않는다. 나눠 볼 때는 다른 창과 같은 높이.
+   제목 줄 아래 선(활성·동시 입력 표시)은 테두리 대신 안쪽 그림자로 그린다: 탭이 그 선을 덮어 아래 터미널과 이어져 보이게. */
+.pane.ssh .pane-head { --head-line: transparent; display: flex; padding-left: 6px; border-bottom: 0; box-shadow: inset 0 -2px 0 var(--head-line); }
+.pane.ssh.active .pane-head { --head-line: var(--accent); }
+.pane.ssh.casting .pane-head { --head-line: var(--busy); }
+#terms:not(.multi) .pane.ssh .pane-head { height: 32px; }
 #terms:not(.multi) .pane.ssh .pane-info { display: none; }
 #terms:not(.multi) .pane-button.split-only { display: none; }
+.pane-head .pane-fill { flex: 1; min-width: 0; }
+/* SSH 창의 탭: [이름] 사용자@서버. 터미널과 같은 바탕으로 제목 줄 바닥에 붙인다. 오른쪽 클릭하면 세션 복제 메뉴.
+   글자색은 터미널 바탕 위에서 읽히는 색이다(테마가 --tab-text·--tab-user·--tab-dim으로 바꿀 수 있다: 화면 글자색과 터미널 바탕이 둘 다 어두운 Win32 등). */
+.ssh-tab {
+  flex: 0 1 auto;
+  align-self: flex-end;
+  min-width: 5em;
+  max-width: 65%;
+  height: 21px;
+  padding: 0 12px;
+  font-size: 12px;
+  line-height: 20px;
+  color: var(--tab-text, var(--text));
+  background: var(--term-bg);
+  border: 1px solid var(--line);
+  border-bottom: 0;
+  border-radius: 7px 7px 0 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  cursor: default;
+}
+#terms:not(.multi) .pane.ssh .ssh-tab { height: 27px; padding: 0 16px; font-size: 13px; line-height: 26px; }
+/* 활성 창(동시 입력이면 그 색)의 탭은 위쪽에 색 줄을 둔다. */
+.pane.ssh.active .ssh-tab { box-shadow: inset 0 2px 0 var(--accent); }
+.pane.ssh.casting .ssh-tab { box-shadow: inset 0 2px 0 var(--busy); }
+.ssh-tab:hover { border-color: var(--accent); }
+.ssh-tab-name { margin-right: 8px; font-weight: 700; }
+.ssh-tab-user { font-weight: 700; color: var(--tab-user, var(--accent)); }
+.ssh-tab-at { color: var(--tab-dim, var(--dim)); }
+.ssh-tab-state { margin-left: 8px; font-size: 11px; color: var(--tab-dim, var(--dim)); }
+/* 나란히 볼 때 활성이 아닌 창의 탭은 흐리게 */
+.pane.ssh:not(.active) .ssh-tab, .pane.ssh:not(.active) .ssh-tab-user { color: var(--tab-dim, var(--dim)); }
+@container pane (max-width: 400px) {
+  .ssh-tab, #terms:not(.multi) .pane.ssh .ssh-tab { min-width: 3em; padding: 0 8px; }
+}
 /* 창이 좁으면 단추 글을 줄인다(제목이 가려지지 않게): 넓을 때 .full, 좁으면 .short, 아주 좁으면 기호(.tiny)만 */
 .pane { container: pane / inline-size; }
 .pane-tool { flex: none; height: 20px; padding: 0 10px; font-size: 12px; font-weight: 600; line-height: 18px; color: var(--text); background: var(--control); border: 1px solid var(--accent); border-radius: 5px; }

@@ -686,7 +686,8 @@ async function startProcess(s, worktree = null) {
   // 같은 서버에 이미 접속해 있는 연결을 같이 쓸지는 앱이 정한다: 접속할 곳에는 주소와 포트만 있고 사용자 이름은 세션 화면에서
   // 물어야 알기 때문이다(같은 사용자일 때만 같이 쓴다). 여기서는 연결 복제(cloneOf)만 넘긴다.
   // SSH 세션은 셸이 열렸다는 알림(session-ready)이 올 때까지 로그인 중으로 본다(동시 입력에서 뺀다).
-  if (s.ssh) s.sshReady = false;
+  // 다시 접속하면 다른 사용자로 로그인할 수 있으니 탭의 사용자 이름도 셸이 열릴 때까지 비운다.
+  if (s.ssh) Object.assign(s, { sshReady: false, sshUser: '', sshBuiltin: false });
   try {
     s.id = await invoke('session_create', {
       profile: s.profile.id, cwd: s.startCwd, cols: size.cols, rows: size.rows,
@@ -694,7 +695,9 @@ async function startProcess(s, worktree = null) {
       command, ssh: s.ssh || null, cloneOf: s.cloneOf ?? null,
     });
     s.cloneOf = null; // 다시 시작할 때는 새로 접속한다.
-    if (earlyReady.delete(s.id)) s.sshReady = true; // 번호를 받기 전에 셸이 열렸다(나눠 쓰는 연결은 금방 열린다).
+    // 번호를 받기 전에 셸이 열렸다(나눠 쓰는 연결은 금방 열린다).
+    const early = earlyReady.get(s.id);
+    if (early) { earlyReady.delete(s.id); markReady(s, early); }
     // 띄우는 사이에 사용자가 이미 닫았으면, 방금 뜬 프로세스를 끝내고 손을 뗀다.
     if (!sessions.has(s.key)) { invoke('session_close', { id: s.id }); return; }
     // 띄우는 사이에 창 크기가 바뀌었으면(그때는 알릴 프로세스가 없었다) 지금 크기를 알린다.
@@ -1293,6 +1296,54 @@ function paintSshButtons(s, targets = castTargets()) {
   }
 }
 
+/** SSH 세션의 서버: 주소(기본이 아닌 포트를 정했으면 함께). */
+const sshServer = (s) => `${s.ssh.target}${s.ssh.port ? `:${s.ssh.port}` : ''}`;
+
+/**
+ * SSH 창 위쪽의 탭을 지금 상태에 맞춘다: [별칭이나 서버에 붙인 이름] 사용자@서버 (로그인 중·끝남).
+ * 사용자 이름은 셸이 열린 뒤에야 안다(접속할 때마다 세션 화면에서 묻고, 저장하지 않는다). 그전에는 서버만 보인다.
+ */
+function paintSshTab(s) {
+  const tab = s.sshTab;
+  if (!tab) return;
+  const server = sshServer(s);
+  const nick = [s.name, s.ssh.name].find((text) => text && text !== server) || '';
+  const state = s.exited ? '끝남' : s.dormant ? '쉬는 중' : loggingIn(s) ? '로그인 중' : '';
+  // 다시 그릴 때마다 조각을 새로 만들지 않는다(바뀐 것이 없으면 그대로 둔다).
+  const key = JSON.stringify([nick, s.sshUser, server, state, s.sshBuiltin]);
+  if (tab.dataset.key === key) return;
+  tab.dataset.key = key;
+  tab.replaceChildren(
+    ...(nick ? [make('span', 'ssh-tab-name', nick)] : []),
+    ...(s.sshUser ? [make('span', 'ssh-tab-user', s.sshUser), make('span', 'ssh-tab-at', '@')] : []),
+    make('span', 'ssh-tab-host', server),
+    ...(state ? [make('span', 'ssh-tab-state', state)] : []),
+  );
+  const account = s.sshUser
+    || (state === '로그인 중' ? '(로그인하면 보입니다)'
+      : s.sshReady && !s.sshBuiltin ? '(Windows의 ssh.exe가 물어 받은 사용자 이름은 보이지 않습니다)' : '(모름)');
+  tab.title = [
+    ...(nick ? [nick] : []),
+    `계정: ${account}`,
+    `서버: ${s.ssh.target}${s.ssh.port ? ` · 포트 ${s.ssh.port}` : ''}`,
+    ...(state ? [`상태: ${state}`] : []),
+    '오른쪽 클릭: 세션 복제',
+  ].join('\n');
+}
+
+/** SSH 창 위쪽 탭의 오른쪽 클릭 메뉴: 세션 복제(같은 서버에 세션을 하나 더 연다). */
+function sshTabMenu(s, ev) {
+  // 내장 SSH로 로그인을 마친 세션이면 그 연결에 채널만 더 연다. 아니면(끝남·쉬는 중·로그인 중·ssh.exe) 새로 접속한다.
+  const reuse = s.id != null && !s.exited && !s.dormant && s.sshReady === true && s.sshBuiltin;
+  const how = reuse ? '같은 연결을 써서 다시 인증하지 않습니다' : '새로 접속해 다시 인증합니다';
+  const full = visible.length >= MAX_PANES;
+  showMenu(ev, [
+    { caption: `${s.sshUser ? `${s.sshUser}@` : ''}${sshServer(s)} · ${how}` },
+    { label: full ? `세션 복제 — 옆에 나란히 (화면에 창이 ${MAX_PANES}개라 열 수 없음)` : '세션 복제 — 옆에 나란히', action: () => { activate(s); cloneSsh(s, 'split'); }, disabled: full },
+    { label: '세션 복제 — 이 창 자리에 (지금 세션은 사이드바에 남음)', action: () => { activate(s); cloneSsh(s, 'replace'); } },
+  ]);
+}
+
 /**
  * SSH 창의 [동시 입력] 단추. 켜져 있으면 끈다. 나란히 보이는 접속 중인 SSH 세션이 둘 이상이면 그대로 켠다.
  * 아니면 같은 워크스페이스에서 접속 중인 SSH 세션들을 지금 보이는 창들 옆에 나란히 띄운 뒤 켠다. 그런 세션이 없으면 방법을 알린다.
@@ -1351,19 +1402,30 @@ const commandHint = (command) => `\x1b[33mClaude 실행 명령으로 띄웠습�
  * 그 번호의 세션을 찾지 못한다. 잠깐 받아 두었다가 번호를 받은 쪽이 찾아 쓴다(명령 항목의 종료 알림도 여기를 지나간다).
  */
 const earlyExits = new Map();
-/** 번호를 받기 전에 온 "셸이 열렸다"(session-ready) 알림의 번호들. */
-const earlyReady = new Set();
+/** 번호를 받기 전에 온 "셸이 열렸다"(session-ready) 알림: 번호 → { user, builtin }. */
+const earlyReady = new Map();
 
 /** SSH 세션의 로그인이 끝나 셸이 열렸다: 동시 입력에 넣을 수 있다. */
-function onReady({ id }) {
+function onReady({ id, user, builtin }) {
   const s = byId(id);
   if (!s) {
-    earlyReady.add(id);
+    earlyReady.set(id, { user, builtin });
     setTimeout(() => earlyReady.delete(id), 10000);
     return;
   }
+  markReady(s, { user, builtin });
+}
+
+/**
+ * 셸이 열린 SSH 세션을 적어 둔다. 로그인한 사용자 이름은 창 위쪽의 탭에 보이기만 하고 저장하지 않는다
+ * (사용자 이름은 접속할 때마다 묻는다). ssh.exe가 물어 받은 사용자 이름은 앱이 모른다(`user`가 비어 온다).
+ */
+function markReady(s, { user, builtin }) {
   s.sshReady = true;
+  s.sshUser = user || '';
+  s.sshBuiltin = !!builtin; // 내장 SSH면 연결 복제가 다시 인증하지 않는다.
   markBroadcast();
+  paintSshTab(s);
 }
 
 function onExit({ id, code }) {
@@ -2613,6 +2675,13 @@ function render() {
       if (s.ssh) {
         // SSH 세션은 한 창만 볼 때도 제목 줄을 보이고, 거기에 출력 기록·동시 입력 단추를 눈에 띄게 둔다.
         s.pane.classList.add('ssh');
+        // 맨 왼쪽의 탭: 계정(로그인한 사용자)과 서버. 오른쪽 클릭하면 세션 복제 메뉴.
+        // 다시 그릴 때 바꾸지 않는다(글만 고친다): 누르는 사이에 탭이 바뀌면 그 오른쪽 클릭이 먹히지 않는다.
+        s.sshTab = make('span', 'ssh-tab');
+        s.sshTab.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); sshTabMenu(s, ev); };
+        s.head.prepend(s.sshTab);
+        // 탭과 단추 사이의 빈 곳(나눠 볼 때는 그 사이에 워크스페이스 이름이 온다)
+        s.head.insertBefore(make('span', 'pane-fill'), only);
         // 출력 기록: 누르면 기록할 파일을 고르고 시작한다. 기록 중에 누르면 멈춘다.
         s.logButton = make('button', 'pane-tool rec');
         s.logButton.onclick = (ev) => { ev.stopPropagation(); toggleLog(s); };
@@ -2627,13 +2696,17 @@ function render() {
       s.head.ondblclick = (ev) => { if (!ev.target.closest('button')) showOnly(s); };
     }
     paintSshButtons(s);
+    paintSshTab(s);
     s.headInfo.replaceChildren(
       // 나란히 볼 때는 창마다 그 세션의 워크스페이스를 적는다(서로 다른 워크스페이스의 세션을 나란히 두고 헷갈리지 않게).
       ...(isTerm(s) && s.group ? [make('span', 'pane-group', `◆ ${s.group}`)] : []),
       ...(s.mark ? [markBadge(s.mark)] : []),
-      make('span', 'title', label(s)),
-      ...(s.agents.size ? [agentPill(s.agents.size, agentSummary(s))] : []),
-      make('span', 'model', [s.model, s.effort].filter(Boolean).join(' · ')),
+      // SSH 세션은 이름을 탭에 적는다.
+      ...(s.sshTab ? [] : [
+        make('span', 'title', label(s)),
+        ...(s.agents.size ? [agentPill(s.agents.size, agentSummary(s))] : []),
+        make('span', 'model', [s.model, s.effort].filter(Boolean).join(' · ')),
+      ]),
     );
   }
   syncComposer();
