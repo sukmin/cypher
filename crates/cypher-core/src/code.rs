@@ -31,6 +31,10 @@ pub enum Lang {
 /// 파일 이름으로 언어를 정한다. 코드·글자 파일로 보지 않는 것(그림, 실행 파일, 묶음 …)은 None.
 pub fn lang_of(file_name: &str) -> Option<Lang> {
     let name = file_name.rsplit(['/', '\\']).next().unwrap_or(file_name).to_lowercase();
+    // 점으로 시작하는 이름(`.gitignore`)은 이름 전체가 확장자로 읽히므로, 이름으로 정하는 것을 먼저 본다.
+    if matches!(name.as_str(), ".gitignore" | ".gitattributes" | ".editorconfig" | ".dockerignore" | ".npmrc") {
+        return Some(Lang::Text);
+    }
     let ext = name.rsplit_once('.').map(|(_, ext)| ext).unwrap_or("");
     Some(match ext {
         "rs" => Lang::Rust,
@@ -49,7 +53,7 @@ pub fn lang_of(file_name: &str) -> Option<Lang> {
         "json" | "jsonc" | "json5" | "yaml" | "yml" | "svg" | "sql" | "sh" | "bash" | "zsh" | "ps1" | "psm1" | "bat" | "cmd" | "txt" | "lock"
         | "http" | "env" | "graphql" | "proto" | "tf" | "rb" | "php" | "swift" | "dart" | "lua" | "pl" | "r" | "scala" | "ex" | "exs" | "erl" | "hs"
         | "clj" | "fxml" | "pom" | "xsd" | "csv" | "tsv" | "log" => Lang::Text,
-        "" if matches!(name.as_str(), "dockerfile" | "makefile" | "license" | "readme" | ".gitignore" | ".editorconfig" | ".env") => Lang::Text,
+        "" if matches!(name.as_str(), "dockerfile" | "makefile" | "license" | "readme") => Lang::Text,
         _ => return None,
     })
 }
@@ -513,7 +517,8 @@ re!(KT_COMPANION, r"\bcompanion\s+object\s*(?:\{|$)");
 re!(JS_FUNC, r"\bfunction\s*\*?\s*([\p{L}_$][\w$]*)\s*[(<]");
 re!(JS_CLASS, r"(?:^|[^.\w$])class\s+([\p{L}_$][\w$]*)");
 re!(TS_TYPE, r"^\s*(?:export\s+)?(?:declare\s+)?(?:default\s+)?(?:abstract\s+)?(interface|type|enum|namespace|module)\s+([\p{L}_$][\w$]*)\s*(.?)");
-re!(JS_VAR, r"^\s*(?:export\s+)?(?:declare\s+)?(?:default\s+)?(const|let|var)\s+([\p{L}_$][\w$]*)\s*(?::[^=]*)?(=\s*(.*))?");
+// 자료형 표기 안의 `=>`(`const f: (a: number) => void = …`)는 값의 시작이 아니다.
+re!(JS_VAR, r"^\s*(?:export\s+)?(?:declare\s+)?(?:default\s+)?(const|let|var)\s+([\p{L}_$][\w$]*)\s*(?::(?:[^=]|=>)*)?(=\s*(.*))?");
 re!(
     JS_METHOD,
     r"^\s*(?:(?:public|private|protected|static|async|readonly|override|abstract|get|set)\s+)*\*?\s*(#?[\p{L}_$][\w$]*)\s*(?:<[^>()]*>)?\s*\([^()]*\)\s*(?::\s*[^={]+?)?\s*\{"
@@ -544,7 +549,8 @@ re!(XML_NAMESPACE, r#"<mapper\b[^<>]*?\snamespace\s*=\s*["']([^"']+)["']"#);
 re!(PY_DEF, r"^(\s*)(?:async\s+)?(def|class)\s+([\p{L}_]\w*)");
 re!(PY_VAR, r"^([\p{L}_]\w*)\s*(?::[^=]+)?=[^=]");
 // Markdown, 설정 파일
-re!(MD_HEAD, r"^(#{1,6})\s+(.+?)\s*#*\s*$");
+// 닫는 `#`들은 앞에 빈칸이 있을 때만 뗀다(`# C#`의 제목은 "C#"이다).
+re!(MD_HEAD, r"^(#{1,6})\s+(.+?)(?:\s+#+)?\s*$");
 re!(CONFIG_SECTION, r"^\s*\[+\s*([^\]]+?)\s*\]+\s*(?:[#;].*)?$");
 
 const JV_NOT_NAMES: &[&str] = &[
@@ -566,6 +572,7 @@ fn brace_defs(lang: Lang, original: &str, code: &str, line_offset: u32) -> Vec<D
     let mut depth: i32 = 0;
     let mut parens: i32 = 0; // 열린 소괄호 수(여러 줄에 걸친 인자 목록 안인지)
     let mut where_clause = false; // Rust의 `where` 절 안(선언과 `{` 사이의 여러 줄)
+    let mut after_comma = false; // 앞의 뜻 있는 줄이 쉼표로 끝났는지(상위 자료형 목록이 다음 줄로 이어진다)
     for (index, (line, original_line)) in code.split('\n').zip(original.split('\n')).enumerate() {
         finder.line = line_offset + index as u32 + 1;
         finder.original = original_line;
@@ -578,9 +585,25 @@ fn brace_defs(lang: Lang, original: &str, code: &str, line_offset: u32) -> Vec<D
             if lead.starts_with("where") || tail.ends_with(" where") {
                 where_clause = true;
             }
+            // 머리가 여러 줄인 선언: rustfmt는 긴 impl 머리를 `for` 앞에서 나누고(`impl<T> Trait<T>` / `    for Type<T>`),
+            // Kotlin·C++은 상위 자료형 목록을 쉼표 뒤에서 나눈다(`) : Base(),` / `    Iface {`).
             let continues = where_clause
+                || after_comma
+                || (lang == Lang::Rust && lead.starts_with("for "))
                 || lead.starts_with(['{', '.', ')', ',', ':', '=', '-', '|', '&', '?', '+'])
                 || ["throws", "extends", "implements"].iter().any(|word| lead.starts_with(word));
+            // 쉼표로 이어지는 머리는 객체 글자가 없는 언어에서만 본다(JS의 `get() { … },` 다음 줄은 새 멤버다).
+            after_comma = matches!(lang, Lang::Kotlin | Lang::C | Lang::Java) && tail.ends_with(',') && !line.contains(['{', '}']);
+            if lang == Lang::Rust && lead.starts_with("for ") {
+                // 나뉜 impl 머리의 둘째 줄: 감싸는 이름은 트레이트가 아니라 `for` 뒤의 자료형이다.
+                let joined = format!("_ {lead}");
+                let target = impl_target(&joined);
+                if !target.is_empty() && target.chars().all(|c| c.is_alphanumeric() || c == '_') {
+                    if let Some(scope) = finder.scopes.last_mut().filter(|scope| scope.kind == "impl" && !scope.entered) {
+                        scope.name = target.to_string();
+                    }
+                }
+            }
             if parens == 0 && !continues {
                 while finder.scopes.last().is_some_and(|scope| !scope.entered && scope.line < finder.line) {
                     finder.scopes.pop();
@@ -947,8 +970,10 @@ fn js_line(finder: &mut Finder, line: &str, depth: i32) {
             finder.add(name.as_str(), kind, name.start());
             if function {
                 finder.open(name.as_str(), "function", depth, false);
-            } else if value.ends_with('{') {
+            } else if value.ends_with('{') && !["=>", ")"].iter().any(|end| value.trim_end_matches('{').trim_end().ends_with(end)) {
                 // 객체를 담는 이름: 그 안의 메서드가 이 이름을 감싼 이름으로 갖는다.
+                // 콜백을 여는 줄(`const out = items.map((item) => {`, `… = run(function () {`)은 객체가 아니다:
+                // 그 안의 지역 변수가 `out.name` 같은 정의로 올라가면 안 된다.
                 finder.open(name.as_str(), "object", depth, true);
             }
             return;
@@ -1183,11 +1208,14 @@ pub struct Signer {
     code: String,
     starts: Vec<usize>,
     python: bool,
+    /// 선언이 줄 끝에서 끝날 수 있는 언어인지(코드 언어). XML·HTML의 여러 줄 태그는 예전처럼 끝까지 읽는다.
+    line_ends: bool,
 }
 
 impl Signer {
     pub fn new(lang: Lang, text: &str) -> Self {
-        Self { code: code_only(text, &mask(lang, text)), starts: line_starts(text), python: lang == Lang::Python }
+        let line_ends = matches!(lang, Lang::Rust | Lang::Java | Lang::Kotlin | Lang::Js | Lang::Vue | Lang::Python | Lang::Go | Lang::C);
+        Self { code: code_only(text, &mask(lang, text)), starts: line_starts(text), python: lang == Lang::Python, line_ends }
     }
 
     /// 정의의 서명: 정의한 줄의 처음부터 몸통이 시작하는 여는 중괄호나 문장이 끝나는 ';' 앞까지. 여러 줄이면 한 줄로 잇는다.
@@ -1199,10 +1227,28 @@ impl Signer {
         let mut out = String::new();
         let mut parens = 0i32;
         let mut space = true;
-        for (lines, line) in rest.split('\n').enumerate() {
+        let mut where_clause = false;
+        let mut open_tail = false;
+        let ahead: Vec<&str> = rest.split('\n').take(24).collect();
+        for (lines, line) in ahead.iter().copied().enumerate() {
             if lines >= 16 || (one_line && lines >= 1) {
                 break;
             }
+            // 세미콜론을 쓰지 않는 언어의 몸통 없는 선언(Kotlin의 `data class User(…)`, 인터페이스의 `fun find(): User`,
+            // Go 인터페이스의 메서드, `def f(): ...`)은 줄 끝에서 끝난다. 괄호가 닫힌 채 줄이 끝났으면, 이 줄이나 다음 줄이
+            // 선언을 잇는 꼴일 때만 더 읽는다(그러지 않으면 아래 선언이 서명에 붙어 반환형·상위 자료형을 잘못 읽는다).
+            let next = ahead[lines + 1..].iter().find(|next| !next.trim().is_empty()).map_or("", |next| next.trim_start());
+            let tail = line.trim_end();
+            where_clause = where_clause || tail.ends_with(" where") || tail.trim_start() == "where" || next.starts_with("where");
+            // 줄 끝이 잇는 꼴인지는 빈 줄(주석만 있던 줄)을 건너 이어진다: `class Msg extends` / `// 주석` / `Base {`.
+            if !tail.trim().is_empty() {
+                open_tail = tail.ends_with([',', ':', '=', '(', '[', '+', '|', '&'])
+                    || ["->", "=>", " extends", " implements", " throws"].iter().any(|end| tail.ends_with(end));
+            }
+            let goes_on = where_clause
+                || open_tail
+                || next.starts_with(['{', '.', ')', ',', ':', '=', '-', '|', '&', '?', '+', '<'])
+                || ["throws", "extends", "implements", "by "].iter().any(|word| next.starts_with(word));
             let mut done = false;
             for ch in line.chars() {
                 match ch {
@@ -1225,6 +1271,9 @@ impl Signer {
                 }
             }
             if done || out.len() >= MAX_SIGNATURE || (self.python && parens == 0 && line.trim_end().ends_with(':')) {
+                break;
+            }
+            if self.line_ends && parens == 0 && !goes_on {
                 break;
             }
             if !space {
@@ -1317,7 +1366,8 @@ pub fn supertypes(lang: Lang, sig: &str, name: &str) -> Vec<String> {
             let start = [" extends ", " implements ", ":"].iter().filter_map(|mark| rest.find(mark).map(|at| at + mark.len())).min();
             if let Some(start) = start {
                 for part in rest[start..].replace(" extends ", ",").replace(" implements ", ",").split(',') {
-                    add(part);
+                    // Kotlin의 위임(`: Base by impl`)에서 `by` 뒤는 자료형이 아니다.
+                    add(if lang == Lang::Kotlin { part.split(" by ").next().unwrap_or(part) } else { part });
                 }
             }
         }
@@ -1376,20 +1426,41 @@ pub fn subtypes(lang: Lang, text: &str, name: &str) -> Vec<(Def, String)> {
         })
         .collect();
     if lang == Lang::Rust {
-        for (index, line) in signer.code.split('\n').enumerate() {
+        let lines: Vec<&str> = signer.code.split('\n').collect();
+        let originals: Vec<&str> = text.split('\n').collect();
+        for (index, line) in lines.iter().copied().enumerate() {
             let Some(rest) = RS_IMPL.captures(line).and_then(|found| found.get(1)) else { continue };
-            if impl_trait(rest.as_str()) != name {
+            // 머리가 여러 줄이면(rustfmt는 긴 머리를 `for` 앞에서 나눈다) 몸통이 시작하는 `{` 전까지 이어 붙여 읽는다.
+            let mut head = rest.as_str().to_string();
+            let mut last = index;
+            while !lines[last].contains(['{', ';']) && last + 1 < lines.len() && last - index < 8 {
+                last += 1;
+                head.push(' ');
+                head.push_str(lines[last].trim());
+            }
+            if impl_trait(&head) != name {
                 continue;
             }
-            let target = impl_target(rest.as_str());
+            let target = impl_target(&head);
             if target.is_empty() {
                 continue;
             }
-            let at = rest.start() + rest.as_str().rfind(target).unwrap_or(0);
-            let col = line.get(..at).map_or(0, |before| before.encode_utf16().count()) as u32;
-            let line_number = index as u32 + 1;
+            // 구현하는 자료형이 적힌 자리: `for` 뒤에서 처음 나온 곳(where 절에 같은 이름이 또 나올 수 있다).
+            let spot = (index..=last).find_map(|row| {
+                let from = if row == index { rest.start() } else { 0 };
+                let hay = &lines[row][from..];
+                let indent = hay.len() - hay.trim_start().len();
+                let after = hay.find(" for ").map(|at| at + 5).or_else(|| hay.trim_start().starts_with("for ").then_some(indent + 4))?;
+                Some((row, from + after + hay[after..].find(target)?))
+            });
+            let (row, at) = spot.unwrap_or((index, rest.start() + rest.as_str().find(target).unwrap_or(0)));
+            // 칸은 원래 글에서 센다(가린 글은 주석·문자열의 여러 바이트 글자가 바이트 수만큼의 빈칸이라 칸이 밀린다).
+            let before = originals.get(row).and_then(|original| original.get(..at)).or_else(|| lines[row].get(..at));
+            let col = before.map_or(0, |before| before.encode_utf16().count()) as u32;
+            let line_number = row as u32 + 1;
             let def = Def { name: target.to_string(), kind: "impl", line: line_number, col, container: name.to_string(), depth: 0, end: line_number };
-            found.push((def, line.trim().chars().take(MAX_SIGNATURE).collect()));
+            let sig = lines[index..=last].iter().map(|each| each.trim()).collect::<Vec<_>>().join(" ");
+            found.push((def, sig.chars().take(MAX_SIGNATURE).collect()));
         }
         found.sort_by_key(|(def, _)| (def.line, def.col));
     }
@@ -1983,6 +2054,49 @@ exports.legacy = 1;
         assert_eq!(supertypes(Lang::Js, "export class A<T> extends Base<T> implements One, Two", "A"), ["Base", "One", "Two"]);
         assert_eq!(supertypes(Lang::C, "class A : public Base, private detail::Other", "A"), ["Base", "Other"]);
         assert!(supertypes(Lang::Java, "public class A", "A").is_empty());
+        // Kotlin의 위임: `by` 뒤는 자료형이 아니다.
+        assert_eq!(supertypes(Lang::Kotlin, "class A(b: B) : B by b, Runnable", "A"), ["B", "Runnable"]);
+    }
+
+    #[test]
+    fn 몸통_없는_선언의_서명은_그_줄에서_끝난다() {
+        // 세미콜론을 쓰지 않는 언어: 아래 선언이 서명에 붙으면 상위 자료형·반환형을 잘못 읽는다.
+        let kotlin = "data class User(val name: String)\n\nclass Admin(name: String) : Person(name), Auditable {\n}\ninterface Repo {\n    fun find(id: Long): User\n    fun count(): Int\n}\nclass Long(\n    val a: Int,\n) : Base(),\n    Iface {\n    fun inner() {}\n}\n";
+        let signer = Signer::new(Lang::Kotlin, kotlin);
+        let defs = definitions(Lang::Kotlin, kotlin);
+        let of = |name: &str| signer.of(defs.iter().find(|def| def.name == name).unwrap());
+        assert_eq!(of("User"), "data class User(val name: String)");
+        assert!(supertypes(Lang::Kotlin, &of("User"), "User").is_empty());
+        assert_eq!(of("find"), "fun find(id: Long): User");
+        // 상위 자료형 목록이 쉼표 뒤에서 다음 줄로 이어져도 끝까지 읽고, 그 클래스의 멤버는 그 클래스 것이다.
+        assert_eq!(supertypes(Lang::Kotlin, &of("Long"), "Long"), ["Base", "Iface"]);
+        assert!(names(Lang::Kotlin, kotlin).contains(&"method:Long.inner".to_string()), "{:?}", names(Lang::Kotlin, kotlin));
+        // Python의 한 줄 정의도 다음 줄을 끌어오지 않는다.
+        let python = "def one(): return 1\ndef two(a,\n        b) -> int:\n    return 2\n";
+        let signer = Signer::new(Lang::Python, python);
+        let defs = definitions(Lang::Python, python);
+        assert_eq!(signer.of(&defs[0]), "def one(): return 1");
+        assert_eq!(signer.of(&defs[1]), "def two(a, b) -> int:");
+    }
+
+    #[test]
+    fn 여러_줄에_걸친_impl_머리를_읽는다() {
+        let rust = "impl<'a, T> LongTrait<'a, T>\n    for LongType<'a, T>\nwhere\n    T: Clone,\n{\n    fn run(&self) {}\n}\n/* 한글 주석 */ impl Shape for T where T: Clone {\n}\n";
+        assert!(names(Lang::Rust, rust).contains(&"method:LongType.run".to_string()), "{:?}", names(Lang::Rust, rust));
+        let found = subtypes(Lang::Rust, rust, "LongTrait");
+        assert_eq!(found.iter().map(|(def, _)| (def.name.as_str(), def.line, def.col)).collect::<Vec<_>>(), [("LongType", 2, 8)]);
+        // 칸은 원래 글에서 세고(주석의 한글이 칸을 밀지 않는다), where 절이 아니라 `for` 뒤의 이름을 가리킨다.
+        let found = subtypes(Lang::Rust, rust, "Shape");
+        assert_eq!(found.iter().map(|(def, _)| (def.name.as_str(), def.line, def.col)).collect::<Vec<_>>(), [("T", 8, 27)]);
+    }
+
+    #[test]
+    fn 콜백을_여는_줄은_객체가_아니다() {
+        let js = "const result = items.map((item) => {\n  const name = item.name;\n  return name;\n});\nconst api = {\n  load() {\n  },\n};\nconst typed: (a: number) => void = (a) => {\n  const inner = 1;\n};\n";
+        assert_eq!(names(Lang::Js, js), ["constant:result", "constant:api", "method:api.load", "function:typed"]);
+        // 점으로 시작하는 설정 파일, 닫는 `#` 앞에 빈칸이 없는 제목.
+        assert_eq!((lang_of(".gitignore"), lang_of("a/.editorconfig"), lang_of(".env")), (Some(Lang::Text), Some(Lang::Text), Some(Lang::Text)));
+        assert_eq!(names(Lang::Markdown, "# C#\n## 둘째 ##\n"), ["heading:C#", "heading:둘째"]);
     }
 
     #[test]

@@ -108,8 +108,11 @@ export function indentBlock(lines, at, step) {
   const end = blockEnd(lines, at);
   if (step > 0) {
     // 바로 위에 이 줄을 품을 할 일(같거나 더 깊은 줄)이 있어야 하위 일이 된다.
-    const above = lines[at - 1];
-    if (at === 0 || !above.trim() || !TASK.test(above) || widthOf(above) < own) return null;
+    // 바로 위가 앞 할 일에 딸린 설명 줄(할 일이 아닌, 더 깊이 들여쓴 줄)이면 그 위의 할 일을 본다.
+    let up = at - 1;
+    while (up >= 0 && lines[up].trim() && !TASK.test(lines[up]) && widthOf(lines[up]) > own) up -= 1;
+    const above = lines[up];
+    if (up < 0 || !above.trim() || !TASK.test(above) || widthOf(above) < own) return null;
     return lines.map((line, index) => (index >= at && index < end ? `  ${line}` : line));
   }
   if (!own) return null;
@@ -143,7 +146,8 @@ function findTask(tasks, ref) {
 const newId = () => `t${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 const SAVE_MS = 500;          // 자동 저장까지 기다리는 시간
 const SAVE_RETRY_MS = 5000;   // 자동 저장에 실패했을 때 다시 해 보기까지의 시간
-const clip = (text, max = 40) => (text.length > max ? `${text.slice(0, max)}…` : text);
+// 글자 단위로 자른다(UTF-16 단위로 자르면 이모지가 반으로 잘려 깨진 글자가 남는다).
+const clip = (text, max = 40) => { const chars = Array.from(text); return chars.length > max ? `${chars.slice(0, max).join('')}…` : text; };
 
 /**
  * 할 일 항목의 화면을 host 안에 만든다.
@@ -427,6 +431,17 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
         $list.focus();
       } else if (ev.key === 'Tab') {
         ev.preventDefault();
+        if (!input.value.trim()) {
+          // 글이 빈 줄(막 넣은 새 줄 등)은 반영하면 줄째 지워지고 초점도 잃는다. 줄은 그대로 두고 들여쓰기만 바꾼 뒤 이어서 적는다.
+          const { line: at, fresh: wasFresh } = editing;
+          const moved = indentBlock(lines(), at, ev.shiftKey ? -1 : 1);
+          if (!moved) return;
+          editing = null;
+          selected = at;
+          commit(moved.join('\n'), { remember: !wasFresh });
+          edit(at, wasFresh);
+          return;
+        }
         const at = finishEdit();
         if (at >= 0) { indent(at, ev.shiftKey ? -1 : 1); edit(at); }
       }
@@ -495,9 +510,12 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
     if (ev.target.closest('.todo-edit')) return;
     const line = settleEdit(node ? Number(node.dataset.line) : -1);
     if (line < 0 || rowAt(line)?.kind !== 'task') return undefined;
-    if (ev.target.matches('input[type="checkbox"]')) { ev.preventDefault(); return toggle(line); }
+    // 체크 칸·× 단추는 누르면 초점을 받는데, 목록을 다시 그리면 그 요소가 사라져 초점이 문서로 빠진다
+    // (바로 누른 Ctrl+Z·방향키가 듣지 않는다). 목록으로 초점을 되돌린다.
+    const back = () => { $list.focus({ preventScroll: true }); return undefined; };
+    if (ev.target.matches('input[type="checkbox"]')) { ev.preventDefault(); toggle(line); return back(); }
     const act = ev.target.closest('[data-act]')?.dataset.act;
-    if (act === 'remove') return remove(line);
+    if (act === 'remove') { remove(line); return back(); }
     if (act === 'give') return api.toClaude?.(item, `${rowAt(line)?.text || ''} `, ev);
     return select(line, { scroll: false });
   });
@@ -791,6 +809,8 @@ export function createTodo(item, host, saved = {}, onChange = () => {}) {
     setCode: (shown) => showCode(!!shown),
     /** 자동 저장소의 번호(파일 이름). */
     store: () => id,
+    /** 저장소 파일이 밖에서 고쳐졌다(같은 워크스페이스의 Claude 세션이 파일을 직접 고친 경우): 바로 다시 읽는다. */
+    refresh: reload,
     close: async () => {
       finishEdit();
       await flush();

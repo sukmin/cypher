@@ -31,7 +31,8 @@ export function initRun(given) {
   });
 }
 
-const clip = (text, max = 40) => (text.length > max ? `${text.slice(0, max)}…` : text);
+// 글자 단위로 자른다(UTF-16 단위로 자르면 이모지가 반으로 잘려 깨진 글자가 남고, 그 이름을 주소로 옮기다 오류가 난다).
+const clip = (text, max = 40) => { const chars = Array.from(text); return chars.length > max ? `${chars.slice(0, max).join("")}…` : text; };
 const two = (n) => String(n).padStart(2, '0');
 
 /** 걸린 시간을 말로: 0.8초, 42초, 5분 12초, 1시간 3분. */

@@ -177,7 +177,8 @@ export function showLook() {
   const sizeInput = (value, low, high, key, note) => {
     const input = make('input');
     Object.assign(input, { type: 'number', min: low, max: high, step: 1, value });
-    input.onchange = () => { setLook({ [key]: clamp(input.value, low, high, '') }); refresh(); };
+    // 범위 안으로 맞춰 적용한 값을 칸에도 되돌려 적는다(100을 넣어 24가 적용됐는데 칸에는 100이 남지 않게).
+    input.onchange = () => { setLook({ [key]: clamp(input.value, low, high, '') }); refresh(); input.value = currentLook()[key]; };
     const box = make('div', 'look-size');
     box.append(input, make('span', '', note));
     return { box, input };

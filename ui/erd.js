@@ -36,7 +36,8 @@ const DIRECTION = /^direction\s+(\S+)$/;
 const MAX_LINE = 600; // 이보다 긴 줄은 읽지 않는다(한 줄이 터무니없이 길면 읽는 데 오래 걸린다).
 
 const unquote = (text) => (text.length >= 2 && text.startsWith('"') && text.endsWith('"') ? text.slice(1, -1) : text);
-const clip = (text, max = 40) => (text.length > max ? `${text.slice(0, max)}…` : text);
+// 글자 단위로 자른다(UTF-16 단위로 자르면 이모지가 반으로 잘려 깨진 글자가 남고, 그 이름을 주소로 옮기다 오류가 난다).
+const clip = (text, max = 40) => { const chars = Array.from(text); return chars.length > max ? `${chars.slice(0, max).join("")}…` : text; };
 
 /**
  * erDiagram 글을 읽는다.
@@ -1037,6 +1038,8 @@ export function createErd(item, host, saved = {}, onChange = () => {}) {
     setCode: (shown) => showCode(!!shown),
     /** 자동 저장소의 번호(파일 이름). */
     store: () => id,
+    /** 저장소 파일이 밖에서 고쳐졌다(같은 워크스페이스의 Claude 세션이 파일을 직접 고친 경우): 바로 다시 읽는다. */
+    refresh: reload,
     close: async () => {
       await flush();
       // 마지막 저장이 실패했으면 그대로 닫지 않는다(닫으면 다시 저장하지 않고, 저장소의 옛 내용만 보관된다).

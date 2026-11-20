@@ -850,8 +850,11 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
   function step(from, to) {
     const state = from.pop();
     if (!state) return;
-    to.push(snapshot());
+    // 파일 열기를 되돌리면(다시 하면) 연결된 파일도 그때의 것으로 돌린다. 내용만 돌아오고 연결이 남으면,
+    // 다음 Ctrl+S가 묻지 않고 그 파일을 되돌린 내용으로 덮어쓴다.
+    to.push(state.link ? { ...snapshot(), link: { path, fileText } } : snapshot());
     load(state.text, state.at);
+    if (state.link) ({ path, fileText } = state.link);
     changed();
     reveal(selected);
   }
@@ -1679,7 +1682,7 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     try {
       const file = await invoke('text_open', { path: given || null, start: startDir(), kind: 'mindmap' });
       if (!file) return;
-      undo.push(snapshot());
+      undo.push({ ...snapshot(), link: { path, fileText } }); // 되돌리면 연결된 파일도 지금 것으로 돌아간다
       redo.length = 0;
       unread = false; // 내용을 통째로 바꾸므로, 읽지 못한 저장소의 내용을 기다리지 않는다.
       load(file.text);
@@ -1872,6 +1875,8 @@ export function createMindmap(item, host, saved = {}, onChange = () => {}) {
     },
     /** 자동 저장소의 번호(파일 이름). */
     store: () => id,
+    /** 저장소 파일이 밖에서 고쳐졌다(같은 워크스페이스의 Claude 세션이 파일을 직접 고친 경우): 바로 다시 읽는다. */
+    refresh: reload,
     file: () => path,
     openFile,
     /** PDF로 내보낸다. `target`을 주면 저장할 곳을 묻지 않는다(자동 검증용). */

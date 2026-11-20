@@ -31,8 +31,14 @@ export function initDrop(given) {
     waiting.get(payload.id)?.(payload.paths || []);
     waiting.delete(payload.id);
   });
-  document.addEventListener('dragstart', () => { internal = true; }, true);
-  document.addEventListener('dragend', () => { internal = false; clearMarks(); }, true);
+  let source = null; // 끌기를 시작한 요소
+  document.addEventListener('dragstart', (ev) => { internal = true; source = ev.target; }, true);
+  document.addEventListener('dragend', () => { internal = false; source = null; clearMarks(); }, true);
+  // 끌던 요소가 끄는 도중 문서에서 떨어지면(파일이 바뀌어 다시 그린 문서 등) dragend가 오지 않아 "안에서 시작한 끌기" 표시가
+  // 켜진 채 남고, 그 뒤 탐색기에서 끌어 온 파일이 모두 무시된다. 그런 뒤 창 밖에서 들어오는 끌기는 새 끌기로 본다.
+  document.addEventListener('dragenter', (ev) => {
+    if (internal && !ev.relatedTarget && source && !source.isConnected) { internal = false; source = null; }
+  }, true);
   document.addEventListener('dragover', onOver);
   document.addEventListener('dragleave', (ev) => { if (!ev.relatedTarget) clearMarks(); });
   document.addEventListener('drop', onDrop);

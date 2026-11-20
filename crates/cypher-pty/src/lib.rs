@@ -199,6 +199,14 @@ impl PtySession {
             path.push(base);
             env.env("PATH", path);
         }
+        // 가상 터미널 라이브러리는 전체 경로가 아닌 프로그램 이름을 PATH에서 다시 찾으면서 PATHEXT 항목마다 첫 글자(`.`)를
+        // 떼는데, 빈 항목(`.EXE;.CMD;`처럼 끝에 `;`가 있을 때)에서 패닉한다. 넘기는 환경에서 빈 항목을 뺀다.
+        if let Some(extensions) = env.get_env("PATHEXT").map(|value| value.to_string_lossy().into_owned()) {
+            let kept: Vec<&str> = extensions.split(';').map(str::trim).filter(|ext| ext.starts_with('.') && ext.len() > 1).collect();
+            if kept.len() != extensions.split(';').count() {
+                env.env("PATHEXT", kept.join(";"));
+            }
+        }
         let found = find_program(
             &opts.program,
             env.get_env("PATH").unwrap_or_default(),

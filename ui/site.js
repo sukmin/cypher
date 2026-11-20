@@ -262,7 +262,9 @@ export function createSite(item, host, saved = {}, onChange = () => {}) {
           // 여는 사이에 다른 프로필을 알렸다면(워크스페이스를 연달아 옮김) 앱이 이 웹뷰를 닫았을 수 있다.
           // 열린 것으로 치지 않고 지금의 프로필로 다시 연다(같은 프로필의 웹뷰가 남아 있으면 앱은 그것을 그대로 쓴다).
           if (!retold) {
-            setUrl(at);
+            // 막 만든 웹뷰는 아직 빈 문서(about:blank)를 알려 올 수 있다. 주소를 주고 열었으면 그 주소를 지우지 않는다
+            // (지우면 페이지가 다 읽히기 전에 앱을 껐을 때 보던 주소가 빈 채로 저장된다). 실제 주소는 이동 알림이 알려 준다.
+            if (!blank(at) || blank(sent)) setUrl(at);
             // 여는 사이에 주소를 쳤으면 그 주소는 아직 보내지 않았다(돌아온 것은 앞서 보낸 주소다). 아래에서 친 주소로 간다.
             if (wanted != null && wanted !== sent) typed = wanted;
             wanted = null;

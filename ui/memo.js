@@ -312,6 +312,7 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
   function store() {
     clearTimeout(storeTimer);
     storeTimer = 0;
+    if (!started) return Promise.resolve(); // 쓰던 내용을 아직 읽지 못했다: 빈 화면으로 임시 저장본을 덮지 않는다
     return invoke('memo_write', { id, text: $text.value }).catch((err) => setStatus(`메모 임시 저장 실패: ${err}`));
   }
 
@@ -842,6 +843,9 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
     root.style.setProperty('--memo-size', `${size}px`);
     setWrap(wrap);
     let text = '';
+    // 쓰던 내용을 읽어 올 때까지는 글을 받지 않는다(느린 네트워크 드라이브의 파일 등). 그사이 친 글은 읽어 온 내용에 덮여
+    // 사라지고, 그 전에 임시 저장이 돌면 쓰던 내용의 임시 저장본이 방금 친 몇 글자로 바뀐다.
+    $text.readOnly = true;
     try {
       if (saved.open) {
         const file = await invoke('text_open', { path: saved.open, start: null });
@@ -890,6 +894,7 @@ export function createMemo(item, host, saved = {}, onChange = () => {}) {
       setStatus(`메모를 열지 못했습니다: ${err}`);
     }
     $text.value = text;
+    $text.readOnly = false;
     started = true;
     refreshStats();
     refreshPosition();

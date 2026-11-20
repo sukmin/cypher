@@ -335,7 +335,8 @@ export function createImage(item, host, saved = {}, onChange = () => {}) {
   function go(step, absolute = false) {
     const { list, index } = position();
     if (list.length < 2) return;
-    const next = absolute ? (step < 0 ? 0 : list.length - 1) : (index + step + list.length * 8) % list.length;
+    // 한 번에 여러 칸을 넘겨도(큰 휠 값) 순번이 음수가 되지 않게 한다.
+    const next = absolute ? (step < 0 ? 0 : list.length - 1) : (((index + step) % list.length) + list.length) % list.length;
     if (list[next] !== item) api.show(list[next]);
   }
 

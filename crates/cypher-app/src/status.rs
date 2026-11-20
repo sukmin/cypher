@@ -145,7 +145,12 @@ pub fn start(app: AppHandle, token: String) -> std::io::Result<u16> {
     let listener = TcpListener::bind(("127.0.0.1", 0))?;
     let port = listener.local_addr()?.port();
     thread::spawn(move || {
-        for stream in listener.incoming().flatten() {
+        for stream in listener.incoming() {
+            // 받기가 계속 실패하는 동안(손잡이·버퍼 부족 등) 쉬지 않고 돌며 CPU를 다 쓰지 않게 잠깐 쉰다.
+            let Ok(stream) = stream else {
+                thread::sleep(std::time::Duration::from_millis(50));
+                continue;
+            };
             let (app, token) = (app.clone(), token.clone());
             // MCP 연결은 오래 이어지므로 접속마다 스레드를 따로 둔다.
             thread::spawn(move || accept(app, &token, stream));

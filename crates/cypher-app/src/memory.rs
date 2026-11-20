@@ -119,7 +119,9 @@ fn copy_tree(from: &Path, to: &Path, merge: bool) -> io::Result<usize> {
         if let Some(parent) = target.parent() {
             fs::create_dir_all(parent)?;
         }
-        if merge && relative == Path::new(INDEX) && target.is_file() {
+        // 이름은 대/소문자를 가리지 않고 견준다: 가져올 폴더의 색인이 `memory.md`여도 Windows에서는 같은 파일이라,
+        // 합치지 않고 복사하면 기존 색인이 통째로 덮인다.
+        if merge && relative.as_os_str().eq_ignore_ascii_case(INDEX) && target.is_file() {
             let merged = merge_index(&fs::read_to_string(&target)?, &fs::read_to_string(&source)?);
             fs::write(&target, merged)?;
         } else {

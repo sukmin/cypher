@@ -610,7 +610,8 @@ fn text(content: impl Into<String>) -> Vec<Value> {
 }
 
 fn summary(target: &Target) -> String {
-    let info = eval(target, "({ url: location.href, title: document.title })").unwrap_or_default();
+    // 제목에 짝 없는 반쪽 글자가 있으면 답을 JSON으로 읽지 못하므로 고쳐서 받는다.
+    let info = eval(target, "({ url: location.href, title: document.title.toWellFormed ? document.title.toWellFormed() : document.title })").unwrap_or_default();
     format!("주소: {}\n제목: {}", info["url"].as_str().unwrap_or("?"), info["title"].as_str().unwrap_or(""))
 }
 
@@ -644,7 +645,9 @@ const SNAPSHOT_JS: &str = r#"(() => {
     return `[${i}] ${kind} "${name}"${extra}`;
   });
   const body = (document.body?.innerText || '').replace(/\n{3,}/g, '\n\n');
-  return { url: location.href, title: document.title, text: body, elements: items };
+  // 페이지의 글에 이미 짝 없는 반쪽이 들어 있을 수도 있다(이모지 든 글을 페이지가 잘라 놓은 경우). 같은 까닭으로 고쳐서 보낸다.
+  const whole = (s) => (typeof s === 'string' && s.toWellFormed ? s.toWellFormed() : s);
+  return { url: location.href, title: whole(document.title), text: whole(body), elements: items.map(whole) };
 })()"#;
 
 fn tool_read(target: &Target) -> ToolResult {

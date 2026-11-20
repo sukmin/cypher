@@ -111,7 +111,8 @@ fn git_files(root: &Path) -> Option<Vec<String>> {
     let output = Command::new("git")
         .arg("-C")
         .arg(root)
-        .args(["-c", "core.quotepath=false", "ls-files", "-z", "--cached", "--others", "--exclude-standard"])
+        // `-t`는 항목 앞에 종류를 붙인다(`H 경로`, `? 경로`, 작업 폴더에서 지운 것은 `R 경로`가 한 번 더).
+        .args(["-c", "core.quotepath=false", "ls-files", "-z", "-t", "--cached", "--others", "--deleted", "--exclude-standard"])
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdin(Stdio::null())
         .creation_flags(CREATE_NO_WINDOW)
@@ -120,8 +121,29 @@ fn git_files(root: &Path) -> Option<Vec<String>> {
     if !output.status.success() {
         return None;
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    Some(text.split('\0').filter(|path| !path.is_empty()).map(str::to_string).collect())
+    Some(tracked_files(&String::from_utf8_lossy(&output.stdout)))
+}
+
+/// `git ls-files -z -t`의 출력에서 지금 있는 파일만 고른다.
+/// - 작업 폴더에서 지웠지만 아직 커밋하지 않은 파일(`R`)은 뺀다(열 수 없다).
+/// - 추적하지 않는 중첩 저장소는 `폴더/`로 나오므로 뺀다(파일이 아니다).
+/// - 충돌 난 파일은 단계마다 한 번씩(세 번까지) 나오므로 하나로 줄인다.
+fn tracked_files(text: &str) -> Vec<String> {
+    let mut gone: std::collections::HashSet<&str> = std::collections::HashSet::new();
+    let mut files: Vec<&str> = Vec::new();
+    for entry in text.split('\0') {
+        let Some((tag, path)) = entry.split_once(' ') else { continue };
+        if path.is_empty() || path.ends_with('/') {
+            continue;
+        }
+        if tag == "R" {
+            gone.insert(path);
+        } else {
+            files.push(path);
+        }
+    }
+    files.dedup();
+    files.into_iter().filter(|path| !gone.contains(path)).map(str::to_string).collect()
 }
 
 /// git 없이 돌아다니며 찾은 파일(프로젝트 폴더 기준 경로, `/`로 구분). 숨김·빌드 폴더에는 들어가지 않는다.
@@ -194,6 +216,8 @@ fn read_source(root: &Path, relative: &str) -> Option<(Lang, String)> {
 fn scan<T: Send>(root: &Path, limit: usize, visit: impl Fn(&str, Lang, &str) -> Vec<T> + Sync) -> Vec<T> {
     // git 저장소가 아니면(또는 git이 아는 파일이 없으면) 코드·글자 파일만 골라 돌아다닌다.
     let mut files = git_files(root).filter(|files| !files.is_empty()).unwrap_or_else(|| walked(root, true));
+    // 코드·글자 파일만 남긴 뒤에 자른다(그림·자료 파일이 많은 저장소에서 뒤쪽 코드 파일이 잘려 나가지 않게).
+    files.retain(|path| code::lang_of(path).is_some());
     files.truncate(MAX_FILES);
     scan_files(root, &files, limit, visit)
 }
@@ -506,7 +530,7 @@ const TABLE_SAVE_EVERY: Duration = Duration::from_secs(30);
 const COMPACT_OVER: u64 = 16 << 20;
 /// 쓰지 않은 지 이만큼 된 색인 폴더는 지운다(열어 보지 않는 프로젝트의 색인이 쌓이지 않게).
 const INDEX_KEEP: Duration = Duration::from_secs(30 * 24 * 3600);
-const TABLE_MAGIC: &[u8; 8] = b"CYIDX\0\x03\0";
+const TABLE_MAGIC: &[u8; 8] = b"CYIDX\0\x04\0";
 /// 정의 하나의 기록 크기(blocks.bin).
 const ITEM_BYTES: usize = 24;
 
@@ -1701,6 +1725,14 @@ mod tests {
         assert_eq!(line_of("a\n  둘째 줄  \nc", 2), "둘째 줄");
         assert_eq!(line_of("a", 9), "");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git이_아는_파일에서_지금_있는_파일만_고른다() {
+        // 추적하지 않는 중첩 저장소(폴더), 새 파일, 충돌 난 파일(단계마다 한 번), 작업 폴더에서 지운 파일.
+        let raw = "? nested/\0? new file.txt\0M a.rs\0M a.rs\0M a.rs\0H b.rs\0H gone.rs\0R gone.rs\0H 한글 파일.txt\0";
+        assert_eq!(tracked_files(raw), ["new file.txt", "a.rs", "b.rs", "한글 파일.txt"]);
+        assert!(tracked_files("").is_empty());
     }
 
     #[test]

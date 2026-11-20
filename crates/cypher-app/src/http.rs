@@ -267,10 +267,16 @@ fn payload(request: &HttpRequest, headers: &[(String, String)], base: &Path) -> 
         match file_line(line) {
             Some(given) => {
                 let path = upload_path(base, given);
+                let too_big = || format!("보낼 파일이 너무 큽니다(합쳐서 {}MB까지): {}", MAX_UPLOAD_BYTES >> 20, path.display());
+                // 크기는 읽기 전에 본다(아주 큰 파일을 통째로 메모리에 올린 뒤에야 거절하지 않게).
+                let size = fs::metadata(&path).map(|meta| meta.len()).unwrap_or(0);
+                if size > (MAX_UPLOAD_BYTES - uploaded.min(MAX_UPLOAD_BYTES)) as u64 {
+                    return Err(too_big());
+                }
                 let content = fs::read(&path).map_err(|e| format!("보낼 파일을 읽지 못했습니다({}): {e}", path.display()))?;
                 uploaded += content.len();
                 if uploaded > MAX_UPLOAD_BYTES {
-                    return Err(format!("보낼 파일이 너무 큽니다(합쳐서 {}MB까지): {}", MAX_UPLOAD_BYTES >> 20, path.display()));
+                    return Err(too_big());
                 }
                 bytes.extend_from_slice(&content);
             }
@@ -373,7 +379,9 @@ fn send(request: &HttpRequest, headers: &[(String, String)], payload: Option<&[u
     };
     let response = match result {
         Ok(response) | Err(ureq::Error::Status(_, response)) => response,
-        Err(e) => return Err(format!("요청을 보내지 못했습니다: {e}")),
+        // 전송 오류 글에는 요청 주소가 통째로 붙는다. 주소에 채워 넣은 환경 변수 값이 그대로 나가지 않게 가린다
+        // (이 글은 Claude 세션의 도구 답으로도 나간다).
+        Err(e) => return Err(request.masked(&format!("요청을 보내지 못했습니다: {e}"))),
     };
     let code = response.status();
     let status = format!("{code} {}", response.status_text());

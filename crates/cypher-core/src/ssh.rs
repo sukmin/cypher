@@ -66,7 +66,9 @@ pub fn config_hosts(text: &str) -> Vec<ConfigHost> {
     let mut hosts: Vec<ConfigHost> = Vec::new();
     // 지금 읽고 있는 `Host` 구역에 속한 호스트들의 자리. `Match` 구역이나 `Host` 앞의 줄이면 비어 있다.
     let mut current: Vec<usize> = Vec::new();
-    for line in text.lines() {
+    // BOM이 붙은 파일(Windows PowerShell의 `Set-Content -Encoding UTF8` 등)도 ssh는 읽는다. 떼지 않으면 첫 줄의 키가
+    // `host`와 맞지 않아 첫 `Host` 구역이 통째로 빠진다.
+    for line in text.strip_prefix('\u{feff}').unwrap_or(text).lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
@@ -139,6 +141,13 @@ mod tests {
         }
         let open = SshTarget { target: "h".into(), options: Some(r#"-o "열린 따옴표"#.into()), ..Default::default() };
         assert!(ssh_args(&open).is_err());
+    }
+
+    #[test]
+    fn bom이_붙은_설정_파일의_첫_호스트도_읽는다() {
+        let hosts = config_hosts("\u{feff}Host first\n    HostName 10.0.0.1\nHost second\n");
+        assert_eq!(hosts.iter().map(|host| host.name.as_str()).collect::<Vec<_>>(), ["first", "second"]);
+        assert_eq!(hosts[0].hostname, "10.0.0.1");
     }
 
     #[test]

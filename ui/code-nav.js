@@ -842,7 +842,11 @@ export function createNav(env) {
   function bag(tab, line, text) {
     const all = bagNames(text);
     const ctx = { lang: tab.lang, path: tab.path, imports: importsFor(tab), tab, line };
-    const names = bounded(tab, line, all).map((each) => (each.includes('::') || each === ARRAY ? each : qualified(ctx, each)));
+    // `Self`(Rust)는 감싼 자료형이다: `fn same(&self, other: &Self)`의 `other.name()`은 이 자료형의 것이다.
+    const names = bounded(tab, line, all).map((each) => {
+      if (each === 'Self') return ownerTypes(tab, line)[0] || each;
+      return each.includes('::') || each === ARRAY ? each : qualified(ctx, each);
+    });
     if (names.length) return { names };
     // 소문자 이름을 자료형으로 쓰는 언어(C·Go)에서는 이름을 못 읽은 것이지 기본 자료형이라는 뜻이 아니다.
     return all.length || ['c', 'go'].includes(tab.lang) ? null : { names: [] };

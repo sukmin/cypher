@@ -494,7 +494,8 @@ export function createTable(item, host, saved = {}, onChange = () => {}) {
     showMenu(ev, [
       { caption: `${table.columns[col]} · ${at + 1}번째 줄` },
       { label: '칸 복사  (Ctrl+C)', action: () => copyText(value) },
-      { label: '줄 복사 (탭으로 나눈 글)', action: () => copyText(table.rows[at].join('\t')) },
+      // 칸 안의 탭·줄 바꿈은 빈칸으로 바꾼다(그대로 두면 스프레드시트에 붙였을 때 한 줄이 여러 칸·여러 줄로 쪼개진다).
+      { label: '줄 복사 (탭으로 나눈 글)', action: () => copyText(table.rows[at].map((value) => value.replace(/[\t\r\n]+/g, ' ')).join('\t')) },
       ...(value && !/\s/.test(value) ? [{ label: `이 값으로 거르기: ${value.length > 30 ? `${value.slice(0, 30)}…` : value}`, action: () => setFilter(value) }] : []),
       ...(filter ? [{ label: '거르기 풀기', action: () => setFilter('') }] : []),
       { label: '파일 경로 복사', action: () => copyText(path) },

@@ -89,7 +89,8 @@ async function createKind(kind, opts = {}) {
   // 고르기 창은 워크스페이스 폴더에서 시작한다. 취소하면 만들지 않는다.
   if (kind === 'code' && opts.saved === undefined) {
     const picked = await invoke('pick_folder', { start: groupFolderOf(group) || startFolderHint(), title: '코드 보기로 열 폴더 (이 폴더 아래의 파일을 색인합니다)' }).catch(() => null);
-    if (!picked) return null;
+    // 고르는 사이에 그 워크스페이스를 지우거나 이름을 바꿨으면 만들지 않는다(만들면 옛 이름의 워크스페이스가 되살아난다).
+    if (!picked || !groupList.includes(group)) return null;
     return newItem(kind, { ...opts, group, cwd: picked, saved: { root: picked } });
   }
   return newItem(kind, { ...opts, group });
@@ -624,7 +625,8 @@ async function newSession(profileId, opts = {}) {
   wireTerminal(s);
   // 찾기 결과의 개수와 지금 몇 번째인지를 찾기 줄에 보여 준다.
   search.onDidChangeResults?.((result) => { if (s === active && !$search.hidden) showSearchCount(result); });
-  if (s.dormant) { render(); return s; }
+  // 쉬는 세션은 화면에 올리지 않는다. 화면이 비어 있었으면 위에서 숨긴 빈 화면 안내를 되돌린다(배치를 다시 지으면 돌아온다).
+  if (s.dormant) { if (!opts.restoring && !visible.length) layout(); render(); return s; }
 
   if (opts.show === 'split' && visible.length < MAX_PANES) placeBeside(s);
   else if (opts.show !== 'hidden') placeInActive(s);
@@ -685,6 +687,7 @@ async function startProcess(s, worktree = null) {
     term.write(`\x1b[31m세션을 시작하지 못했습니다: ${err}\x1b[0m\r\n`);
     if (command) term.write(commandHint(command));
     s.exited = true;
+    s.pending = ''; // 띄우는 동안 눌린 키는 버린다(남겨 두면 나중에 다시 띄웠을 때 한꺼번에 들어가 실행된다).
   }
   render();
   saveState();
@@ -1024,6 +1027,8 @@ function activate(s, { keepFocus = false } = {}) {
     placeInActive(s);
     layout();
   }
+  // 찾기 줄이 열려 있었으면 보던 세션의 찾기 강조를 지운다(아래 closeSearch는 새로 고른 세션의 것을 지운다).
+  if (active !== s && !$search.hidden) active?.search?.clearDecorations();
   active = s;
   wake(s, true); // 쉬고 있던 세션이면 여기서 재개한다.
   s.attention = false;
@@ -1786,6 +1791,8 @@ function renameInput(s) {
       // 다른 곳을 눌러 끝난 경우: 이 줄만 바꾼다. 목록 전체를 다시 그리면 방금 누른 줄·단추가 사라져
       // 그 클릭이 먹히지 않는다. (전체는 곧 다음 갱신 때 다시 그려진다.)
       input.closest('li')?.replaceWith(sessionItem(s));
+      // 스테이지 맨 위 줄과 창 제목은 눌린 클릭이 지나간 뒤에 맞춘다(한가한 세션은 다음 갱신이 오지 않아 옛 이름으로 남는다).
+      if (commit) setTimeout(render, 300);
     }
   };
   input.onkeydown = (ev) => {
@@ -3210,6 +3217,11 @@ function showsFile(other, path) {
     case 'site': return sameFileUrl(other.view.url() || '', fileUrl(path));
     case 'image': return samePath(other.view.state().source || '', path);
     case 'code': return other.view.shows(path);
+    // 마인드맵·ERD·할 일은 저장소의 파일을 본다(Claude 세션에 그 경로를 알려 주므로 도구 대신 파일을 직접 고칠 수 있다).
+    // 다시 읽게 하지 않으면 화면이 옛 내용으로 남아, 다음에 화면에서 고칠 때 Claude가 고친 것을 덮어쓴다.
+    case 'mindmap': return !!storeDirs.mindmaps && samePath(`${storeDirs.mindmaps}\\${other.view.store()}.md`, path);
+    case 'erd': return !!storeDirs.erds && samePath(`${storeDirs.erds}\\${other.view.store()}.mmd`, path);
+    case 'todo': return !!storeDirs.todos && samePath(`${storeDirs.todos}\\${other.view.store()}.md`, path);
     default: return false;
   }
 }
@@ -3841,6 +3853,8 @@ function sendPrompt() {
   const text = $text.value.replace(/\s+$/, '');
   if (!s || !text) return;
   if (s.exited) return setStatus('이 세션은 종료됐습니다. 쓰던 글은 편집기에 그대로 있으니 복사해서 다른 세션에 쓰세요.');
+  // 재개하지 못해 쉬고 있는 세션에는 받을 프로세스가 없다(보내면 글만 사라진다).
+  if (s.dormant) return setStatus('이 세션은 재개하지 못해 쉬고 있습니다. 사이드바에서 세션을 눌러 재개한 뒤 보내세요. 쓰던 글은 편집기에 그대로 있습니다.');
   s.term.paste(text); // 여러 줄도 한 번의 붙여넣기로 들어간다.
   rememberPrompt(text);
   promptAt = -1;
@@ -3874,7 +3888,11 @@ function writeState() {
   const live = [...sessions.values()].filter((s) => (isTerm(s) ? s.dormant || !s.exited : !!s.view));
   const state = {
     // 되살리지 못한 항목의 기록은 그대로 다시 적는다(순번이 배치와 어긋나지 않게 맨 뒤에 둔다).
-    sessions: [...live.map((s) => ({ ...describe(s), shown: visible.includes(s) })), ...unrestored],
+    // 항목 하나의 화면이 상태를 내놓다 실패해도 저장 전체가 멈추지 않게, 그 항목은 지난번에 적은 내용을 그대로 쓴다.
+    sessions: [...live.map((s) => {
+      try { s.lastRecord = describe(s); } catch (err) { console.error('항목의 상태를 읽지 못했습니다', s.kind, err); }
+      return s.lastRecord ? { ...s.lastRecord, shown: visible.includes(s) } : null;
+    }), ...unrestored],
     active: live.indexOf(active),
     // 화면 분할 모양. 잎은 세션의 순번({ i }), 가지는 { dir, a, b }.
     layout: (function pack(node) {
@@ -3952,7 +3970,14 @@ async function restore({ docsOnly = false } = {}) {
         // 터미널 세션은 프로세스를 띄우지 않고 사이드바에만 되살려 둔다(쉬는 세션). 사용자가 누른 것만 재개한다.
         // 설정의 [session] restore_on_click = false이면 예전처럼 모두 바로 띄운다.
         const dormant = term && config.session.restore_on_click !== false;
-        restored.push(term && docsOnly ? null : await revive(item, { show: 'hidden', restoring: true, dormant }));
+        const skip = term && docsOnly;
+        const s = skip ? null : await revive(item, { show: 'hidden', restoring: true, dormant });
+        restored.push(s);
+        // 오류 없이 되살아나지 못한 항목도 기록을 남겨 둔다: 설정 파일에 오류가 있어 기본값으로 뜬 동안에는 사용자가 만든
+        // 프로필이 없어 그 세션을 만들지 못하는데, 그대로 저장하면 설정을 고친 뒤에도 돌아오지 않는다(별칭·이어 갈 대화까지).
+        // 프로필을 정말 지운 경우에 끝없이 남지 않도록 몇 번 해 보고 그만둔다.
+        const missed = (item?.missed || 0) + 1;
+        if (!s && !skip && item && typeof item === 'object' && missed <= 5) unrestored.push({ ...item, shown: false, missed });
       } catch (err) {
         console.error('항목을 되살리지 못했습니다', item, err);
         restored.push(null);
@@ -3987,6 +4012,9 @@ function send(s, data) {
   const targets = casting.includes(s) ? casting : [s];
   const interrupts = data === '\x1b' || data === '\x03'; // Esc, Ctrl+C
   for (const t of targets) {
+    // 프로세스가 없는 세션(재개에 실패해 다시 쉬고 있거나 시작하지 못한 것)에 친 키는 받지 않는다.
+    // 쌓아 두면 나중에 재개했을 때 예전에 친 글이 Enter까지 한꺼번에 들어간다.
+    if (t.id == null && (t.dormant || t.exited)) continue;
     // 일하는 중에 누른 Esc·Ctrl+C는 요청을 중단시킬 수 있다. 조금 뒤 조용해졌는지 보고 작업 시간을 멈춘다(refreshActivity).
     if (interrupts && t.workStart) t.interruptAt = performance.now();
     t.pending += data;
@@ -4648,7 +4676,8 @@ window.addEventListener('keydown', (ev) => {
   const combo = ev.ctrlKey && ev.shiftKey && !ev.altKey;
   // 북마크: Ctrl+Shift+숫자로 지금 항목에 숫자를 붙이고, Ctrl+숫자로 그 항목에 간다.
   // Shift를 누르면 글쇠가 내는 글자가 바뀌므로(1 → !) 글쇠의 자리로 본다.
-  const digit = /^(?:Digit|Numpad)(\d)$/.exec(ev.code)?.[1];
+  // 숫자판은 NumLock이 꺼져 있으면 Home·End·방향 글쇠다(글쇠의 자리는 그대로 Numpad7·Numpad1…). 그때는 숫자로 보지 않는다.
+  const digit = /^Digit(\d)$/.exec(ev.code)?.[1] ?? (/^\d$/.test(ev.key) ? /^Numpad(\d)$/.exec(ev.code)?.[1] : undefined);
   let handled = true;
   if (digit && combo) setMark(active, digit);
   // 그 숫자의 북마크가 없으면 가로채지 않는다(Ctrl+0은 문서·ERD·마인드맵·메모에서 기본 크기·전체 맞춤이기도 하다).
@@ -4671,8 +4700,9 @@ window.addEventListener('keydown', (ev) => {
   else if (combo && key === 'r') reopenLast();
   else if (combo && key === 'a') showNotices();
   else if (key === 'f1') showHelp();
-  else if (combo && key === 'arrowright') focusPane(1);
-  else if (combo && key === 'arrowleft') focusPane(-1);
+  // 창을 나눠 보고 있을 때만 가로챈다. 하나만 보고 있으면 옮길 창이 없으니 낱말 단위 선택(편집기·터미널)으로 넘긴다.
+  else if (combo && key === 'arrowright' && visible.length > 1) focusPane(1);
+  else if (combo && key === 'arrowleft' && visible.length > 1) focusPane(-1);
   else if (ev.ctrlKey && key === 'tab') cycle(ev.shiftKey ? -1 : 1);
   // 터미널 밖에서 새로 고침이 눌리면 세션 화면이 날아가므로 막는다.
   // (메모에서는 F5가 시간/날짜, Ctrl+R이 바꾸기라서 메모가 직접 처리한다.)

@@ -755,12 +755,14 @@ export function createReader(item, host, saved = {}, onChange = () => {}) {
   }
 
   async function back() {
-    const last = trail[trail.length - 1];
-    if (!last) return;
-    if (await load(last.path, { scroll: last.scroll })) {
+    // 지워지거나 이름이 바뀐 문서는 건너뛰고 그 앞의 문서로 간다(그 기록에 막혀 더 앞으로 돌아가지 못하지 않게).
+    while (trail.length) {
+      const last = trail[trail.length - 1];
+      const ok = await load(last.path, { scroll: last.scroll });
       trail.pop();
-      refreshBar();
+      if (ok) break;
     }
+    refreshBar();
   }
 
   /** 웹 주소나 파일을 앱의 링크 열기로 넘긴다(웹 주소는 기본 브라우저, 파일은 연결 프로그램·탐색기). */

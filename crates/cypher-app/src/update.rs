@@ -309,8 +309,18 @@ static INSTALLED: std::sync::Mutex<Option<String>> = std::sync::Mutex::new(None)
 /// 지난 업데이트가 남긴 것을 치운다: 이름을 바꿔 둔 옛 파일과 내려받은 묶음. 시작할 때 부른다.
 pub fn clean_leftovers() {
     clean_old_files();
+    // 내려받던 폴더는 프로세스마다 따로 둔다(`update\<번호>`). 다른 Cypher 창이 지금 내려받고 있을 수 있으므로
+    // 오래된 것만 지운다(통째로 지우면 그 창의 설치가 "묶음을 풀지 못했습니다"로 실패한다).
     if let Some(dir) = crate::data_dir() {
-        let _ = std::fs::remove_dir_all(dir.join("update"));
+        let update = dir.join("update");
+        for entry in std::fs::read_dir(&update).into_iter().flatten().flatten() {
+            let old = entry.metadata().and_then(|meta| meta.modified()).ok().and_then(|at| at.elapsed().ok()).is_some_and(|age| age > STALE_WORK);
+            if old {
+                let path = entry.path();
+                let _ = if path.is_dir() { std::fs::remove_dir_all(&path) } else { std::fs::remove_file(&path) };
+            }
+        }
+        let _ = std::fs::remove_dir(&update); // 비었을 때만 지워진다.
     }
     // "다시 시작"으로 떴으면 앞선 창이 아직 떠 있어 옛 실행 파일이 지워지지 않는다. 그 창이 닫혔을 즈음 한 번 더 치운다.
     std::thread::spawn(|| {
@@ -319,8 +329,15 @@ pub fn clean_leftovers() {
     });
 }
 
+/// 내려받던 폴더를 "남은 것"으로 보고 지우기까지의 시간.
+const STALE_WORK: Duration = Duration::from_secs(60 * 60);
+
 /// 실행 파일 폴더에서 업데이트가 이름을 바꿔 둔 옛 파일을 지운다.
 fn clean_old_files() {
+    // 이 프로세스가 지금 파일을 바꾸고 있으면 건드리지 않는다: 방금 이름을 바꿔 둔 옛 파일은 놓기에 실패했을 때 되돌릴 원본이다.
+    if INSTALLING.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
     if let Ok(dir) = install_dir() {
         for entry in std::fs::read_dir(dir).into_iter().flatten().flatten() {
             if is_leftover(&entry.file_name().to_string_lossy()) && entry.path().is_file() {
@@ -393,7 +410,7 @@ fn install_latest(report: Report) -> Result<String, String> {
         return Err(reason);
     }
     let asset = release.asset.as_ref().ok_or("묶음이 없습니다")?;
-    let work = crate::data_dir().ok_or("내려받을 폴더를 찾지 못했습니다")?.join("update");
+    let work = crate::data_dir().ok_or("내려받을 폴더를 찾지 못했습니다")?.join("update").join(std::process::id().to_string());
     let target = install_dir()?;
     // 창을 닫았다 다시 열어 한 번 더 누르면 설치가 겹칠 수 있다. 둘은 같은 작업 폴더를 쓰므로 하나만 돌게 한다.
     use std::sync::atomic::Ordering;

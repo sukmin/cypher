@@ -504,6 +504,8 @@ fn tokens(text: &str) -> Result<Vec<&str>, String> {
 }
 
 const MAX_DEPTH: usize = 12;
+/// 값을 채운 글 하나의 길이 한도.
+const MAX_EXPANDED: usize = 4 << 20;
 /// 내장 값의 이름들.
 const BUILTINS: [&str; 18] = [
     "timestamp", "timestampMs", "isoTimestamp", "httpDate", "uuid", "random.uuid", "randomInt", "method", "url", "host",
@@ -579,6 +581,15 @@ impl<'a> Scope<'a> {
                 Filled::Value(value) => {
                     out.push_str(&value);
                     rest = &after[close + 2..];
+                    // 변수가 서로를 여러 번 부르면 단계마다 곱으로 불어난다(10번씩 10단이면 10^10배).
+                    // 깊이만으로는 막지 못하므로 채운 글의 길이에 한도를 두고, 넘으면 남은 것은 채우지 않는다.
+                    if out.len() > MAX_EXPANDED {
+                        let problem = format!("값을 채운 글이 너무 깁니다({}MB까지). 변수가 서로를 여러 번 불러 불어나지 않는지 확인하세요", MAX_EXPANDED >> 20);
+                        if !self.problems.contains(&problem) {
+                            self.problems.push(problem);
+                        }
+                        break;
+                    }
                 }
                 Filled::Failed => {
                     out.push_str("{{");
@@ -974,6 +985,11 @@ mod tests {
         // 자기 자신·서로를 쓰는 변수는 끝없이 불어나지 않는다.
         let request = one("@a = {{a}}{{a}}{{a}}\n@b = {{c}}{{c}}\n@c = {{b}}{{b}}\nPOST https://a.example/x\n\n{{a}} {{b}}\n");
         assert!(request.body.len() < 200, "{}", request.body.len());
+        // 서로 다른 변수를 여러 번씩 부르는 사슬(10번씩 9단 = 10억 배)도 메모리를 다 쓰지 않고 문제로 알린다.
+        let chain: String = (0..9).map(|n| format!("@v{n} = {}\n", format!("{{{{v{}}}}}", n + 1).repeat(10))).collect();
+        let request = one(&format!("{chain}@v9 = 0123456789\nPOST https://a.example/x\n\n{{{{v0}}}}\n"));
+        assert!(request.body.len() < 64 << 20, "{}", request.body.len());
+        assert!(request.problems.iter().any(|problem| problem.contains("너무 깁니다")), "{:?}", request.problems);
         // JSON 중괄호와 붙은 변수, 떠도는 `{{` 뒤의 변수도 채운다.
         assert_eq!(one("@x = \"k\":1\nPOST https://a.example/x\n\n{\"a\":{{{x}}}}\n").body, "{\"a\":{\"k\":1}}");
         assert_eq!(one("@h = H\nPOST https://a.example/x\n\n{\"t\": \"{{\", \"v\": {\"w\": \"{{h}}\"}}\n").body, "{\"t\": \"{{\", \"v\": {\"w\": \"H\"}}");

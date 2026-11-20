@@ -34,7 +34,7 @@ const SPECS = {
     types: words('Any Boolean Byte Char Short Int Long Float Double Unit Nothing String List Map Set Array'),
     consts: words('true false null'),
     defAfter: words('class interface object fun val var typealias'),
-    line: ['//'], doc: ['/**'], block: ['/*', '*/'], nested: true, quotes: { '"': 'line', "'": 'line' }, triple: '"""', at: true,
+    line: ['//'], doc: ['/**'], block: ['/*', '*/'], nested: true, quotes: { '"': 'line', "'": 'line' }, triple: '"""', tripleRaw: ['"""'], at: true,
   },
   js: {
     kw: words('async await break case catch class const continue debugger default delete do else export extends finally for from function get if import in instanceof let new of return set static super switch this throw try typeof var void while with yield as type interface enum implements declare namespace abstract readonly public private protected keyof infer is satisfies override'),
@@ -80,7 +80,7 @@ const SPECS = {
   shell: {
     kw: words('if then else elif fi for while until do done case esac in function select return exit break continue local export readonly declare unset shift source alias set echo cd'),
     consts: words('true false'),
-    line: ['#'], quotes: { '"': 'multi', "'": 'multi' }, raw: "'", dollarVar: true,
+    line: ['#'], quotes: { '"': 'multi', "'": 'multi' }, raw: "'", dollarVar: true, backslash: true,
   },
   // 배치 파일: 작은따옴표는 문자열이 아니고(REM don't …), REM·::로 시작하는 줄이 주석이다.
   batch: {
@@ -94,7 +94,7 @@ const SPECS = {
   },
   json: { consts: words('true false null'), line: ['//'], block: ['/*', '*/'], quotes: { '"': 'line' }, keys: ':' },
   yaml: { consts: words('true false null yes no on off ~'), hashAlone: true, line: ['#'], quotes: { '"': 'line', "'": 'line' }, keys: ':', bareKeys: true },
-  toml: { consts: words('true false'), line: ['#'], quotes: { '"': 'line', "'": 'line' }, triple: ['"""', "'''"], keys: '=', bareKeys: true, sections: true },
+  toml: { consts: words('true false'), line: ['#'], quotes: { '"': 'line', "'": 'line' }, triple: ['"""', "'''"], tripleRaw: ["'''"], keys: '=', bareKeys: true, sections: true },
   ini: { line: ['#', ';'], quotes: { '"': 'line' }, keys: '=', bareKeys: true, sections: true },
   groovy: {
     kw: words('abstract as assert break case catch class continue def default do else enum extends final finally for if implements import in instanceof interface new package private protected public return static super switch this throw throws trait try while'),
@@ -197,6 +197,8 @@ const NUMBER = /0[xX][\da-fA-F_]+[uUlLn]*|0[bB][01_]+[uUlLn]*|0[oO][0-7_]+|\d[\d
 const SPACE = /\s+/y;
 /** 이보다 긴 줄은 강조하지 않는다(한 줄로 줄인 CSS·JSON처럼 수십만 자인 줄에서 화면이 멈추지 않게). */
 const MAX_LINE = 5000;
+/** 이보다 긴 줄은 상태(여러 줄 주석·문자열)도 읽지 않는다. */
+const MAX_STATE_LINE = 100000;
 
 /** 일반 언어 한 줄을 읽는다. `state`는 앞줄에서 이어진 것(여러 줄 주석·문자열)이고, 읽고 난 상태를 그 자리에 고쳐 둔다. */
 function clikeLine(spec, line, state, out, base = 0, end = line.length) {
@@ -243,7 +245,15 @@ function clikeLine(spec, line, state, out, base = 0, end = line.length) {
         while (k < end && depth) { if (line[k] === '{') depth += 1; else if (line[k] === '}') depth -= 1; k += 1; }
         push(start, j, 'str');
         push(j, j + 2, 'esc');
-        if (!depth) { clikeLine(spec, line, { block: 0, str: null }, out, j + 2, k - 1); push(k - 1, k, 'esc'); }
+        if (depth) {
+          // 이 줄에서 닫히지 않는 `${ … }`: 닫는 중괄호를 만날 때까지 코드로 읽고, 거기서 이 문자열로 돌아온다.
+          // (문자열 안으로 두면, 그 안에 겹쳐 쓴 템플릿의 백틱을 바깥 것의 끝으로 읽어 파일 끝까지 여닫이가 뒤집힌다.)
+          (state.tpl ||= []).push({ str, depth: 1 });
+          state.str = null;
+          return j + 2;
+        }
+        clikeLine(spec, line, { block: 0, str: null }, out, j + 2, k - 1);
+        push(k - 1, k, 'esc');
         j = k;
         start = j;
         continue;
@@ -287,7 +297,10 @@ function clikeLine(spec, line, state, out, base = 0, end = line.length) {
 
     // 문자열
     const triple = spec.triple && [].concat(spec.triple).find((mark) => line.startsWith(mark, i));
-    if (triple) { push(i, i + triple.length, 'str'); i = readString({ close: triple, multi: true }, i + triple.length); prevSignificant = '"'; continue; }
+    // Kotlin의 `"""`와 TOML의 `'''`는 날 문자열이다(역슬래시가 이스케이프가 아니다: `"""C:\Users\"""`).
+    if (triple) { push(i, i + triple.length, 'str'); i = readString({ close: triple, multi: true, raw: !!spec.tripleRaw?.includes(triple) }, i + triple.length); prevSignificant = '"'; continue; }
+    // 셸: 문자열 밖의 `\'`·`\"`는 따옴표 글자다(문자열을 열지 않는다).
+    if (spec.backslash && ch === '\\' && i + 1 < end) { i += 2; prevSignificant = 'a'; prevWord = ''; continue; }
     if (spec.rust && (ch === 'r' || ch === 'b')) {
       // 날 문자열 r"…", r#"…"#, 바이트 문자열 b"…", br#"…"#
       const m = /^(?:br|r)(#*)"/.exec(line.slice(i, i + 12));
@@ -333,8 +346,17 @@ function clikeLine(spec, line, state, out, base = 0, end = line.length) {
     }
     if (spec.rust && ch === '#' && (line[i + 1] === '[' || (line[i + 1] === '!' && line[i + 2] === '['))) {
       // #[derive(Debug)] — 같은 줄에서 닫히는 데까지.
+      // 속성 안의 문자열은 건너뛴다(`#[token("]")]`의 `]`에서 속성이 끝나면, 남은 따옴표가 여러 줄 문자열을 연다).
       let depth = 0, j = i;
-      while (j < end) { if (line[j] === '[') depth += 1; else if (line[j] === ']') { depth -= 1; if (!depth) { j += 1; break; } } j += 1; }
+      while (j < end) {
+        if (line[j] === '"') {
+          j += 1;
+          while (j < end && line[j] !== '"') j += line[j] === '\\' ? 2 : 1;
+        } else if (line[j] === '[') depth += 1;
+        else if (line[j] === ']') { depth -= 1; if (!depth) { j += 1; break; } }
+        j += 1;
+      }
+      j = Math.min(j, end);
       push(i, j, 'ann');
       i = j;
       continue;
@@ -399,6 +421,19 @@ function clikeLine(spec, line, state, out, base = 0, end = line.length) {
       continue;
     }
 
+    // 여러 줄에 걸친 `${ … }` 안: 중괄호의 짝을 세다가 닫히면 그 템플릿 문자열로 돌아간다.
+    if (state.tpl?.length && (ch === '{' || ch === '}')) {
+      const top = state.tpl[state.tpl.length - 1];
+      if (ch === '{') top.depth += 1;
+      else if (--top.depth === 0) {
+        state.tpl.pop();
+        push(i, i + 1, 'esc');
+        i = readString(top.str, i + 1);
+        prevSignificant = '"';
+        prevWord = '';
+        continue;
+      }
+    }
     // JSON·YAML의 따옴표 없는 값, 그 밖의 기호
     prevSignificant = ch;
     prevWord = '';
@@ -623,26 +658,33 @@ function markdownLine(line, state, out) {
 export function tokenize(lang, lines) {
   const result = new Array(lines.length);
   if (lang === 'plain') return result.fill(null);
-  const tooLong = (n) => lines[n].length > MAX_LINE && ((result[n] = null), true);
+  // 긴 줄은 강조하지 않는다(조각을 만들지 않는다). 그래도 여러 줄 주석·문자열의 여닫이는 따라가야 그 아래 줄들이
+  // 뒤집히지 않으므로, 조각은 버리고 상태만 읽는다. 아주 긴 줄(한 줄로 줄인 파일)은 그것도 하지 않는다.
+  const tooLong = (n, skim) => {
+    if (lines[n].length <= MAX_LINE) return false;
+    result[n] = null;
+    if (lines[n].length <= MAX_STATE_LINE) skim(lines[n], []);
+    return true;
+  };
   if (lang === 'html' || lang === 'xml' || lang === 'vue') {
     const state = { mode: 'text', quote: '', tagName: '', inner: null };
-    for (let n = 0; n < lines.length; n++) { if (tooLong(n)) continue; const out = []; markupLine(lines[n], state, out, lang === 'vue'); result[n] = sorted(out); }
+    for (let n = 0; n < lines.length; n++) { if (tooLong(n, (line, out) => markupLine(line, state, out, lang === 'vue'))) continue; const out = []; markupLine(lines[n], state, out, lang === 'vue'); result[n] = sorted(out); }
     return result;
   }
   if (lang === 'css') {
     const state = { block: 0, depth: 0, value: false };
-    for (let n = 0; n < lines.length; n++) { if (tooLong(n)) continue; const out = []; cssLine(lines[n], state, out); result[n] = sorted(out); }
+    for (let n = 0; n < lines.length; n++) { if (tooLong(n, (line, out) => cssLine(line, state, out))) continue; const out = []; cssLine(lines[n], state, out); result[n] = sorted(out); }
     return result;
   }
   if (lang === 'markdown') {
     const state = { fence: '' };
-    for (let n = 0; n < lines.length; n++) { if (tooLong(n)) continue; const out = []; markdownLine(lines[n], state, out); result[n] = sorted(out); }
+    for (let n = 0; n < lines.length; n++) { if (tooLong(n, (line, out) => markdownLine(line, state, out))) continue; const out = []; markdownLine(lines[n], state, out); result[n] = sorted(out); }
     return result;
   }
   const spec = SPECS[lang] || SPECS.plain;
   const state = { block: 0, doc: false, str: null };
   for (let n = 0; n < lines.length; n++) {
-    if (tooLong(n)) continue;
+    if (tooLong(n, (line, out) => clikeLine(spec, line, state, out))) continue;
     const out = [];
     clikeLine(spec, lines[n], state, out);
     if (spec.keys === ':' && !spec.bareKeys) markQuotedKeys(lines[n], out);

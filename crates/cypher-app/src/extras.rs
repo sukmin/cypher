@@ -82,11 +82,12 @@ fn parse_status(raw: &str) -> Vec<Change> {
         let (Some(code), Some(path)) = (entry.get(..2), entry.get(3..)) else { continue };
         let status = match code {
             "??" => "새 파일",
+            // 충돌을 가장 먼저 본다: `DU`·`UD`·`DD`가 "삭제"로, `AU`·`UA`·`AA`가 "추가"로 보이면 안 된다.
+            c if is_conflict(c) => "충돌",
             c if c.contains('R') => "이름 변경",
             c if c.contains('C') => "복사",
             c if c.contains('D') => "삭제",
             c if c.contains('A') => "추가",
-            c if c.contains('U') => "충돌",
             _ => "수정",
         };
         // 이름 변경·복사는 원래 경로가 바로 뒤에 따라온다.
@@ -94,6 +95,28 @@ fn parse_status(raw: &str) -> Vec<Change> {
         files.push(Change { status, path: path.to_string(), untracked: code == "??", from, code: code.to_string() });
     }
     files
+}
+
+/// 풀리지 않은 충돌을 뜻하는 상태 두 글자인지(`UU`·`AU`·`UD`…, 양쪽이 더한 `AA`, 양쪽이 지운 `DD`).
+fn is_conflict(code: &str) -> bool {
+    code.contains('U') || code == "AA" || code == "DD"
+}
+
+/// 색인에서만 지운 파일인지(`git rm --cached`): 색인 쪽은 지움인데 작업 폴더에는 파일이 남아 있다.
+/// 이런 파일은 경로를 붙인 `checkout`·`commit`이 작업 폴더의 내용을 덮거나 다시 읽으므로 따로 다룬다.
+fn only_unstaged_from_index(root: &Path, change: &Change) -> bool {
+    change.code.starts_with('D') && root.join(&change.path).symlink_metadata().is_ok()
+}
+
+/// `folder`에서 `cdup`(`../../` 꼴)만큼 위로 올라간 폴더. 연결(정션·심볼릭 링크)을 풀지 않고 글자로만 올라간다.
+fn climb(folder: &Path, cdup: &str) -> PathBuf {
+    let mut root = folder.to_path_buf();
+    for part in cdup.split(['/', '\\']).filter(|part| !part.is_empty()) {
+        if part == ".." {
+            root.pop();
+        }
+    }
+    root
 }
 
 /// 저장소 전체의 바뀐 파일 목록.
@@ -111,9 +134,14 @@ fn is_repo_path(path: &str) -> bool {
 #[tauri::command]
 pub async fn git_changes(cwd: String) -> Result<Changes, String> {
     let cwd = Path::new(&cwd);
-    let root = git(cwd, &["rev-parse", "--show-toplevel"], &[0])
+    let top = git(cwd, &["rev-parse", "--show-toplevel"], &[0])
         .map_err(|_| "git 저장소가 아닌 폴더입니다".to_string())?;
-    let root = root.trim().to_string();
+    // `--show-toplevel`은 연결(정션·심볼릭 링크)을 풀어낸 실제 경로를 준다. 화면은 연 폴더의 표기로 경로를 견주므로
+    // (코드 보기의 바뀐 파일 표시), 받은 폴더에서 위로 올라간 만큼(`--show-cdup`)으로 맨 위 폴더를 구한다.
+    let root = match git(cwd, &["rev-parse", "--show-cdup"], &[0]) {
+        Ok(cdup) if cwd.is_absolute() => climb(cwd, cdup.trim()).to_string_lossy().replace('\\', "/"),
+        _ => top.trim().to_string(),
+    };
     let branch = git(cwd, &["branch", "--show-current"], &[0]).unwrap_or_default().trim().to_string();
     let files = status_of(Path::new(&root))?;
     Ok(Changes { root, branch, files })
@@ -123,13 +151,15 @@ pub async fn git_changes(cwd: String) -> Result<Changes, String> {
 #[tauri::command]
 pub async fn git_diff(root: String, path: String, untracked: bool) -> Result<String, String> {
     let root = Path::new(&root);
+    // 사용자가 바깥 차이 도구(diff.external)를 설정했어도 git의 차이 글을 받는다(그 도구의 출력은 차이로 그릴 수 없고,
+    // 창을 띄우는 도구면 닫을 때까지 돌아오지 않는다).
     let mut text = if untracked {
         // --no-index는 차이가 있으면 종료 코드 1을 낸다.
-        git(root, &["diff", "--no-color", "--no-index", "--", "/dev/null", &path], &[0, 1])?
+        git(root, &["diff", "--no-color", "--no-ext-diff", "--no-index", "--", "/dev/null", &path], &[0, 1])?
     } else {
         // 커밋이 하나도 없는 저장소에서는 HEAD가 없으므로 색인과 비교한다.
-        git(root, &["diff", "--no-color", "HEAD", "--", &path], &[0])
-            .or_else(|_| git(root, &["diff", "--no-color", "--", &path], &[0]))?
+        git(root, &["diff", "--no-color", "--no-ext-diff", "HEAD", "--", &path], &[0])
+            .or_else(|_| git(root, &["diff", "--no-color", "--no-ext-diff", "--", &path], &[0]))?
     };
     if text.len() > MAX_DIFF_BYTES {
         let mut cut = MAX_DIFF_BYTES;
@@ -389,9 +419,16 @@ fn revert(root: &Path, path: &str, keep: &Path) -> Result<String, String> {
     if change.untracked {
         return Err("새 파일은 되돌릴 원본이 없습니다. 지우려면 탐색기에서 지우세요".into());
     }
-    // 고쳤거나(M), 지웠거나(D), 종류가 바뀐(T) 파일만 되돌린다.
-    if !change.code.chars().all(|c| matches!(c, ' ' | 'M' | 'D' | 'T')) {
+    // 고쳤거나(M), 지웠거나(D), 종류가 바뀐(T) 파일만 되돌린다. 양쪽이 지운 충돌(DD)도 받지 않는다.
+    if is_conflict(&change.code) || !change.code.chars().all(|c| matches!(c, ' ' | 'M' | 'D' | 'T')) {
         return Err(format!("이 상태({})의 파일은 되돌리기를 지원하지 않습니다. 터미널에서 git으로 되돌리세요", change.status));
+    }
+    // 색인에서만 지운 파일은 작업 폴더의 파일이 차이에 잡히지 않는다(보관할 수 없다). 그대로 checkout하면
+    // 그 파일을 마지막 커밋의 내용으로 덮어 고친 내용이 사라진다.
+    if only_unstaged_from_index(root, change) {
+        return Err(format!(
+            "색인에서만 지운 파일입니다(작업 폴더에는 남아 있습니다). 되돌리면 지금 내용이 덮이므로 되돌리지 않습니다. 터미널에서 `git reset -- \"{path}\"`로 색인만 되돌리세요"
+        ));
     }
     // 하위 모듈은 checkout이 성공으로 끝나도 안의 변경이 그대로 남는다("되돌렸습니다"라고 하면 거짓이 된다).
     if root.join(path).is_dir() {
@@ -456,14 +493,18 @@ fn commit(root: &Path, paths: &[String], message: &str) -> Result<String, String
     let changes = status_of(root)?;
     let mut stage: Vec<&str> = Vec::new(); // 색인에 올려야 하는 것: 새 파일, 작업 폴더 쪽에 변경이 남은 것
     let mut all: Vec<&str> = Vec::new(); // 커밋할 경로: 고른 것과, 이름 변경의 원래 경로
+    let mut index_only: Option<&str> = None; // 색인에서만 지운 파일(경로를 붙여 커밋할 수 없다)
     for path in paths {
         if all.contains(&path.as_str()) {
             continue;
         }
         all.push(path);
         let Some(change) = changes.iter().find(|c| &c.path == path) else { continue };
-        if change.code.contains('U') || change.code == "AA" || change.code == "DD" {
+        if is_conflict(&change.code) {
             return Err(format!("충돌이 풀리지 않은 파일이 있습니다: {path}. 충돌을 푼 뒤에 커밋하세요"));
+        }
+        if only_unstaged_from_index(root, change) {
+            index_only = Some(path);
         }
         if change.untracked || !change.code.ends_with(' ') {
             stage.push(path);
@@ -479,13 +520,35 @@ fn commit(root: &Path, paths: &[String], message: &str) -> Result<String, String
     if all.iter().map(|p| p.len() + 3).sum::<usize>() + message.len() > MAX_ARGS_CHARS {
         return Err("한 번에 커밋하기에는 고른 파일이 너무 많습니다. 나눠서 커밋하거나 터미널에서 커밋하세요".into());
     }
+    // 경로를 붙인 커밋을 쓸 수 없는 때가 둘 있다: 병합 중(git이 "partial commit during a merge"로 거절한다)과
+    // 색인에서만 지운 파일(경로를 붙이면 작업 폴더의 파일을 다시 읽어 지움이 없던 일이 된다). 이때는 색인을 통째로
+    // 커밋해야 하므로, 색인에 올라 있는 변경이 모두 고른 파일일 때만 받는다(고르지 않은 것이 딸려 가면 안 된다).
+    let merging = run_git(root, &["rev-parse", "-q", "--verify", "MERGE_HEAD"], true).is_ok_and(|out| out.status.success());
+    let whole_index = merging || index_only.is_some();
+    if whole_index {
+        let left_out = changes.iter().find(|c| !c.untracked && !c.code.starts_with(' ') && !all.contains(&c.path.as_str()));
+        if let Some(other) = left_out {
+            return Err(if merging {
+                format!("병합 중에는 일부 파일만 커밋할 수 없습니다(고르지 않은 {}이(가) 색인에 올라 있습니다). 색인에 올라 있는 파일을 모두 고르거나 터미널에서 커밋하세요", other.path)
+            } else {
+                format!(
+                    "색인에서만 지운 파일({})은 다른 파일과 따로 커밋할 수 없습니다(고르지 않은 {}이(가) 색인에 올라 있습니다). 색인에 올라 있는 파일을 모두 고르거나 터미널에서 커밋하세요",
+                    index_only.unwrap_or_default(),
+                    other.path
+                )
+            });
+        }
+    }
     if !stage.is_empty() {
         let mut args = vec!["add", "-A", "--"];
         args.extend(&stage);
         git_write(root, &args)?;
     }
-    let mut args = vec!["commit", "-m", message, "--"];
-    args.extend(&all);
+    let mut args = vec!["commit", "-m", message];
+    if !whole_index {
+        args.push("--");
+        args.extend(&all);
+    }
     git_write(root, &args)?;
     Ok(git(root, &["log", "-1", "--format=%h %s"], &[0]).unwrap_or_default().trim().to_string())
 }
@@ -520,10 +583,11 @@ pub async fn save_text(name: String, text: String) -> Result<Option<String>, Str
 /// Claude Code가 폴더별 대화 기록을 두는 폴더 이름: 영문·숫자가 아닌 글자를 모두 `-`로 바꾼다.
 /// `C:\workspace\cypher` → `C--workspace-cypher`
 pub(crate) fn project_dir_name(cwd: &str) -> String {
-    cwd.trim_end_matches(['\\', '/'])
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+    let trimmed = cwd.trim_end_matches(['\\', '/']);
+    // 드라이브 맨 위 폴더(`C:\`)는 끝의 구분자까지가 경로다(Claude Code는 `C--`로 적는다).
+    let path = if trimmed.ends_with(':') { &cwd[..(trimmed.len() + 1).min(cwd.len())] } else { trimmed };
+    // Claude Code는 UTF-16 단위마다 바꾼다: 이모지처럼 두 단위짜리 글자는 `-` 둘이 된다.
+    path.encode_utf16().map(|unit| if unit < 128 && (unit as u8).is_ascii_alphanumeric() { unit as u8 as char } else { '-' }).collect()
 }
 
 pub(crate) fn claude_home() -> Option<PathBuf> {
@@ -760,6 +824,63 @@ mod tests {
         // 바뀐 것이 없는 파일, 저장소 밖 경로.
         assert!(revert(&dir, "a.txt", &keep).is_err());
         assert!(revert(&dir, "../밖.txt", &keep).is_err());
+
+        // 색인에서만 지운 파일(작업 폴더에는 고친 내용이 남아 있다)은 덮지 않고 거절한다.
+        write(&dir, "a.txt", "색인에서 지운 뒤에도 남은 고친 내용\n");
+        git_write(&dir, &["rm", "-q", "--cached", "--", "a.txt"]).unwrap();
+        assert!(revert(&dir, "a.txt", &keep).unwrap_err().contains("색인에서만"));
+        assert_eq!(read(&dir, "a.txt"), "색인에서 지운 뒤에도 남은 고친 내용\n");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 충돌은_삭제나_추가로_보이지_않는다() {
+        let raw = "UU both.rs\0DU ours-gone.rs\0UD theirs-gone.rs\0AA both-added.rs\0DD both-gone.rs\0AU a.rs\0UA b.rs\0";
+        assert!(parse_status(raw).iter().all(|c| c.status == "충돌"));
+        assert_eq!(climb(Path::new(r"C:\link\repo\src\ui"), "../../"), Path::new(r"C:\link\repo"));
+        assert_eq!(climb(Path::new(r"C:\link\repo"), ""), Path::new(r"C:\link\repo"));
+    }
+
+    #[test]
+    fn 병합_중이거나_색인에서만_지운_파일은_색인을_통째로_커밋한다() {
+        let dir = test_repo("merge");
+        write(&dir, "a.txt", "하나\n");
+        write(&dir, "b.txt", "둘\n");
+        write(&dir, "c.txt", "셋\n");
+        let all: Vec<String> = ["a.txt", "b.txt", "c.txt"].map(String::from).to_vec();
+        commit(&dir, &all, "처음").unwrap();
+        let main = git(&dir, &["branch", "--show-current"], &[0]).unwrap().trim().to_string();
+
+        // 다른 가지에서 a.txt·b.txt를 고치고, 원래 가지에서도 a.txt를 고쳐 충돌을 만든다.
+        git_write(&dir, &["checkout", "-q", "-b", "other"]).unwrap();
+        write(&dir, "a.txt", "다른 가지\n");
+        write(&dir, "b.txt", "둘 고침\n");
+        commit(&dir, &all[..2], "다른 가지").unwrap();
+        git_write(&dir, &["checkout", "-q", &main]).unwrap();
+        write(&dir, "a.txt", "원래 가지\n");
+        commit(&dir, &all[..1], "원래 가지").unwrap();
+        assert!(git_write(&dir, &["merge", "other"]).is_err());
+        assert_eq!(status_lines(&dir), vec!["UU a.txt", "M  b.txt"]);
+
+        // 충돌이 남아 있으면 거절하고, 푼 뒤에도 일부만 고르면 거절한다(까닭을 알려 준다).
+        assert!(commit(&dir, &all[..2], "병합").unwrap_err().contains("충돌"));
+        write(&dir, "a.txt", "합친 내용\n");
+        git_write(&dir, &["add", "--", "a.txt"]).unwrap();
+        assert!(commit(&dir, &all[..1], "병합").unwrap_err().contains("병합 중"));
+        // 색인에 올라 있는 것을 모두 고르면 병합 커밋이 만들어진다. 고르지 않은 작업 폴더의 변경은 남는다.
+        write(&dir, "c.txt", "셋 고침(고르지 않음)\n");
+        commit(&dir, &all[..2], "병합").unwrap();
+        assert_eq!(status_lines(&dir), vec![" M c.txt"]);
+        let parents = git(&dir, &["log", "-1", "--format=%P"], &[0]).unwrap();
+        assert_eq!(parents.split_whitespace().count(), 2, "{parents}");
+
+        // 색인에서만 지운 파일: 지움이 커밋되고 파일은 작업 폴더에 남는다. 다른 것이 색인에 올라 있으면 거절한다.
+        git_write(&dir, &["rm", "-q", "--cached", "--", "b.txt"]).unwrap();
+        git_write(&dir, &["add", "--", "c.txt"]).unwrap();
+        assert!(commit(&dir, &["b.txt".to_string()], "추적 그만").unwrap_err().contains("색인에서만"));
+        commit(&dir, &["b.txt".to_string(), "c.txt".to_string()], "추적 그만").unwrap();
+        assert_eq!(status_lines(&dir), vec!["?? b.txt"]);
+        assert_eq!(read(&dir, "b.txt"), "둘 고침\n");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -768,5 +889,9 @@ mod tests {
         assert_eq!(project_dir_name(r"C:\workspace\cypher"), "C--workspace-cypher");
         // 한글·공백·구두점도 글자 하나당 '-' 하나가 된다.
         assert_eq!(project_dir_name(r"C:\내 폴더\my.app\"), "C-------my-app");
+        // 드라이브 맨 위 폴더와, UTF-16 두 단위짜리 글자(이모지).
+        assert_eq!(project_dir_name(r"C:\"), "C--");
+        assert_eq!(project_dir_name("D:"), "D-");
+        assert_eq!(project_dir_name("C:\\a😀b"), "C--a--b");
     }
 }

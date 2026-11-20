@@ -132,6 +132,8 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   let changedOnly = !!saved.changedOnly;
   let back = [], forward = [];
   let fileList = null;            // 프로젝트의 파일 목록(파일 찾기용). 필요할 때 읽는다.
+  let filesStale = false;         // 파일이 생기거나 없어졌을 수 있다(목록을 다음에 쓸 때 다시 읽는다)
+  let filesLoading = null;        // 목록을 읽고 있는 중이면 그 약속
   let panel = null;               // 아래 결과 창에 보이는 것 { title, hits, truncated, query? }
   let sideWidth = Math.min(600, Math.max(140, Number(saved.side) || 250));
   let findOpen = false, findHits = [], findAt = 0;
@@ -679,6 +681,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     git = next;
     diffs = found;
     if (same) return;
+    filesStale = true; // 파일이 생기거나 없어졌을 수 있다: 파일 목록도 다음에 쓸 때 다시 읽는다
     refreshIndexSoon(true); // 파일이 바뀌었다: 색인도 맞춘다
     // 보고 있던 바뀐 곳이 없어졌으면(되돌렸거나 줄이 밀렸다) 이전 내용 창을 닫는다.
     if (peek && !hunkAt(peek.path, peek.line)) peek = null;
@@ -808,16 +811,20 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   /** 그 파일의 바뀐 줄(git 기준): 줄 번호 → 'add'(더한 줄) | 'mod'(고친 줄) | 'del'(이 줄 앞에서 지웠다) */
   async function loadMarks(tab) {
     const change = git.files.get(lower(tab.path));
-    tab.marks = new Map();
-    if (!change || !tab.lines) return;
-    if (change.untracked) { for (let n = 1; n <= tab.lines.length; n++) tab.marks.set(n, 'add'); return; }
+    // 따로 모아 두었다가 끝에서 한 번에 바꾼다. 같은 탭에 두 번 겹쳐 불리면(바뀐 파일 다시 읽기와 파일 다시 읽기가 함께)
+    // 늦게 시작한 쪽의 것만 남긴다(한 표에 섞어 적으면 옛 차이의 줄 표시가 남는다).
+    const marks = new Map();
+    const run = (tab.markRun = (tab.markRun || 0) + 1);
+    const settle = () => { if (tab.markRun === run) tab.marks = marks; };
+    if (!change || !tab.lines) return settle();
+    if (change.untracked) { for (let n = 1; n <= tab.lines.length; n++) marks.set(n, 'add'); return settle(); }
     if (change.status === '이름 변경' || change.status === '복사') {
       for (const hunk of diffs.files.get(lower(tab.path))?.hunks || []) {
-        for (let i = 0; i < hunk.added; i++) tab.marks.set(hunk.line + i, i < hunk.removed ? 'mod' : 'add');
+        for (let i = 0; i < hunk.added; i++) marks.set(hunk.line + i, i < hunk.removed ? 'mod' : 'add');
         const after = hunk.line + hunk.added;
-        if (hunk.removed > hunk.added && after <= tab.lines.length && !tab.marks.has(after)) tab.marks.set(after, 'del');
+        if (hunk.removed > hunk.added && after <= tab.lines.length && !marks.has(after)) marks.set(after, 'del');
       }
-      return;
+      return settle();
     }
     try {
       const diff = await invoke('git_diff', { root: git.root, path: change.rel, untracked: false });
@@ -828,17 +835,18 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
         if (!line || text.startsWith('\\')) continue;
         if (text.startsWith('-')) { removed += 1; continue; }
         if (text.startsWith('+')) {
-          tab.marks.set(line, removed > 0 ? 'mod' : 'add');
+          marks.set(line, removed > 0 ? 'mod' : 'add');
           if (removed > 0) removed -= 1;
           line += 1;
           continue;
         }
-        if (removed > 0 && !tab.marks.has(line)) tab.marks.set(line, 'del');
+        if (removed > 0 && !marks.has(line)) marks.set(line, 'del');
         removed = 0;
         line += 1;
       }
-      if (removed > 0 && line <= tab.lines.length && !tab.marks.has(line)) tab.marks.set(line, 'del');
+      if (removed > 0 && line <= tab.lines.length && !marks.has(line)) marks.set(line, 'del');
     } catch { /* 차이를 읽지 못하면 표시 없이 둔다 */ }
+    settle();
   }
 
   function applyMarks(tab) {
@@ -1478,7 +1486,15 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   // 받는 쪽의 자료형을 따라가 정의를 고르는 해석기(code-nav.js). 색인으로 찾는다(색인을 만드는 중이면 다 만들 때까지 기다린다).
   const nav = createNav({
     invoke, root: () => root, tab: () => current, full, relative, lower, dirOf, nameOf, langOf, enclosing, localDeclaration, rank: rankDefs,
-    files: () => (fileList ? Promise.resolve(fileList) : invoke('code_files', { root }).then((files) => { fileList = files; return files; }).catch(() => [])),
+    files: () => {
+      if (fileList && !filesStale) return Promise.resolve(fileList);
+      // 한 번의 정의 찾기가 목록을 여러 번 물으므로, 읽는 중이면 그 읽기를 함께 기다린다.
+      if (!filesLoading) {
+        filesStale = false; // 읽는 사이에 또 바뀌면 다시 묵은 것으로 표시된다
+        filesLoading = invoke('code_files', { root }).then((files) => { fileList = files; return files; }).catch(() => fileList || []).finally(() => { filesLoading = null; });
+      }
+      return filesLoading;
+    },
     lines: (path) => invoke('reader_read', { path }).then((file) => file.text.split('\n')),
   });
   const defRow = (def) => ({
@@ -1758,7 +1774,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
 
   async function pickFile() {
     // 목록은 열 때마다 다시 읽는다(Claude가 새 파일을 만들었을 수 있다). 읽는 동안에는 지난번 목록으로 찾는다.
-    const loading = invoke('code_files', { root }).then((files) => { fileList = files; return files; }).catch(() => fileList || []);
+    const loading = invoke('code_files', { root }).then((files) => { fileList = files; filesStale = false; return files; }).catch(() => fileList || []);
     pick({
       title: '파일 찾기',
       placeholder: '파일 이름 (예: main, user.rs, src/ui) · 이름:줄번호',
@@ -1883,12 +1899,18 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   }
   /** 찾는 글이 나온 자리를 모두 표시한다. `keep`이면 지금 고른 자리를 지킨다(파일이 다시 읽혔을 때). */
   function runFind(keep) {
-    const query = $query.value.toLowerCase();
+    const query = $query.value;
     findHits = [];
     if (query && current?.lines) {
+      // 원래 글에서 대/소문자를 가리지 않고 찾는다. 소문자로 바꾼 글에서 찾으면, 바꿀 때 길이가 달라지는 글자(İ 등)가
+      // 있는 줄에서 자리가 밀린다.
+      const pattern = new RegExp(query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi');
       current.lines.forEach((text, index) => {
-        const low = text.toLowerCase();
-        for (let at = low.indexOf(query); at >= 0 && findHits.length < MAX_FIND; at = low.indexOf(query, at + query.length)) findHits.push({ line: index + 1, col: at, len: query.length });
+        if (findHits.length >= MAX_FIND) return;
+        for (const found of text.matchAll(pattern)) {
+          if (findHits.length >= MAX_FIND) break;
+          findHits.push({ line: index + 1, col: found.index, len: found[0].length });
+        }
       });
     }
     if (!keep) {
@@ -2082,7 +2104,9 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       const top = shown ? $scroll.scrollTop : lastScroll;
       tab.triedAt = stamp; // 읽지 못해도 같은 내용을 2초마다 다시 읽지 않는다
       const fresh = await read(tab.path);
-      if (tab !== current || disposed) return;
+      // 읽는 사이 다른 탭으로 갔으면 읽은 것은 버린다. "읽어 봤다"는 표시도 지워야, 이 탭으로 돌아왔을 때 다시 읽는다
+      // (남겨 두면 파일이 한 번 더 바뀔 때까지 옛 내용이 그대로 보인다).
+      if (tab !== current || disposed) { tab.triedAt = undefined; return; }
       const keepCaret = caret;
       const wasGone = tab.gone;
       Object.assign(tab, fresh, { missing: '', gone: false, deleted: false, triedAt: undefined });
@@ -2187,6 +2211,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       if (!lower(path).startsWith(rootPrefix())) return;
       touched.set(lower(path), Date.now());
       nav.forget(); // 찾아 둔 정의의 줄 번호가 묵었을 수 있다
+      filesStale = true; // 새로 만든 파일일 수 있다(목록이 묵으면 새 모듈·새 파일로 가지 못한다). 다음에 쓸 때 다시 읽는다
       touchIndex(path); // 그 파일의 정의와 낱말을 색인에 바로 다시 넣는다
       refreshSoon();
       if (current && lower(current.path) === lower(path)) check();
@@ -2240,6 +2265,9 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       await openFile(last, null, { record: false });
       if (current?.lines && saved.line > 1) scrollToLine(saved.line, false);
     }
+    // 보던 파일을 맨 나중에 열었으므로 탭의 순서를 지난번대로 되돌린다(그대로 두면 켤 때마다 보던 탭이 맨 끝으로 간다).
+    const order = new Map(wanted.map((path, index) => [lower(path), index]));
+    tabs.sort((a, b) => (order.get(lower(a.path)) ?? wanted.length) - (order.get(lower(b.path)) ?? wanted.length));
     renderTabs();
   })().catch(() => {});
   return view;
