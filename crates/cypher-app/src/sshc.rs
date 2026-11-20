@@ -168,13 +168,15 @@ type Output = Arc<dyn Fn(&[u8]) + Send + Sync>;
 
 impl SshTerm {
     /// 세션을 시작한다. 접속은 뒤에서 이어지고, 그동안의 안내와 물음은 `on_output`으로 화면에 나간다.
-    /// `share`가 살아 있는 연결이면 그 연결에 채널만 연다(다시 인증하지 않는다). 끝나면 `on_exit`가 한 번 불린다.
+    /// `share`가 살아 있는 연결이면 그 연결에 채널만 연다(다시 인증하지 않는다). 로그인을 마치고 셸이 열리면 `on_ready`가,
+    /// 끝나면 `on_exit`가 한 번 불린다.
     pub fn start(
         spec: SshTarget,
         env: SshEnv,
         share: Option<Arc<Conn>>,
         size: (u16, u16),
         on_output: impl Fn(&[u8]) + Send + Sync + 'static,
+        on_ready: impl FnOnce() + Send + 'static,
         on_exit: impl FnOnce(Option<u32>) + Send + 'static,
     ) -> SshTerm {
         let (input, input_rx) = mpsc::unbounded_channel();
@@ -184,7 +186,7 @@ impl SshTerm {
         let slot = conn.clone();
         let output: Output = Arc::new(on_output);
         tauri::async_runtime::spawn(async move {
-            let mut io = Io { input: input_rx, output, killed: killed_rx, size };
+            let mut io = Io { input: input_rx, output, killed: killed_rx, size, ready: Some(Box::new(on_ready)) };
             let code = run(&mut io, spec, env, share, paused_rx, slot).await;
             on_exit(code);
         });
@@ -220,6 +222,8 @@ struct Io {
     killed: watch::Receiver<bool>,
     /// 화면의 크기(가로, 세로). 접속·인증하는 동안 바뀐 크기도 적어 두었다가 터미널을 요청할 때 쓴다.
     size: (u16, u16),
+    /// 셸이 열렸을 때 한 번 부른다(화면은 그때까지 로그인 중으로 보고 동시 입력에서 뺀다).
+    ready: Option<Box<dyn FnOnce() + Send>>,
 }
 
 const GRAY: &str = "\x1b[90m";
@@ -1074,6 +1078,9 @@ async fn shell(io: &mut Io, conn: &Arc<Conn>, mut paused: watch::Receiver<bool>)
         }
         return None;
     }
+    if let Some(ready) = io.ready.take() {
+        ready();
+    }
 
     // 입력은 따로 보낸다: 서버가 입력을 받지 않아 보내기가 기다리는 동안에도 출력은 계속 읽어야 서로 기다리지 않는다.
     let write = Arc::new(write);
@@ -1277,6 +1284,7 @@ mod tests {
         term: SshTerm,
         seen: Arc<Mutex<String>>,
         exit: Arc<Mutex<Option<Option<u32>>>>,
+        ready: Arc<std::sync::atomic::AtomicBool>,
     }
 
     impl Probe {
@@ -1284,6 +1292,8 @@ mod tests {
             let seen = Arc::new(Mutex::new(String::new()));
             let exit = Arc::new(Mutex::new(None));
             let (out, done) = (seen.clone(), exit.clone());
+            let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
+            let opened = ready.clone();
             let spec = SshTarget { target: "tester@127.0.0.1".into(), port: Some(port), ..Default::default() };
             let term = SshTerm::start(
                 spec,
@@ -1291,9 +1301,10 @@ mod tests {
                 share,
                 (80, 24),
                 move |bytes| out.lock().unwrap().push_str(&String::from_utf8_lossy(bytes)),
+                move || opened.store(true, Ordering::SeqCst),
                 move |code| *done.lock().unwrap() = Some(code),
             );
-            Probe { term, seen, exit }
+            Probe { term, seen, exit, ready }
         }
 
         /// 화면에 그 글이 나올 때까지 기다린다.
@@ -1346,10 +1357,12 @@ mod tests {
             // 틀린 비밀번호는 다시 묻고, 친 글은 화면에 보이지 않는다.
             probe.term.write(b"wrong\r");
             probe.wait_for("비밀번호가 맞지 않습니다").await;
+            assert!(!probe.ready.load(Ordering::SeqCst), "로그인 전에는 셸이 열렸다고 알리지 않는다");
             probe.term.write(b"sec");
             probe.term.write(b"ret\r");
             probe.wait_for("pty:xterm-256color:80x24").await;
             probe.wait_for("welcome").await;
+            assert!(probe.ready.load(Ordering::SeqCst));
             assert!(!probe.seen.lock().unwrap().contains("secret") && !probe.seen.lock().unwrap().contains("wrong"));
             // 입력과 크기 바꾸기
             probe.term.write(b"ls\r");

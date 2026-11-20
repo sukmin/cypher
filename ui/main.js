@@ -298,6 +298,7 @@ async function init() {
   });
 
   listen('session-exit', ({ payload }) => onExit(payload));
+  listen('session-ready', ({ payload }) => onReady(payload));
   // 출력 기록을 적지 못해 멈췄다(드라이브가 빠짐·가득 참 등): 기록 표시를 풀고 알린다.
   listen('session-log-failed', ({ payload }) => {
     const s = [...sessions.values()].find((other) => isTerm(other) && other.id === payload.id);
@@ -689,6 +690,8 @@ async function startProcess(s, worktree = null) {
     const open = [...sessions.values()].find((o) => o !== s && o.ssh && o.id != null && !o.exited && !o.dormant && sameServer(o.ssh, s.ssh));
     if (open) s.cloneOf = open.id;
   }
+  // SSH 세션은 셸이 열렸다는 알림(session-ready)이 올 때까지 로그인 중으로 본다(동시 입력에서 뺀다).
+  if (s.ssh) s.sshReady = false;
   try {
     s.id = await invoke('session_create', {
       profile: s.profile.id, cwd: s.startCwd, cols: size.cols, rows: size.rows,
@@ -696,6 +699,7 @@ async function startProcess(s, worktree = null) {
       command, ssh: s.ssh || null, cloneOf: s.cloneOf ?? null,
     });
     s.cloneOf = null; // 다시 시작할 때는 새로 접속한다.
+    if (earlyReady.delete(s.id)) s.sshReady = true; // 번호를 받기 전에 셸이 열렸다(나눠 쓰는 연결은 금방 열린다).
     // 띄우는 사이에 사용자가 이미 닫았으면, 방금 뜬 프로세스를 끝내고 손을 뗀다.
     if (!sessions.has(s.key)) { invoke('session_close', { id: s.id }); return; }
     // 띄우는 사이에 창 크기가 바뀌었으면(그때는 알릴 프로세스가 없었다) 지금 크기를 알린다.
@@ -1248,10 +1252,84 @@ function setBroadcast(on) {
   focusItem(active);
 }
 
-/** 지금 동시 입력을 받는 세션들: 나란히 보이는 살아 있는 터미널 세션(SSH 동시 입력이면 그 가운데 SSH 세션). */
+/**
+ * SSH 세션이 아직 로그인 중인지(서버 키를 묻거나 비밀번호를 받는 중). 이런 세션은 동시 입력에서 뺀다:
+ * 다른 창에 친 명령이 비밀번호 칸에 들어가거나, 여기에 친 비밀번호가 다른 서버의 셸에 명령으로 찍히지 않게.
+ * 앱이 셸을 열면 `session-ready`로 알린다(ssh.exe로 띄운 세션은 띄우자마자 알린다).
+ */
+const loggingIn = (s) => !!s.ssh && s.sshReady === false;
+
+/** 동시 입력에 넣을 수 있는 SSH 세션: 접속을 마치고 살아 있는 것. */
+const castableSsh = (v) => !!v.ssh && v.id != null && !v.exited && !v.dormant && !loggingIn(v);
+
+/** SSH 창 위쪽의 단추(출력 기록·동시 입력)를 지금 상태에 맞춘다. 창이 좁으면 CSS가 짧은 글(.short)이나 기호(.tiny)만 보인다. */
+function paintSshButtons(s, targets = castTargets()) {
+  // 글 조각(span)은 한 번만 만들고 글만 바꾼다: 다시 그릴 때마다 새로 만들면, 누르고 떼는 사이에 누른 조각이 사라져
+  // 그 클릭이 먹히지 않는다(render는 활성 창이 바뀔 때나 400ms마다 상태가 바뀔 때도 돈다).
+  const label = (button, ...texts) => {
+    if (button.children.length !== 3) button.replaceChildren(make('span', 'full'), make('span', 'short'), make('span', 'tiny'));
+    texts.forEach((text, i) => { if (button.children[i].textContent !== text) button.children[i].textContent = text; });
+  };
+  const why = s.exited ? '끝난 세션입니다' : s.dormant ? '쉬는 세션입니다(눌러 재개한 뒤에 쓸 수 있습니다)' : '';
+  if (s.logButton) {
+    const on = !!s.logPath;
+    s.logButton.classList.toggle('on', on);
+    if (on) label(s.logButton, '■ 기록 중 · 끄기', '■ 기록 중', '■');
+    else label(s.logButton, '● 출력 기록', '● 기록', '●');
+    s.logButton.title = on
+      ? `출력을 기록하는 중: ${s.logPath}\n누르면 기록을 멈춥니다`
+      : why || '이 세션의 콘솔 출력을 파일로 저장하기\n파일을 고르면 그 뒤의 출력을 계속 적고, 다시 누르면 멈춥니다';
+    s.logButton.disabled = !!(s.exited || s.dormant) && !on;
+  }
+  if (s.castButton) {
+    // 이 세션이 입력을 받고 있을 때만 켜진 모양으로 보인다(끝난 창이 받는 것처럼 보이지 않게).
+    const on = !!broadcast && targets.includes(s);
+    const count = targets.length;
+    s.castButton.classList.toggle('on', on);
+    if (on && broadcast !== SSH) label(s.castButton, `≫ 모든 세션에 동시 입력 중 (${count}) · 끄기`, `≫ 모두 (${count})`, `≫${count}`);
+    else if (on) label(s.castButton, `≫ 동시 입력 중 (${count}) · 끄기`, `≫ 동시 (${count})`, `≫${count}`);
+    else label(s.castButton, '≫ 동시 입력', '≫ 동시', '≫');
+    s.castButton.disabled = !on && (s.exited || s.dormant || s.id == null || loggingIn(s));
+    s.castButton.title = on
+      ? `동시 입력 끄기 (지금 ${count}개 세션에 함께 입력됩니다)`
+      : why || (loggingIn(s)
+        ? '로그인을 마친 뒤에 쓸 수 있습니다'
+        : 'SSH 동시 입력 켜기: 여기에 치는 글쇠가 나란히 보이는 다른 SSH 세션에도 함께 들어갑니다\n같은 워크스페이스에서 접속 중인 SSH 세션이 화면에 없으면 나란히 띄웁니다');
+  }
+}
+
+/**
+ * SSH 창의 [동시 입력] 단추. 켜져 있으면 끈다. 나란히 보이는 접속 중인 SSH 세션이 둘 이상이면 그대로 켠다.
+ * 아니면 같은 워크스페이스에서 접속 중인 SSH 세션들을 지금 보이는 창들 옆에 나란히 띄운 뒤 켠다. 그런 세션이 없으면 방법을 알린다.
+ */
+function toggleSshCast(s) {
+  if (broadcast) return setBroadcast(false);
+  if (!castableSsh(s)) return setStatus(loggingIn(s) ? '로그인을 마친 뒤에 동시 입력을 켤 수 있습니다.' : '접속 중인 SSH 세션에서만 동시 입력을 켤 수 있습니다.');
+  if (visible.filter(castableSsh).length < 2) {
+    const others = [...sessions.values()].filter((v) => v !== s && castableSsh(v) && v.group === s.group && !visible.includes(v));
+    if (!others.length) {
+      // 화면에 있는 다른 SSH 세션이 로그인 중이면 그것을 알린다(로그인을 마치면 다시 누르면 된다).
+      if ([...sessions.values()].some((v) => v !== s && v.group === s.group && loggingIn(v) && !v.exited)) {
+        return setStatus('다른 SSH 세션이 아직 로그인 중입니다. 로그인을 마친 뒤 다시 누르세요(로그인 중인 세션은 동시 입력에 넣지 않습니다).');
+      }
+      return setStatus('동시 입력은 접속 중인 SSH 세션이 둘 이상일 때 씁니다. 오른쪽 클릭 → "이 연결 복제"나 "다른 서버에 접속…"으로 세션을 더 여세요.');
+    }
+    // 지금 보이는 창은 그대로 두고 그 옆에 붙인다(한도를 넘으면 붙이지 못한 것을 알린다).
+    const room = Math.max(0, MAX_PANES - visible.length);
+    const added = others.slice(0, room);
+    if (!added.length) return setStatus(`화면에 창이 ${MAX_PANES}개라 더 띄우지 못했습니다. 창을 숨긴 뒤 다시 누르세요.`);
+    tree = balanced([...visible, ...added]);
+    layout();
+    activate(s);
+    if (added.length < others.length) setStatus(`화면에 창이 ${MAX_PANES}개까지라 SSH 세션 ${others.length - added.length}개는 띄우지 못했습니다.`);
+  }
+  setBroadcast(SSH);
+}
+
+/** 지금 동시 입력을 받는 세션들: 나란히 보이는 살아 있는 터미널 세션(SSH 동시 입력이면 그 가운데 SSH 세션). 로그인 중인 SSH 세션은 뺀다. */
 function castTargets() {
   if (!broadcast) return [];
-  return visible.filter((v) => isTerm(v) && !v.exited && !v.dormant && (broadcast !== SSH || v.ssh));
+  return visible.filter((v) => isTerm(v) && !v.exited && !v.dormant && !loggingIn(v) && (broadcast !== SSH || v.ssh));
 }
 
 /** 동시 입력을 받는 창을 표시하고(제목 줄의 색 줄, SSH 세션의 [동시 입력] 단추) 상태줄에 알린다. */
@@ -1260,12 +1338,7 @@ function markBroadcast() {
   $terms.classList.toggle('broadcast', !!broadcast);
   for (const s of sessions.values()) {
     s.pane.classList.toggle('casting', targets.includes(s));
-    if (s.castButton) {
-      s.castButton.classList.toggle('on', broadcast === SSH);
-      s.castButton.title = broadcast === SSH
-        ? 'SSH 동시 입력 끄기'
-        : 'SSH 동시 입력 켜기: 여기에 치는 글쇠가 나란히 보이는 다른 SSH 세션에도 함께 들어갑니다';
-    }
+    paintSshButtons(s, targets);
   }
   $('status-mode').textContent = !broadcast ? ''
     : broadcast === SSH ? (targets.length ? `SSH 동시 입력 켜짐: 나란히 보이는 SSH 세션 ${targets.length}개에 함께 입력됩니다` : 'SSH 동시 입력 켜짐: 나란히 보이는 접속 중인 SSH 세션이 없습니다')
@@ -1283,6 +1356,20 @@ const commandHint = (command) => `\x1b[33mClaude 실행 명령으로 띄웠습�
  * 그 번호의 세션을 찾지 못한다. 잠깐 받아 두었다가 번호를 받은 쪽이 찾아 쓴다(명령 항목의 종료 알림도 여기를 지나간다).
  */
 const earlyExits = new Map();
+/** 번호를 받기 전에 온 "셸이 열렸다"(session-ready) 알림의 번호들. */
+const earlyReady = new Set();
+
+/** SSH 세션의 로그인이 끝나 셸이 열렸다: 동시 입력에 넣을 수 있다. */
+function onReady({ id }) {
+  const s = byId(id);
+  if (!s) {
+    earlyReady.add(id);
+    setTimeout(() => earlyReady.delete(id), 10000);
+    return;
+  }
+  s.sshReady = true;
+  markBroadcast();
+}
 
 function onExit({ id, code }) {
   const s = byId(id);
@@ -2519,33 +2606,32 @@ function render() {
     // 단추는 한 번만 만든다. 활성이 아닌 창을 누르면 그 창이 활성화되며 다시 그리는데(mousedown),
     // 그때마다 단추를 새로 만들면 방금 눌린 단추가 사라져 그 클릭이 먹히지 않는다.
     if (!s.headInfo) {
-      const only = make('button', 'pane-button', '이 창만');
+      // 나눠 볼 때만 쓰는 단추(한 창만 볼 때는 숨긴다)
+      const only = make('button', 'pane-button split-only', '이 창만');
       only.title = '이 창만 보기 (제목 줄 두 번 누르기)';
       only.onclick = (ev) => { ev.stopPropagation(); showOnly(s); };
-      const hide = make('button', 'pane-button', '숨기기');
+      const hide = make('button', 'pane-button split-only', '숨기기');
       hide.title = '이 창 숨기기 (세션은 계속 실행)';
       hide.onclick = (ev) => { ev.stopPropagation(); toggleShown(s); };
       s.headInfo = make('span', 'pane-info');
       s.head.replaceChildren(s.headInfo, only, hide);
       if (s.ssh) {
-        // SSH 세션: 나란히 보이는 SSH 세션끼리의 동시 입력을 그 자리에서 켜고 끈다.
-        s.castButton = make('button', 'pane-button cast', '동시 입력');
-        s.castButton.onclick = (ev) => { ev.stopPropagation(); setBroadcast(broadcast === SSH ? false : SSH); };
-        s.head.insertBefore(s.castButton, only);
-        markBroadcast();
+        // SSH 세션은 한 창만 볼 때도 제목 줄을 보이고, 거기에 출력 기록·동시 입력 단추를 눈에 띄게 둔다.
+        s.pane.classList.add('ssh');
         // 출력 기록: 누르면 기록할 파일을 고르고 시작한다. 기록 중에 누르면 멈춘다.
-        s.logButton = make('button', 'pane-button rec', '기록');
+        s.logButton = make('button', 'pane-tool rec');
         s.logButton.onclick = (ev) => { ev.stopPropagation(); toggleLog(s); };
+        // 동시 입력: 나란히 보이는 SSH 세션끼리 같은 글쇠를 넣는다. 한 창만 보고 있으면 같은 워크스페이스의 SSH 세션을 나란히 띄운다.
+        s.castButton = make('button', 'pane-tool cast');
+        s.castButton.onclick = (ev) => { ev.stopPropagation(); toggleSshCast(s); };
         s.head.insertBefore(s.logButton, only);
+        s.head.insertBefore(s.castButton, only);
+        requestAnimationFrame(fitVisible); // 제목 줄이 생긴 만큼 터미널 크기를 다시 맞춘다.
       }
-      s.head.ondblclick = () => showOnly(s);
+      // 단추를 빠르게 두 번 누른 것은 "이 창만 보기"로 치지 않는다.
+      s.head.ondblclick = (ev) => { if (!ev.target.closest('button')) showOnly(s); };
     }
-    if (s.logButton) {
-      s.logButton.classList.toggle('on', !!s.logPath);
-      s.logButton.textContent = s.logPath ? '● 기록 중' : '기록';
-      s.logButton.title = s.logPath ? `출력을 기록하는 중: ${s.logPath}\n누르면 기록을 멈춥니다` : '이 세션의 출력을 파일로 기록하기 (파일을 고르면 그 뒤의 출력을 계속 적고, 다시 누르면 멈춤)';
-      s.logButton.disabled = !!(s.exited || s.dormant) && !s.logPath;
-    }
+    paintSshButtons(s);
     s.headInfo.replaceChildren(
       // 나란히 볼 때는 창마다 그 세션의 워크스페이스를 적는다(서로 다른 워크스페이스의 세션을 나란히 두고 헷갈리지 않게).
       ...(isTerm(s) && s.group ? [make('span', 'pane-group', `◆ ${s.group}`)] : []),
@@ -2795,7 +2881,7 @@ async function startLog(s, given = null) {
   try {
     s.logPath = await invoke('session_log_start', { id: s.id, path, label: label(s) });
     try { localStorage.setItem('cypher.logDir', path.replace(/[\\/][^\\/]*$/, '')); } catch { /* 저장 공간 문제는 무시 */ }
-    setStatus(`출력을 기록합니다: ${s.logPath} (끌 때: 사이드바에서 세션을 오른쪽 클릭 → 출력 기록 끄기)`);
+    setStatus(`출력을 기록합니다: ${s.logPath} (끌 때: ${s.ssh ? '창 위쪽의 [■ 기록 중 · 끄기]나 ' : ''}세션을 오른쪽 클릭 → 출력 기록 끄기)`);
   } catch (err) {
     setStatus(String(err));
   }

@@ -236,22 +236,49 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
   overflow: hidden;
 }
 #terms.multi .pane-head { display: flex; }
+/* SSH 세션은 한 창만 볼 때도 제목 줄을 보인다(출력 기록·동시 입력 단추). 나눠 볼 때만 쓰는 단추는 숨긴다.
+   한 창만 볼 때는 바로 위의 위치 줄과 같은 제목을 되풀이하지 않고 단추만 오른쪽에 둔다. 나눠 볼 때는 다른 창과 같은 높이. */
+.pane.ssh .pane-head { display: flex; }
+#terms:not(.multi) .pane.ssh .pane-head { height: 32px; justify-content: flex-end; }
+#terms:not(.multi) .pane.ssh .pane-info { display: none; }
+#terms:not(.multi) .pane-button.split-only { display: none; }
+/* 창이 좁으면 단추 글을 줄인다(제목이 가려지지 않게): 넓을 때 .full, 좁으면 .short, 아주 좁으면 기호(.tiny)만 */
+.pane { container: pane / inline-size; }
+.pane-tool { flex: none; height: 20px; padding: 0 10px; font-size: 12px; font-weight: 600; line-height: 18px; color: var(--text); background: var(--control); border: 1px solid var(--accent); border-radius: 5px; }
+#terms:not(.multi) .pane-tool { height: 24px; padding: 0 12px; line-height: 22px; }
+.pane-tool .short, .pane-tool .tiny { display: none; }
+@container pane (max-width: 640px) {
+  .pane-tool .full { display: none; }
+  .pane-tool .short { display: inline; }
+  .pane-tool { padding: 0 7px; }
+}
+@container pane (max-width: 400px) {
+  .pane-tool .short { display: none; }
+  .pane-tool .tiny { display: inline; }
+  .pane-head .pane-button.split-only { display: none; } /* 제목 줄을 두 번 누르거나 오른쪽 클릭 메뉴로 한다 */
+}
+.pane-tool span { pointer-events: none; } /* 누른 대상이 늘 단추가 되게(글 조각이 바뀌어도 클릭이 먹히게) */
+.pane-tool:hover { color: var(--on-accent); background: var(--accent); }
+.pane-tool:disabled { opacity: 0.5; }
+.pane-tool:disabled:hover { color: var(--text); background: var(--control); }
+.pane-tool.rec.on { color: var(--on-accent); background: var(--dead); border-color: var(--dead); }
+.pane-tool.cast.on { color: var(--on-accent); background: var(--busy); border-color: var(--busy); }
 .pane.active .pane-head { color: var(--text); border-bottom-color: var(--accent); }
 /* 동시 입력을 받는 창(나란히 보이는 모든 세션, 또는 SSH 동시 입력이면 SSH 세션만) */
 .pane.casting .pane-head { border-bottom-color: var(--busy); }
-.pane-button.cast.on { color: var(--on-accent); background: var(--busy); border-color: var(--busy); }
-/* 출력 기록 중 */
-.pane-button.rec.on { color: var(--on-accent); background: var(--dead); border-color: var(--dead); }
 .pane-button:disabled { opacity: 0.5; }
 #sessions .sub .recording { color: var(--dead); font-weight: 600; }
 .pane-info { display: contents; } /* 제목·모델 글자만 다시 그리려고 묶은 것. 배치에는 끼지 않는다. */
-.pane-head .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.pane-head .title { flex: 1; min-width: 4em; overflow: hidden; text-overflow: ellipsis; } /* 단추에 밀려 세션 이름이 다 가려지지 않게 */
 .pane-head .model { color: var(--accent); }
 /* 창 제목 줄의 단추: 이 창만 / 숨기기 */
 .pane-button { flex: none; height: 18px; padding: 0 7px; font-size: 11px; line-height: 16px; color: var(--dim); background: var(--control); border: 1px solid var(--line); border-radius: 4px; }
 .pane-button:hover { color: var(--text); border-color: var(--accent); }
 
-.term { flex: 1; min-height: 0; padding: 6px 0 0 8px; overflow: hidden; background: var(--term-bg); }
+/* 여백은 터미널 요소(.xterm)에 둔다: FitAddon은 부모의 높이(테두리 상자라 여백이 들어 있다)에서 터미널 요소의 여백만 빼므로,
+   부모에 여백을 두면 한 줄이 넘쳐 마지막 줄이 조금 잘린다. */
+.term { flex: 1; min-height: 0; overflow: hidden; background: var(--term-bg); }
+.term > .xterm { padding: 6px 0 0 8px; }
 
 /* 터미널 스크롤 막대를 어두운 화면에 맞춘다. */
 .xterm-viewport::-webkit-scrollbar { width: 10px; }

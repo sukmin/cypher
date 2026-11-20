@@ -31,6 +31,12 @@ struct ExitPayload {
     code: Option<u32>,
 }
 
+/// SSH 세션의 셸이 열렸다(`session-ready`).
+#[derive(Clone, Serialize)]
+struct ReadyPayload {
+    id: u32,
+}
+
 /// 출력 기록을 적지 못해 멈췄다(`session-log-failed`).
 #[derive(Clone, Serialize)]
 struct LogFailedPayload {
@@ -272,7 +278,7 @@ pub fn session_create(
             // 연결 복제: 그 세션의 연결이 살아 있으면 채널만 하나 더 연다(다시 인증하지 않는다).
             let share = clone_of.and_then(|other| session(&state, other).ok()).and_then(|term| term.connection());
             let id = state.next_id.fetch_add(1, Ordering::Relaxed);
-            let (tee, exit_log, exit_app) = (log.clone(), log.clone(), app.clone());
+            let (tee, exit_log, exit_app, ready_app) = (log.clone(), log.clone(), app.clone(), app.clone());
             // 등록이 끝나기 전에 종료 알림이 먼저 지우려 들지 않도록 잠근 채로 띄운다.
             let mut sessions = state.sessions.lock().unwrap();
             let term = crate::sshc::SshTerm::start(
@@ -283,6 +289,10 @@ pub fn session_create(
                 move |bytes| {
                     tee.feed(bytes);
                     let _ = on_output.send(InvokeResponseBody::Raw(bytes.to_vec()));
+                },
+                move || {
+                    // 로그인을 마치고 셸이 열렸다: 화면은 이제 이 세션을 동시 입력에 넣는다.
+                    let _ = ready_app.emit("session-ready", ReadyPayload { id });
                 },
                 move |code| {
                     // 표에서 먼저 빼야 그사이 기록을 새로 시작하지 못한다.
@@ -443,6 +453,10 @@ pub fn session_create(
     )
     .map_err(|e| format!("{e:#}"))?;
     sessions.insert(id, Arc::new(Term::pty(session, log)));
+    // ssh.exe로 띄운 SSH 세션은 로그인을 마쳤는지 알 수 없다: 예전처럼 바로 동시 입력에 넣는다.
+    if is_ssh {
+        let _ = app.emit("session-ready", ReadyPayload { id });
+    }
     Ok(id)
 }
 
