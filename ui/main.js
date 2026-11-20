@@ -23,6 +23,7 @@ import { setPty, windowsPty, matchWidths } from './widths.js';
 import { initSsh, showSsh, cleanSpec, specLabel, saveHost, savedHosts } from './ssh.js';
 import { initTimer, showTimers, nextTimer, addTimer, removeTimer, timers } from './timer.js';
 import { initCode, createCode } from './code.js';
+import { initHex, createHex } from './hex.js';
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -75,6 +76,8 @@ const KINDS = {
   table: { label: '표', icon: '▤', hint: 'CSV·TSV·JSON 파일을 표로 보기 · 정렬·거르기 · 바뀌면 자동 갱신', create: createTable },
   // 코드 보기는 프로젝트 폴더 하나를 통째로 본다(파일마다 항목이 생기지 않는다). 고치지는 않고, 작업한 내용을 읽는 데 쓴다.
   code: { label: '코드', icon: '❮❯', hint: '프로젝트의 코드 보기 · 문법 강조 · 정의로 가기 · 쓰는 곳 찾기 · 바뀐 파일과 줄 표시', create: createCode },
+  // 헥사 에디터: 왼쪽 절반은 바이트, 오른쪽 절반은 파일 형식(매직 넘버)·구조·값 해석. 덮어쓰기로 고쳐 저장한다.
+  hex: { label: '헥사', icon: '⬡', hint: '바이트 보기·고치기 · 매직 넘버로 형식을 알아보고 구조(머리·덩어리)를 해석', create: createHex },
 };
 
 /**
@@ -232,6 +235,7 @@ async function init() {
     finished: runFinished,
   });
   initTable({ invoke, make, setStatus, showMenu, baseName, toClaude: imageToClaude, openMemo });
+  initHex({ invoke, make, setStatus, showMenu, baseName, toClaude: imageToClaude, ask });
   initCode({ invoke, make, setStatus, showMenu, baseName, toClaude: textToClaude });
   initNotices({ make, openPopup, setStatus, jump: jumpToNotice, onChange: renderNoticeButton });
   // SSH 접속 창에서 고르거나 적은 곳으로 세션을 연다.
@@ -294,6 +298,18 @@ async function init() {
   });
 
   listen('session-exit', ({ payload }) => onExit(payload));
+  // 출력 기록을 적지 못해 멈췄다(드라이브가 빠짐·가득 참 등): 기록 표시를 풀고 알린다.
+  listen('session-log-failed', ({ payload }) => {
+    const s = [...sessions.values()].find((other) => isTerm(other) && other.id === payload.id);
+    // 앞서 끈 기록의 늦은 실패가 지금 기록 중인 다른 파일의 표시를 지우지 않게, 그 파일일 때만 푼다.
+    if (s && s.logPath && samePath(s.logPath, payload.path)) {
+      s.lastLog = s.logPath;
+      s.logPath = '';
+      render();
+    }
+    setStatus(`출력 기록을 멈췄습니다: ${payload.path}에 쓰지 못했습니다 (${payload.error}). 그때까지의 기록은 파일에 남아 있습니다.`);
+    if (config.notify.system) invoke('notify', { title: '출력 기록을 멈췄습니다', body: `${payload.path}에 쓰지 못했습니다: ${payload.error}` }).catch(() => {});
+  });
   listen('session-status', ({ payload }) => onStatus(payload));
   listen('session-hook', ({ payload }) => onHook(payload));
   listen('session-file', ({ payload }) => onCreatedFile(payload));
@@ -601,6 +617,8 @@ async function newSession(profileId, opts = {}) {
     name: opts.name || '', color: opts.color || '', mark: freeMark(opts.mark),
     group,
     ssh,               // SSH 세션이면 접속할 곳 { target, name?, port?, identity?, options? }
+    cloneOf: opts.cloneOf ?? null, // 연결 복제: 이 세션 번호의 연결을 같이 쓴다(처음 띄울 때만)
+    logPath: '',       // 출력을 기록하고 있는 파일(기록하지 않으면 빈 글)
     title: '', model: '', effort: '', context: null, cost: 0,
     usage: '', usageEl: null,
     agents: new Map(), // 지금 돌고 있는 서브에이전트: 번호 → 종류
@@ -664,12 +682,20 @@ async function startProcess(s, worktree = null) {
   // 기본 Claude 프로필은 사용자가 정해 둔 실행 명령으로 띄운다. 그 명령으로 띄우지 못하거나 뜨자마자 끝나면 어디서 고치는지 알려 준다.
   const command = s.profile.id === 'claude' && claudeCommand ? claudeCommand : null;
   s.launch = { command, at: Date.now() };
+  // 같은 서버(접속할 곳·포트·키 파일·옵션이 모두 같은 곳)에 이미 접속해 있는 세션이 있으면 그 연결을 같이 쓴다:
+  // 다시 시작한 뒤 쉬던 SSH 세션을 차례로 누를 때, 같은 서버에 새로 열 때 비밀번호를 거듭 묻지 않게.
+  if (s.ssh && s.cloneOf == null) {
+    const sameServer = (a, b) => a.target === b.target && (a.port || 0) === (b.port || 0) && (a.identity || '') === (b.identity || '') && (a.options || '') === (b.options || '');
+    const open = [...sessions.values()].find((o) => o !== s && o.ssh && o.id != null && !o.exited && !o.dormant && sameServer(o.ssh, s.ssh));
+    if (open) s.cloneOf = open.id;
+  }
   try {
     s.id = await invoke('session_create', {
       profile: s.profile.id, cwd: s.startCwd, cols: size.cols, rows: size.rows,
       resume: resumeOf(s) || null, worktree: worktree || null, onOutput: channel,
-      command, ssh: s.ssh || null,
+      command, ssh: s.ssh || null, cloneOf: s.cloneOf ?? null,
     });
+    s.cloneOf = null; // 다시 시작할 때는 새로 접속한다.
     // 띄우는 사이에 사용자가 이미 닫았으면, 방금 뜬 프로세스를 끝내고 손을 뗀다.
     if (!sessions.has(s.key)) { invoke('session_close', { id: s.id }); return; }
     // 띄우는 사이에 창 크기가 바뀌었으면(그때는 알릴 프로세스가 없었다) 지금 크기를 알린다.
@@ -781,10 +807,14 @@ const SSH = 'ssh';
 /** 접속할 곳을 받아 띄우는 SSH 프로필인지. 사용자가 설정 파일에서 같은 번호로 인자까지 적어 둔 프로필은 그 인자대로 띄우는 보통 프로필이다. */
 const isSshProfile = (profile) => profile?.id === SSH && !(profile.args || []).length;
 
-/** 같은 서버에 세션을 하나 더 연다(연결 복제). 화면에 보이는 세션이면 그 옆에 나눠 열고, 아니면 지금 창 자리에 연다. */
+/**
+ * 같은 서버에 세션을 하나 더 연다(연결 복제). 화면에 보이는 세션이면 그 옆에 나눠 열고, 아니면 지금 창 자리에 연다.
+ * 내장 SSH로 접속해 있으면 그 연결에 채널만 하나 더 열어 다시 인증하지 않는다(연결이 끊겼거나 아직 접속 중이면 새로 접속한다).
+ */
 function cloneSsh(s, show = visible.includes(s) ? 'split' : 'replace') {
   if (!s?.ssh) return null;
-  return newSession(SSH, { ...besideOf(s), cwd: s.startCwd, ssh: s.ssh, color: s.color, show });
+  const live = s.id != null && !s.exited && !s.dormant;
+  return newSession(SSH, { ...besideOf(s), cwd: s.startCwd, ssh: s.ssh, color: s.color, show, cloneOf: live ? s.id : null });
 }
 
 /** 모든 종류의 창에 공통인 동작: 나란히 보기에서 창을 누르면 그 창이 활성화된다. */
@@ -1072,6 +1102,7 @@ function closedRecord(s) {
   if (s.kind === 'todo' && !s.view.text().trim()) return null;
   if (s.kind === 'run' && !s.view.command()) return null;
   if (s.kind === 'table' && !s.view.path()) return null;
+  if (s.kind === 'hex' && !s.view.path()) return null;
   try {
     return { ...describe(s), label: label(s) };
   } catch {
@@ -1261,6 +1292,8 @@ function onExit({ id, code }) {
     return;
   }
   s.exited = true;
+  // 세션이 끝나면 앱이 기록 파일을 닫는다(끝난 줄과 마친 시각을 적는다).
+  if (s.logPath) { s.lastLog = s.logPath; s.logPath = ''; }
   s.agents.clear();
   s.tools.clear();
   s.workStart = 0;
@@ -1722,6 +1755,11 @@ function sessionItem(s) {
     agents.title = agentSummary(s);
   }
   const sub = make('span', 'sub');
+  if (s.logPath) {
+    const rec = make('b', 'recording', '● 기록');
+    rec.title = `출력을 파일로 기록하는 중: ${s.logPath}\n오른쪽 클릭 → 출력 기록 끄기`;
+    sub.append(rec, ' ');
+  }
   // 요청을 처리하는 중이면 경과 시간을 앞에 보여 준다(승인을 기다리는 동안에는 대기 표시가 먼저다).
   s.timeEl = null;
   if (s.workStart && !s.exited && !s.waiting) {
@@ -2012,6 +2050,7 @@ function templateItem(s) {
     case 'todo': return { ...base, saved: { text: s.view.text() } };
     case 'run': return state.command ? { ...base, saved: { command: state.command } } : null;
     case 'table': return state.path ? { ...base, saved: { path: state.path } } : null;
+    case 'hex': return state.path ? { ...base, saved: { path: state.path } } : null;
     // 코드 보기는 프로젝트 폴더만 담는다(열어 둔 파일은 담지 않는다).
     case 'code': return { ...base, saved: { root: state.root } };
     default: return null;
@@ -2050,6 +2089,7 @@ function templateSaved(kind, saved) {
     // 명령은 받아 두기만 하고 실행하지 않는다(틀을 펼친 뒤 사용자가 ▶를 눌러야 돈다).
     case 'run': return { ...text('command') };
     case 'table': return { ...text('path') };
+    case 'hex': return { ...text('path') };
     case 'code': return { ...text('root') };
     default: return null;
   }
@@ -2493,8 +2533,18 @@ function render() {
         s.castButton.onclick = (ev) => { ev.stopPropagation(); setBroadcast(broadcast === SSH ? false : SSH); };
         s.head.insertBefore(s.castButton, only);
         markBroadcast();
+        // 출력 기록: 누르면 기록할 파일을 고르고 시작한다. 기록 중에 누르면 멈춘다.
+        s.logButton = make('button', 'pane-button rec', '기록');
+        s.logButton.onclick = (ev) => { ev.stopPropagation(); toggleLog(s); };
+        s.head.insertBefore(s.logButton, only);
       }
       s.head.ondblclick = () => showOnly(s);
+    }
+    if (s.logButton) {
+      s.logButton.classList.toggle('on', !!s.logPath);
+      s.logButton.textContent = s.logPath ? '● 기록 중' : '기록';
+      s.logButton.title = s.logPath ? `출력을 기록하는 중: ${s.logPath}\n누르면 기록을 멈춥니다` : '이 세션의 출력을 파일로 기록하기 (파일을 고르면 그 뒤의 출력을 계속 적고, 다시 누르면 멈춤)';
+      s.logButton.disabled = !!(s.exited || s.dormant) && !s.logPath;
     }
     s.headInfo.replaceChildren(
       // 나란히 볼 때는 창마다 그 세션의 워크스페이스를 적는다(서로 다른 워크스페이스의 세션을 나란히 두고 헷갈리지 않게).
@@ -2653,7 +2703,10 @@ function paletteEntries() {
     command('자주 쓰는 지시', showSnippets, '명령 · Ctrl+Shift+P'),
     command(broadcast ? '동시 입력 끄기' : '동시 입력 켜기', () => setBroadcast(!broadcast), '명령 · Ctrl+Shift+B'),
     command(broadcast === SSH ? 'SSH 동시 입력 끄기' : 'SSH 동시 입력 켜기', () => setBroadcast(broadcast === SSH ? false : SSH), '명령 · 나란히 보이는 SSH 세션끼리만 함께 입력'),
-    ...(active?.ssh ? [command(`이 SSH 연결 복제 (${specLabel(active.ssh)})`, () => cloneSsh(active), '명령 · 같은 서버에 새 세션')] : []),
+    ...(active?.ssh ? [command(`이 SSH 연결 복제 (${specLabel(active.ssh)})`, () => cloneSsh(active), '명령 · 같은 서버에 새 세션 · 다시 인증하지 않음')] : []),
+    ...(isTerm(active) && (active.logPath || (!runsClaude(active) && !active.exited && !active.dormant))
+      ? [command(active.logPath ? '출력 기록 끄기' : '출력을 파일로 기록…', () => toggleLog(active), active.logPath ? `명령 · 기록 중: ${active.logPath}` : '명령 · 이 세션의 출력을 끌 때까지 파일에 적음')]
+      : []),
     command('프롬프트 편집기로 가기', focusComposer, '명령 · Ctrl+Shift+E'),
     ...(visible.length > 1 && active ? [command('분할 풀기 (지금 창만 보기)', () => showOnly(active))] : []),
     command('기억 내보내기·가져오기', () => showMemory()),
@@ -2721,6 +2774,55 @@ function sessionText(s) {
   return lines.join('\n').trimEnd();
 }
 
+// ── 출력 기록: 세션 출력을 사용자가 고른 글자 파일에 계속 적는다(색·커서 이동은 빼고 글자만) ──
+
+/** 기록 파일의 기본 이름: `<세션 이름>-YYYYMMDD-HHMMSS.log`. */
+function logFileName(s) {
+  const d = new Date();
+  const two = (n) => String(n).padStart(2, '0');
+  const stamp = `${d.getFullYear()}${two(d.getMonth() + 1)}${two(d.getDate())}-${two(d.getHours())}${two(d.getMinutes())}${two(d.getSeconds())}`;
+  const name = label(s).replace(/[\\/:*?"<>|\s]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 60) || 'session';
+  return `${name}-${stamp}.log`;
+}
+
+/** 기록할 파일을 고르고 기록을 시작한다. 지난번에 고른 폴더에서 시작한다. `given`(시험용)이면 묻지 않고 그 파일에 기록한다. */
+async function startLog(s, given = null) {
+  if (!isTerm(s) || s.id == null || s.exited || s.dormant) return setStatus('접속해 있는 세션에서만 기록할 수 있습니다.');
+  let start = '';
+  try { start = localStorage.getItem('cypher.logDir') || ''; } catch { /* 없으면 세션 폴더 */ }
+  const path = given || await invoke('session_log_pick', { name: logFileName(s), start: start || s.startCwd }).catch(() => null);
+  if (!path || !sessions.has(s.key) || s.exited) return;
+  try {
+    s.logPath = await invoke('session_log_start', { id: s.id, path, label: label(s) });
+    try { localStorage.setItem('cypher.logDir', path.replace(/[\\/][^\\/]*$/, '')); } catch { /* 저장 공간 문제는 무시 */ }
+    setStatus(`출력을 기록합니다: ${s.logPath} (끌 때: 사이드바에서 세션을 오른쪽 클릭 → 출력 기록 끄기)`);
+  } catch (err) {
+    setStatus(String(err));
+  }
+  render();
+}
+
+async function stopLog(s) {
+  if (!s.logPath) return;
+  const path = s.id != null ? await invoke('session_log_stop', { id: s.id }).catch(() => null) : null;
+  s.lastLog = path || s.logPath;
+  s.logPath = '';
+  setStatus(`출력 기록을 마쳤습니다: ${s.lastLog} (오른쪽 클릭 → 기록 파일을 문서 항목으로 보기)`);
+  render();
+}
+
+const toggleLog = (s) => (s.logPath ? stopLog(s) : startLog(s));
+
+/** 기록 파일을 문서 항목으로 연다(이미 그 파일을 보는 항목이 있으면 그것을 보여 준다). 기록 중이면 바뀌는 대로 따라 그린다. */
+async function showLog(s) {
+  const path = s.logPath || s.lastLog;
+  if (!path) return;
+  const shown = [...sessions.values()].find((other) => other.kind === 'reader' && samePath(other.view.path(), path));
+  if (shown) return activate(shown);
+  const doc = await newItem('reader', { ...besideOf(s), saved: { path }, show: visible.includes(s) && visible.length < MAX_PANES ? 'split' : 'replace' });
+  if (doc) activate(doc);
+}
+
 async function exportText(s) {
   try {
     const name = `${label(s).replace(/[\\/:*?"<>|]/g, '_')}.txt`;
@@ -2767,7 +2869,12 @@ function sessionMenu(s, ev) {
       }]),
       { label: '변경 내용 보기', action: () => { activate(s); toggleDiff(true); } },
       ...(s.exited || s.dormant ? [] : [{ label: '화면 다시 맞추기 (글자가 어긋나 보일 때)', action: () => realign(s) }]),
-      { label: '출력 저장…', action: () => exportText(s) },
+      { label: '출력 저장… (지금까지 화면에 남은 것)', action: () => exportText(s) },
+      // 기록 중이면 Claude 세션이 됐어도(셸에서 claude를 띄움) 끌 수 있어야 한다. 새로 켜는 것은 Claude 세션이 아닐 때만.
+      ...(s.logPath
+        ? [{ label: `출력 기록 끄기 (${baseName(s.logPath)})`, action: () => stopLog(s) }]
+        : runsClaude(s) ? [] : [{ label: '출력을 파일로 기록… (파일을 고르면 그 뒤의 출력을 끌 때까지 적음)', action: () => startLog(s), disabled: s.exited || s.dormant }]),
+      ...(s.logPath || s.lastLog ? [{ label: `기록 파일을 문서 항목으로 보기 (${baseName(s.logPath || s.lastLog)})`, action: () => showLog(s) }] : []),
       { label: '기억 내보내기·가져오기', action: () => showMemory(s) },
     ] : []),
     { label: '폴더를 탐색기에서 열기', action: () => openFolder(s) },
@@ -2955,6 +3062,7 @@ function groupItemsText(s) {
     }
     if (other.kind === 'run') return `- ${head} 명령 ${name} — 명령: ${other.view.command() || '(없음)'} · 폴더: ${other.cwd} · 상태: ${other.view.stateText()} (출력은 run_output에 id ${other.key}. 실행·멈춤은 사용자가 한다)`;
     if (other.kind === 'table') return `- ${head} 표 ${name} — 파일: ${other.view.path() || '(아직 파일 없음)'} (표로 보여 주는 화면. 파일을 고치면 스스로 다시 읽는다)`;
+    if (other.kind === 'hex') return `- ${head} 헥사 에디터 ${name} — 파일: ${other.view.path() || '(아직 파일 없음)'} (바이트를 보고 고치는 화면. 사용자가 저장하기 전에는 파일이 바뀌지 않는다)`;
     return `- ${head} ${KINDS[other.kind]?.label || other.kind} ${name}`;
   });
   return `워크스페이스 "${s.group}"의 Cypher 항목 ${lines.length}개(이 워크스페이스 밖의 항목은 다룰 수 없음):\n${lines.join('\n')}`;
@@ -3211,7 +3319,7 @@ const pathKey = (path) => path.replace(/\//g, '\\').toLowerCase();
 /** 그 항목이 그 파일을 보여 주고 있는지: 문서·표가 읽는 파일, 메모에 연결된 파일, HTTP 항목이 열어 둔 요청 파일, 사이트가 연 파일, 이미지를 가져온 파일. */
 function showsFile(other, path) {
   switch (other.kind) {
-    case 'reader': case 'table': return samePath(other.view.path(), path);
+    case 'reader': case 'table': case 'hex': return samePath(other.view.path(), path);
     case 'memo': return samePath(other.view.state().path || '', path);
     case 'http': return samePath(other.view.state().file || '', path);
     case 'site': return sameFileUrl(other.view.url() || '', fileUrl(path));
@@ -4720,6 +4828,7 @@ window.cypher = {
   setLook, currentLook, mcpAction, handoffSite, onMcpRequest, setMark, jumpToMark, markedItem, textToClaude, runFinished,
   showPalette, paletteEntries, showClosed, reopenLast, restartSession, placeInOrder, inSidebarOrder, cycle, find, recallPrompt, createGroup, newGroup, adoptGroup, groupFor,
   showTimers, addTimer, removeTimer, timers, nextTimer, onCreatedFile, placeHeld, cloneSsh, showSsh, castTargets, saveHost, savedHosts, onEditedFile, onTool, realign, settleResize, settleResizeSoon, moveGroup, nudgeGroup, closeGap, gapBelow, wake, wakeGroup, restore, runsClaude, askClaudeCommand, setClaudeCommand, setGroupFolder, groupFolderOf, groupContext, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
+  startLog, stopLog, showLog,
   get visible() { return visible; },
   get broadcast() { return broadcast; },
   get active() { return active; },

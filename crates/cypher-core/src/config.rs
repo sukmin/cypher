@@ -13,6 +13,7 @@ pub struct Config {
     pub session: Session,
     pub browser: Browser,
     pub window: Window,
+    pub ssh: Ssh,
     /// 파일에서는 `[[profile]]`로 쓴다. 읽은 뒤에는 기본 프로필과 합쳐진 전체 목록이다.
     #[serde(rename(deserialize = "profile"))]
     pub profiles: Vec<Profile>,
@@ -75,6 +76,7 @@ impl Default for Config {
             session: Session::default(),
             browser: Browser::default(),
             window: Window::default(),
+            ssh: Ssh::default(),
             profiles: profile::builtin(),
         }
     }
@@ -122,6 +124,31 @@ pub struct Window {
     pub magnet: bool,
     /// 달라붙는 거리(화면 배율 100% 기준 픽셀).
     pub magnet_distance: u32,
+}
+
+/// SSH 세션.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Ssh {
+    /// "builtin": Cypher에 든 SSH로 접속한다(연결 복제가 다시 인증하지 않는다, 기본값).
+    /// "openssh": Windows의 OpenSSH(`ssh.exe`)를 터미널에 띄워 접속한다(예전 방식).
+    /// 내장 SSH로도 접속할 곳의 "추가 옵션"을 적었거나 `~/.ssh/config`에 ProxyJump·ProxyCommand가 있으면 그 세션은 OpenSSH로 접속한다.
+    pub engine: String,
+    /// 서버에서 이만큼(초) 아무것도 오지 않으면 연결이 살아 있는지 물어본다. 0이면 묻지 않는다(내장 SSH만).
+    pub keepalive: u64,
+}
+
+impl Default for Ssh {
+    fn default() -> Self {
+        Self { engine: "builtin".into(), keepalive: 30 }
+    }
+}
+
+impl Ssh {
+    /// 내장 SSH를 쓸지(모르는 값은 기본값인 내장으로 본다).
+    pub fn builtin(&self) -> bool {
+        !self.engine.trim().eq_ignore_ascii_case("openssh")
+    }
 }
 
 impl Default for Window {
@@ -174,6 +201,10 @@ pub const DEFAULT_TEXT: &str = r#"# Cypher 설정. 고친 뒤 Cypher를 다시 �
 # magnet = true            # 창을 끌 때 화면 가장자리와 다른 Cypher 창에 달라붙기 (Ctrl을 누른 채 끌면 붙지 않음)
 # magnet_distance = 14     # 달라붙는 거리(픽셀). 작을수록 잘 떨어집니다
 
+[ssh]
+# engine = "builtin"   # "builtin": Cypher에 든 SSH로 접속(연결 복제가 다시 인증하지 않음) / "openssh": Windows의 ssh.exe를 띄워 접속
+# keepalive = 30       # 서버에서 이만큼(초) 아무것도 오지 않으면 연결이 살아 있는지 물어봄. 0이면 묻지 않음(내장 SSH만)
+
 [browser]
 # enabled = true                      # Claude 세션에 Cypher 도구(같은 워크스페이스의 브라우저 조작, 항목 보기 등)를 연결
 # home = "about:blank"                # "chrome" 엔진의 브라우저를 처음 띄울 때 여는 주소(기본은 빈 페이지)
@@ -202,6 +233,7 @@ impl Config {
             _ => "known",
         }
         .to_string();
+        config.ssh.keepalive = config.ssh.keepalive.min(3600);
         Ok(config)
     }
 
@@ -281,6 +313,16 @@ mod tests {
         assert_eq!(config.profile("powershell").unwrap().program, "pwsh.exe");
         assert_eq!(config.profile("gitbash").unwrap().args, vec!["-i"]);
         assert!(config.profile("claude").unwrap().claude);
+        assert!(config.ssh.builtin() && config.ssh.keepalive == 30);
+        let old = Config::parse("[ssh]
+engine = \" OpenSSH \"
+keepalive = 99999
+").unwrap();
+        assert!(!old.ssh.builtin());
+        assert_eq!(old.ssh.keepalive, 3600);
+        assert!(Config::parse("[ssh]
+engine = \"무엇\"
+").unwrap().ssh.builtin());
     }
 
     #[test]

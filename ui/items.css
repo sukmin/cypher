@@ -1017,3 +1017,62 @@ li.tone-fail .dot.kind, li.tone-fail .sub { color: var(--dead); }
 .code-pick-title { color: var(--text); white-space: pre; }
 .code-pick-note { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--idle); white-space: nowrap; text-align: right; direction: rtl; }
 .code-pick-sub { flex: 1 0 100%; padding-left: 24px; overflow: hidden; text-overflow: ellipsis; color: var(--dim); font: 11px var(--mono-font); white-space: pre; }
+
+/* ── 헥사 에디터: 왼쪽 절반은 바이트, 오른쪽 절반은 해석 ── */
+.doc.hexed .doc-bar { flex-wrap: wrap; row-gap: 4px; overflow: visible; }
+.doc.hexed .doc-bar button:disabled { opacity: 0.5; }
+.hex-find { flex: none; display: flex; align-items: center; gap: 6px; padding: 4px 8px; border-bottom: 1px solid var(--line); background: var(--panel); }
+.hex-find[hidden] { display: none; }
+.hex-find-input { flex: 1; min-width: 120px; max-width: 420px; height: 24px; padding: 0 6px; font: 12px var(--mono-font); }
+.hex-find button { flex: none; padding: 2px 8px; font-size: 12px; }
+.hex-find button.on { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
+.hex-find-info { font-size: 12px; color: var(--dim); }
+.hex-body { flex: 1; min-height: 0; display: grid; grid-template-columns: 1fr 1fr; }
+.hex-body[hidden] { display: none; }
+.hex-left { min-width: 0; min-height: 0; display: flex; flex-direction: column; border-right: 1px solid var(--line); }
+.hex-head { flex: none; overflow: hidden; padding: 0 8px; color: var(--dim); background: var(--panel); border-bottom: 1px solid var(--line); }
+.hex-head .hx-row { cursor: default; }
+.hex-scroll { flex: 1; min-height: 0; position: relative; overflow-y: auto; overflow-x: auto; outline: none; padding: 0 8px; background: var(--field); }
+.hex-scroll:focus-visible { box-shadow: inset 0 0 0 1px var(--accent); }
+.hex-spacer { width: 1px; }
+/* 높이는 보이는 만큼(그리기에서 정함). 세로로 넘치는 것은 잘라 스크롤 범위를 늘리지 않고, 가로는 넘쳐 가로 스크롤이 된다. */
+.hex-rows { position: absolute; top: 0; left: 8px; right: 0; overflow-y: clip; overflow-x: visible; }
+.hx-row { display: flex; gap: 14px; font: 13px/20px var(--mono-font); white-space: pre; cursor: text; user-select: none; }
+.hx-off { flex: none; color: var(--idle); }
+.hx-bytes { flex: none; display: flex; }
+.hx-b { width: 2.6ch; text-align: center; border-radius: 2px; }
+.hx-gap { width: 0.8ch; }
+.hx-text { flex: none; display: flex; color: var(--text); }
+.hx-c { width: 1ch; text-align: center; }
+.hx-b.zero { color: var(--idle); }
+.hx-b.fld, .hx-c.fld { background: var(--hover); }
+.hx-b.sel, .hx-c.sel { background: color-mix(in srgb, var(--accent) 32%, transparent); }
+.hx-b.hit, .hx-c.hit { background: var(--hit-cur); color: #000; }
+.hx-b.edited, .hx-c.edited { color: var(--dead); font-weight: 700; }
+.hx-b.caret, .hx-c.caret { outline: 2px solid var(--accent); outline-offset: -1px; }
+.hx-b.caret2, .hx-c.caret2 { outline: 1px dashed var(--accent); outline-offset: -1px; }
+.hex-status { flex: none; padding: 3px 8px; font-size: 11px; color: var(--dim); border-top: 1px solid var(--line); background: var(--panel); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-variant-numeric: tabular-nums; }
+.hex-right { min-width: 0; min-height: 0; display: flex; flex-direction: column; }
+.hex-info { flex: 1; min-height: 0; overflow: auto; padding: 8px 10px; }
+.hex-format { font-size: 15px; margin-bottom: 4px; }
+.hex-format b { display: block; }
+.hex-magic { display: block; font: 11px var(--mono-font); color: var(--dim); margin-top: 2px; }
+.hex-summary { margin: 6px 0; }
+.hex-kv { display: flex; gap: 10px; padding: 1px 0; font-size: 12px; }
+.hex-kv .k { flex: none; width: 9em; color: var(--dim); }
+.hex-kv .v { flex: 1; min-width: 0; overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+.hex-notes .hex-note { font-size: 12px; color: var(--busy); margin: 2px 0; }
+.hex-tree { margin-top: 8px; border-top: 1px solid var(--line); padding-top: 4px; }
+.hex-field { display: flex; align-items: baseline; gap: 8px; padding: 2px 6px; font-size: 12px; border-radius: 4px; cursor: pointer; white-space: nowrap; }
+.hex-field:hover { background: var(--hover); }
+.hex-field.here { background: var(--select); }
+.hex-field.picked { box-shadow: inset 2px 0 0 var(--accent); }
+.hex-field .tw { flex: none; width: 1em; color: var(--dim); }
+.hex-field .n { flex: none; color: var(--text); }
+.hex-field .v { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--dim); }
+.hex-field .o { flex: none; font: 11px var(--mono-font); color: var(--idle); }
+.hex-inspect { flex: none; max-height: 45%; overflow: auto; padding: 6px 10px; border-top: 1px solid var(--line); background: var(--panel); }
+.hex-inspect-head { display: flex; align-items: center; gap: 8px; margin-bottom: 4px; font-size: 12px; }
+.hex-inspect-head b { flex: 1; font-weight: 600; }
+.hex-inspect-head button { flex: none; padding: 1px 8px; font-size: 11px; }
+.hex-inspect .hex-kv .v { font-family: var(--mono-font); }

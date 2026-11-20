@@ -257,8 +257,11 @@ async function intoItems(data, context) {
           made.push(await newItem('http', place({ cwd: dirName(info.path), saved: { file: info.path }, show: show() })));
         } else if (info?.kind === 'link') {
           made.push(await newItem('site', place({ saved: { url: info.url, title: stem(info.name) }, show: show() })));
+        } else if (info?.kind === 'other') {
+          // 글자·이미지가 아닌 파일(실행 파일, 묶음, 자료 파일 …)은 헥사 에디터로 연다.
+          made.push(await newItem('hex', place({ saved: { path: info.path }, show: show() })));
         } else if (info) {
-          skipped.push(`${info.name}: ${info.kind === 'folder' ? '폴더는 항목으로 만들 수 없습니다' : '글자나 이미지가 아닌 파일입니다'}`);
+          skipped.push(`${info.name}: 폴더는 항목으로 만들 수 없습니다`);
         } else if (file.type.startsWith('image/') || IMAGE_NAME.test(file.name)) {
           // 경로가 없는 파일(다른 프로그램이 내용만 준 것): 내용을 그대로 받아 넣는다.
           const stored = await invoke('image_store', new Uint8Array(await file.arrayBuffer()), {

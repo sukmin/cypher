@@ -12,6 +12,7 @@ mod drops;
 mod engine;
 mod update;
 mod extras;
+mod hex;
 mod http;
 mod image;
 mod magnet;
@@ -21,6 +22,8 @@ mod memory;
 mod erd;
 mod mindmap;
 mod site;
+mod sshc;
+mod terms;
 mod monitor;
 mod paths;
 mod peer;
@@ -38,10 +41,10 @@ use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{Emitter, Manager};
 use cypher_core::config::Config;
-use cypher_pty::PtySession;
 
 pub struct AppState {
-    pub sessions: Mutex<HashMap<u32, Arc<PtySession>>>,
+    /// 터미널 세션들(이 컴퓨터의 프로그램이거나 내장 SSH의 채널).
+    pub sessions: Mutex<HashMap<u32, Arc<terms::Term>>>,
     pub next_id: AtomicU32,
     /// 상태줄 전달 프로그램이 접속하는 로컬 포트와 확인용 값.
     pub status_port: u16,
@@ -374,6 +377,16 @@ fn main() {
             commands::session_resize,
             commands::session_pause,
             commands::session_close,
+            commands::session_log_pick,
+            commands::session_log_start,
+            commands::session_log_stop,
+            hex::hex_pick,
+            hex::hex_save_pick,
+            hex::hex_stat,
+            hex::hex_read,
+            hex::hex_analyze,
+            hex::hex_find,
+            hex::hex_save,
             commands::ssh_hosts,
             commands::ssh_pick_key,
             commands::wake_after,

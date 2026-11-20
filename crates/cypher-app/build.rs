@@ -10,6 +10,8 @@ use std::path::Path;
 const MAIN: &[&str] = &[
     "app_close", "app_config", "open_config", "open_claude_file", "home_dir", "autostart", "notify", "pick_folder",
     "session_create", "session_write", "session_resize", "session_pause", "session_close",
+    "session_log_pick", "session_log_start", "session_log_stop",
+    "hex_pick", "hex_save_pick", "hex_stat", "hex_read", "hex_analyze", "hex_find", "hex_save",
     "link_detect", "link_open",
     "git_changes", "git_diff", "git_hunks", "save_text", "git_revert", "git_commit",
     "reader_pick", "reader_read", "reader_stamp",

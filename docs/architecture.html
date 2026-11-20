@@ -87,6 +87,8 @@
   <li><a href="#update">업데이트</a></li>
   <li><a href="#code">코드 보기</a></li>
   <li><a href="#ssh">SSH 세션, 타이머·알람</a></li>
+  <li><a href="#builtin-ssh">내장 SSH와 출력 기록</a></li>
+  <li><a href="#hex">헥사 에디터</a></li>
   <li><a href="#storage">어디에 무엇을 저장하나</a></li>
   <li><a href="#limits">막지 못하는 것</a></li>
   <li><a href="#files">코드 위치</a></li>
@@ -596,14 +598,33 @@
 
 <h2 id="ssh">14. SSH 세션, 타이머·알람 <span class="new">0.17부터</span></h2>
 <ul>
-  <li><b>SSH 세션</b>은 터미널 세션의 한 프로필(<code>ssh</code>)입니다. Cypher가 SSH를 직접 구현하지 않고 Windows에 든 OpenSSH(<code>ssh.exe</code>)를 가상 터미널에 붙여 띄웁니다. 그래서 키·에이전트·<code>~/.ssh/config</code>·known_hosts는 명령줄과 똑같이 적용되고, 비밀번호는 Cypher를 지나가기만 할 뿐 저장되지 않습니다.</li>
+  <li><b>SSH 세션</b>은 터미널 세션의 한 프로필(<code>ssh</code>)입니다. 0.18부터 Cypher에 든 SSH로 접속합니다(<a href="#builtin-ssh">내장 SSH</a>). 다루지 못하는 접속(추가 옵션, 그 서버에 걸리는 ProxyJump·ProxyCommand, 포트 포워딩(LocalForward 등), RemoteCommand, ForwardAgent, HostKeyAlias, 따질 수 없는 Match 조건(exec 등))과 설정 <code>[ssh] engine = "openssh"</code>일 때는 예전처럼 Windows에 든 OpenSSH(<code>ssh.exe</code>)를 가상 터미널에 붙여 띄웁니다. 어느 쪽이든 비밀번호는 저장하지 않습니다.</li>
   <li>접속할 곳(<code>{ target, port, identity, options, name }</code>)은 화면이 세션을 만들 때 넘기고, 앱이 <code>ssh</code>의 인자로 바꿉니다(<code>cypher-core/src/ssh.rs</code>). 대상 자리에 옵션이 끼어들지 못하게, <code>-</code>로 시작하거나 빈칸이 든 대상은 거절합니다. 접속할 곳은 항목의 기록에 함께 저장되어 다시 시작하면 쉬는 세션으로 되살아나고, 누르면 다시 접속합니다. 워크스페이스 틀에는 주소·포트·이름만 담고(키 파일 경로와 추가 옵션은 담지 않음 — 틀 파일은 남에게서 받을 수 있고, 옵션은 명령을 실행할 수 있음), 틀로 펼친 SSH 세션은 쉬는 세션으로 놓아 사용자가 누를 때 접속합니다.</li>
-  <li>접속 창(<code>ui/ssh.js</code>)은 저장해 둔 서버(<code>cypher.ssh.hosts</code>)와 <code>~/.ssh/config</code>의 <code>Host</code>(여러 호스트에 걸리는 <code>*</code>·<code>?</code>·<code>!</code>가 든 이름은 뺌)를 보여 줍니다. <b>연결 복제</b>는 같은 접속할 곳으로 세션을 하나 더 여는 것입니다(연결을 함께 쓰는 것이 아니라 새로 접속함. Windows의 OpenSSH는 연결 함께 쓰기를 지원하지 않음).</li>
+  <li>접속 창(<code>ui/ssh.js</code>)은 저장해 둔 서버(<code>cypher.ssh.hosts</code>)와 <code>~/.ssh/config</code>의 <code>Host</code>(여러 호스트에 걸리는 <code>*</code>·<code>?</code>·<code>!</code>가 든 이름은 뺌)를 보여 줍니다. <b>연결 복제</b>는 내장 SSH면 인증을 마친 연결에 채널을 하나 더 여는 것이고(다시 인증하지 않음), OpenSSH로 띄운 세션이면 같은 곳으로 새로 접속하는 것입니다(Windows의 OpenSSH는 연결 함께 쓰기를 지원하지 않음).</li>
   <li><b>동시 입력</b>은 두 가지입니다(<code>broadcast</code>): 나란히 보이는 모든 터미널 세션(<code>'all'</code>, Ctrl+Shift+B)과 나란히 보이는 SSH 세션끼리만(<code>'ssh'</code>, SSH 창 제목 줄의 [동시 입력]). 입력을 보낼 때 받는 세션을 다시 셉니다(<code>castTargets</code>): 끝났거나 쉬는 세션은 빠지고, 대상이 아닌 세션에 친 것은 그 세션에만 갑니다.</li>
   <li><b>타이머·알람</b>(<code>ui/timer.js</code>)은 울릴 때를 벽시계 시각으로 적어 화면의 저장소에 둡니다(<code>cypher.timers</code>). 1초마다, 그리고 켠 직후에 지난 것을 찾아 알리고 지웁니다. 그래서 Cypher가 꺼져 있던 동안 지나간 것은 켠 직후에 "지난 알람"으로, 컴퓨터가 잠들어 늦어진 것은 깨어난 직후에 알립니다. 24시간을 넘는 것은 받지 않습니다. 저장된 목록이 기준이라(맞추고 지우고 살필 때마다 다시 읽음) Cypher 창이 둘이어도 서로의 것을 지우지 않습니다. 창이 가려지거나 내려가 있으면 브라우저가 화면의 타이머를 늦추므로(오래 가려져 있으면 1분에 한 번), 다음에 울릴 때까지 앱이 대신 기다렸다가(<code>wake_after</code>, 길면 30초씩 끊어) 화면을 깨웁니다.</li>
 </ul>
 
-<h2 id="storage">15. 어디에 무엇을 저장하나</h2>
+<h2 id="builtin-ssh">15. 내장 SSH와 출력 기록 <span class="new">0.18부터</span></h2>
+<ul>
+  <li><b>세션 하나 = 채널 하나</b>: 앱의 세션 표(<code>terms.rs</code>의 <code>Term</code>)는 가상 터미널의 프로그램(<code>PtySession</code>)이거나 SSH 채널(<code>sshc.rs</code>의 <code>SshTerm</code>)입니다. 화면은 둘을 가리지 않고 같은 명령(<code>session_write</code>·<code>session_resize</code>·<code>session_pause</code>·<code>session_close</code>)과 같은 출력 통로, 같은 <code>session-exit</code> 알림을 씁니다.</li>
+  <li><b>접속</b>: <code>session_create</code>가 바로 세션 번호를 돌려주고 접속은 뒤에서 이어집니다(russh, 암호는 ring). 진행 안내와 물음은 그 세션의 출력으로 나가고, 그동안 화면에서 친 글은 물음의 답으로 읽습니다(<code>Io::ask</code>: 백스페이스·Ctrl+U·Ctrl+C, 비밀번호는 화면에 보이지 않음). 접속할 곳은 <code>~/.ssh/config</code>(Host 패턴과 <code>!</code>, Include, <code>Match</code>의 all·host·originalhost, %d·%h·%r 풀기)에서 HostName·User·Port·IdentityFile·IdentitiesOnly·UserKnownHostsFile·StrictHostKeyChecking·HashKnownHosts·ConnectTimeout을 읽어 정합니다(<code>cypher-core/src/ssh.rs</code>의 <code>host_settings</code>). 따르지 못하는 설정(포트 포워딩, RemoteCommand, ForwardAgent, HostKeyAlias, 따질 수 없는 Match 조건 아래의 설정 등)이 걸리면 <code>unsupported</code>에 적고, 그 접속은 무시하지 않고 OpenSSH로 넘깁니다.</li>
+  <li><b>서버 키</b>: 접속할 때 known_hosts에 그 서버로 적힌 키 종류를 앞으로 당겨 달라고 합니다(<code>key_order</code>: OpenSSH처럼. 그러지 않으면 ECDSA만 적힌 서버도 Ed25519 키를 보여 처음 보는 서버로 묻게 됨). 처음 키 교환 때 russh가 부르는 <code>check_server_key</code>에서 모든 known_hosts 파일(해시된 줄, 와일드카드, <code>[host]:port</code>, <code>@revoked</code>)을 본 뒤 막은 키 → 아는 키 → 바뀐 키 차례로 정합니다(<code>check_known_host</code>). 같으면 접속, 같은 종류의 다른 키면 경고하고 끊기, 처음 보는 키면 지문(SHA256)을 보여 주고 화면에서 yes/no를 받아 known_hosts에 덧붙입니다(<code>HashKnownHosts yes</code>면 해시로). 다른 종류의 키만 적힌 서버가 기록에 없는 종류를 보이면 처음 보는 서버가 아니라 주의로 묻습니다. 다시 하는 키 교환은 맺은 연결 안에서 하므로 다시 묻지 않습니다.</li>
+  <li><b>인증</b>: 먼저 none으로 서버가 받는 방법을 알아낸 뒤, 공개 키(Windows OpenSSH 에이전트 <code>\\.\pipe\openssh-ssh-agent</code>와 Pageant의 키 → 키 파일, 암호 걸린 키는 암호를 물음, RSA는 서버가 받는 SHA-2 서명) → 키보드 대화식(서버가 묻는 것을 그대로 물음, 2단계 인증) → 비밀번호(세 번) 차례로 해 봅니다. 부분 성공(2단계)이면 서버가 새로 준 방법으로 이어 갑니다. 한 번 받는다고 한 방법은 실패한 뒤에도 다시 해 봅니다(실패한 방법을 목록에서 빼는 서버가 있음).</li>
+  <li><b>연결 나눠 쓰기</b>: 인증을 마친 연결(<code>Conn</code>)은 쓰는 세션 수를 셉니다. 복제(<code>session_create</code>의 <code>clone_of</code>)는 원래 세션의 연결이 살아 있으면 그 수를 하나 늘리고 채널만 엽니다. 마지막 세션이 끝나면 연결을 끊고, 끊는 중인 연결은 다시 쓰지 않습니다(새로 접속). 나눠 쓰기 전에 ping을 보내 5초 안에 답이 없으면(잠들었다 깨어 서버 쪽에서는 끊긴 연결) 새로 접속하고, 채널 열기·터미널 요청은 20초 제한을 둡니다. 원래 세션이 먼저 끝나도 복제한 세션은 그대로 돕니다. 화면은 복제가 아니어도, 같은 접속할 곳·포트·키 파일·옵션으로 이미 접속해 있는 세션이 있으면 그 번호를 <code>clone_of</code>로 넘깁니다(다시 시작한 뒤 쉬던 세션을 차례로 재개할 때 비밀번호를 거듭 묻지 않게).</li>
+  <li><b>흐름</b>: 입력은 따로 도는 일꾼이 채널에 씁니다(서버가 입력을 받지 않아 쓰기가 기다리는 동안에도 출력을 읽어야 서로 기다리지 않음). 화면이 출력을 못 따라가면(<code>session_pause</code>) 그동안 받은 출력을 8MB까지 모아 두었다가 다시 받을 때 보냅니다(채널 읽기를 바로 멈추면 같은 연결의 다른 세션까지 멈춤). 접속·인증하는 동안 바뀐 창 크기는 적어 두었다가 터미널을 요청할 때 씁니다. 연결 확인(<code>[ssh] keepalive</code>, 기본 30초)이 세 번 답이 없으면 끊긴 것으로 봅니다.</li>
+  <li><b>출력 기록</b>(<code>session_log_start</code>·<code>session_log_stop</code>): 출력이 화면으로 가는 길(<code>on_output</code>)에서 함께 받아 <code>cypher-core/src/termlog.rs</code>로 글자로 바꿔 적습니다. 줄을 칸의 배열로 들고 CR(줄 처음으로)·백스페이스·CSI K(줄 지우기)·C/D/G(커서 옆으로)·P/X/@(글자 빼기·지우기·끼우기)를 따라가므로, 셸의 줄 편집과 진행률은 화면에 보이던 마지막 모습으로 남고, 색·OSC(창 제목)·사적 모드는 빠집니다. 넓은 글자(한글)는 두 칸으로 셉니다. 끝난 줄만 적고 매번 비우므로 기록 중에도 파일을 열어 볼 수 있습니다. 파일에 쓰는 것은 기록마다 따로 도는 스레드가 하고(느리거나 멈춘 드라이브가 출력과 창을 붙잡지 않게), 쓰지 못하면 기록을 멈추고 <code>session-log-failed</code>로 화면에 알립니다. 커서 이동 인자와 한 줄의 칸 수에는 한도(16,384칸)를 둡니다. 세션이 끝나면 세션 표에서 먼저 뺀 뒤 기록을 마칩니다(그 뒤로는 기록을 시작하지 않음).</li>
+</ul>
+
+<h2 id="hex">16. 헥사 에디터 <span class="new">0.18부터</span></h2>
+<ul>
+  <li><b>읽기</b>: 화면(<code>ui/hex.js</code>)은 보이는 줄의 바이트만 64KB 쪽으로 읽어 두고(<code>hex_read</code>, 256쪽까지), 줄은 보이는 것만 그립니다. 스크롤 영역이 8백만 px를 넘는 큰 파일은 스크롤을 비율로 옮기고 휠은 줄 단위로 직접 옮깁니다. 그래서 몇 GB 파일도 엽니다.</li>
+  <li><b>해석</b>(<code>hex_analyze</code> → <code>cypher-core/src/binfmt.rs</code>): 앞의 바이트(매직 넘버)로 형식을 정하고, 구조를 읽을 줄 아는 형식은 필요한 곳만 읽어 칸의 나무(<code>Field { name, offset, len, value, children }</code>)를 만듭니다. PNG는 덩어리와 CRC, JPEG는 표지 구획, ZIP은 끝의 중앙 디렉터리에서 항목과 로컬 머리·자료 자리(Office 문서·JAR·APK·EPUB을 가림), PE는 DOS·COFF·선택 머리·자료 디렉터리·구역 표(.NET 여부), ELF는 프로그램·구역 머리(구역 이름 표), 그 밖에 GIF·BMP·ICO·gzip·tar·PDF·Mach-O·Java 클래스·SQLite·RIFF·ISO BMFF·FLAC·ID3를 읽고, 30여 가지는 이름만 알아봅니다. 모르면 글자 파일인지(BOM·UTF-8·줄 끝) 보고, 아니면 엔트로피·0 바이트 비율을 보입니다. 잘렸거나 깨진 파일은 읽을 수 있는 데까지 읽고 까닭을 적습니다(무작위 바이트로 시험).</li>
+  <li><b>고치기</b>: 덮어쓰기만 합니다. 고친 바이트는 화면이 자리 → 값으로 들고 있고(원래 값으로 되돌리면 지움), 해석·찾기·저장 때 이어진 조각들(<code>patches</code>)로 넘겨 앱이 파일 위에 덮어 봅니다. 저장(<code>hex_save</code>)은 열 때의 크기·고친 시각과 다르면 묻고, 256MB 이하는 옆에 새 파일로 다 쓴 뒤 <code>ReplaceFileW</code>로 바꿔치기(원래 파일의 속성·권한·대체 스트림·만든 시각을 지킴), 그보다 크거나 하드 링크가 여럿·심볼릭 링크인 파일은 고친 자리만 씁니다. 저장하는 동안 화면은 고치기·다른 파일 열기·다시 저장을 받지 않습니다. 저장하지 않은 고침(64KB까지)은 항목 상태(<code>state().edits</code>: 크기·고친 시각·조각)에 담겨 배치와 함께 저장되고, 다시 열 때 파일이 그대로면 되살립니다.</li>
+  <li><b>오른쪽 ↔ 왼쪽</b>: 칸을 누르면 그 바이트들을 고르고, 커서가 든 가장 깊은 칸을 목록에 표시합니다(접혀 있으면 보이는 조상 칸). 아래의 값 살펴보기는 커서 자리의 8바이트를 2진수·정수·실수·UTF-8·유닉스 시각으로 읽습니다(리틀/빅 엔디언).</li>
+</ul>
+
+<h2 id="storage">17. 어디에 무엇을 저장하나</h2>
 <table>
   <tr><th>곳</th><th>담는 것</th></tr>
   <tr><td><code>%APPDATA%\cypher</code></td><td>사용자의 것: 설정(<code>config.toml</code>, 예시 <code>config.example.toml</code>), 메모(<code>memos</code>), 마인드맵(<code>mindmaps</code>), ERD(<code>erds</code>), 할 일(<code>todos</code>), 이미지(<code>images</code>), 워크스페이스 틀(<code>templates</code>). 닫은 것은 각 폴더의 <code>closed</code>에 30일</td></tr>
@@ -615,7 +636,7 @@
 </table>
 <p>Cypher는 사용자의 설정 파일을 고치거나 덮어쓰지 않고(없을 때만 기본 파일을 만듦), 통계·오류 보고 같은 통신을 하지 않습니다. 업데이트 확인도 단추를 눌렀을 때만 합니다.</p>
 
-<h2 id="limits">16. 막지 못하는 것</h2>
+<h2 id="limits">18. 막지 못하는 것</h2>
 <p>울타리는 <b>Cypher 도구</b>에 세운 것입니다. 그 바깥은 Cypher가 막을 수 없습니다.</p>
 <ul>
   <li><b>파일 직접 접근</b>: Claude Code는 자기 권한 설정 안에서 이 컴퓨터의 파일을 읽고 씁니다. 다른 워크스페이스의 메모가 저장된 파일도 파일로는 읽을 수 있습니다. 이것은 Claude Code의 권한 설정으로 다룹니다.</li>
@@ -625,13 +646,15 @@
   <li><b>업데이트의 믿음</b>: 확인값은 GitHub가 알려 주는 값입니다. 묶음이 올라온 뒤에 바뀌지 않았다는 것과 이 저장소의 릴리즈에서 받았다는 것은 확인하지만, 릴리즈를 올리는 계정 자체가 탈취된 경우까지 막지는 못합니다(업데이트는 실행 파일의 서명을 따로 확인하지 않습니다).</li>
 </ul>
 
-<h2 id="files">17. 코드 위치</h2>
+<h2 id="files">19. 코드 위치</h2>
 <table>
   <tr><th>하는 일</th><th>파일</th></tr>
   <tr><td>항목·워크스페이스·분할·북마크, 범위 판정(<code>canControl</code>), 도구 요청에 답하기(<code>mcpAction</code>), 프로필 번호(<code>profileOf</code>), 만든 파일 놓기(<code>onCreatedFile</code>), 고친 파일 새로 읽기(<code>onEditedFile</code>),세션 상태(<code>onStatus</code>·<code>onHook</code>·<code>onTool</code>), 되살리기(<code>restore</code>·<code>wake</code>), 다시 맞추기(<code>realign</code>)</td><td><code>ui/main.js</code></td></tr>
   <tr><td>항목 화면: 메모, HTTP, 사이트, 이미지, 마인드맵, ERD, 문서, 할 일, 명령, 표, 빈 영역</td><td><code>ui/memo.js</code>, <code>http.js</code>, <code>site.js</code>, <code>image.js</code>, <code>mindmap.js</code>, <code>erd.js</code>, <code>reader.js</code>, <code>todo.js</code>, <code>run.js</code>, <code>table.js</code>, <code>empty.js</code></td></tr>
   <tr><td>코드 보기: 화면(나무·탭·이동·찾기), 문법 강조, 정의·쓰는 곳 찾기(글자의 모양으로), 프로젝트 훑기</td><td><code>ui/code.js</code>, <code>ui/code-nav.js</code>(정의로 가기의 해석기), <code>ui/code-lex.js</code>, <code>crates/cypher-core/src/code.rs</code>, <code>crates/cypher-app/src/code.rs</code></td></tr>
-  <tr><td>SSH 접속 창과 저장해 둔 서버, 접속할 곳을 ssh 인자로 바꾸기·<code>~/.ssh/config</code> 읽기, 타이머·알람</td><td><code>ui/ssh.js</code>, <code>crates/cypher-core/src/ssh.rs</code>, <code>ui/timer.js</code></td></tr>
+  <tr><td>SSH 접속 창과 저장해 둔 서버, 접속할 곳을 ssh 인자로 바꾸기·<code>~/.ssh/config</code>·known_hosts 읽기, 타이머·알람</td><td><code>ui/ssh.js</code>, <code>crates/cypher-core/src/ssh.rs</code>, <code>ui/timer.js</code></td></tr>
+  <tr><td>내장 SSH(접속·서버 키·인증·채널·연결 나눠 쓰기), 세션(가상 터미널·SSH 채널)과 출력 기록</td><td><code>crates/cypher-app/src/sshc.rs</code>, <code>terms.rs</code>, <code>crates/cypher-core/src/termlog.rs</code></td></tr>
+  <tr><td>헥사 에디터: 화면, 조각 읽기·찾기·저장, 형식 알아보기·구조 읽기</td><td><code>ui/hex.js</code>, <code>crates/cypher-app/src/hex.rs</code>, <code>crates/cypher-core/src/binfmt.rs</code></td></tr>
   <tr><td>떠 있는 창·메뉴·변경 내용·업데이트 창, 빠른 이동, 닫은 항목, 알림 기록, 워크스페이스 틀, 끌어다 놓기, 모양</td><td><code>ui/extras.js</code>, <code>palette.js</code>, <code>closed.js</code>, <code>notices.js</code>, <code>template.js</code>, <code>drop.js</code>, <code>look.js</code>, <code>matrix.js</code></td></tr>
   <tr><td>글자 칸 수 표</td><td><code>ui/widths.js</code></td></tr>
   <tr><td>로컬 통로: 확인값, 세션 확인, 상태줄·훅 받기, 도구 신호 추리기</td><td><code>crates/cypher-app/src/status.rs</code></td></tr>

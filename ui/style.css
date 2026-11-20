@@ -240,6 +240,10 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
 /* 동시 입력을 받는 창(나란히 보이는 모든 세션, 또는 SSH 동시 입력이면 SSH 세션만) */
 .pane.casting .pane-head { border-bottom-color: var(--busy); }
 .pane-button.cast.on { color: var(--on-accent); background: var(--busy); border-color: var(--busy); }
+/* 출력 기록 중 */
+.pane-button.rec.on { color: var(--on-accent); background: var(--dead); border-color: var(--dead); }
+.pane-button:disabled { opacity: 0.5; }
+#sessions .sub .recording { color: var(--dead); font-weight: 600; }
 .pane-info { display: contents; } /* 제목·모델 글자만 다시 그리려고 묶은 것. 배치에는 끼지 않는다. */
 .pane-head .title { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .pane-head .model { color: var(--accent); }
@@ -578,6 +582,7 @@ button:disabled:hover { border-color: var(--line); }
 #menu[hidden] { display: none; }
 #menu > button { text-align: left; background: none; border: none; border-radius: 4px; padding: 5px 10px; }
 #menu > button:hover { background: var(--select); }
+#menu > button:disabled { color: var(--dim); opacity: 0.6; background: none; cursor: default; }
 #menu { max-height: calc(100vh - 8px); overflow-y: auto; }
 .menu-caption { padding: 5px 10px 1px; font-size: 11px; color: var(--dim); }
 .menu-icons { display: flex; gap: 2px; padding: 1px 8px; }

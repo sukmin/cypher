@@ -12,6 +12,7 @@ use tauri::{AppHandle, Emitter, Manager, State};
 use cypher_core::config::Config;
 use cypher_core::links::{self, LinkSpan, Target};
 use cypher_pty::{PtySession, SpawnOptions};
+use crate::terms::{Log, Term};
 
 const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
@@ -28,6 +29,14 @@ if ($l.Provider.Name -eq 'FileSystem') { \
 struct ExitPayload {
     id: u32,
     code: Option<u32>,
+}
+
+/// 출력 기록을 적지 못해 멈췄다(`session-log-failed`).
+#[derive(Clone, Serialize)]
+struct LogFailedPayload {
+    id: u32,
+    path: String,
+    error: String,
 }
 
 #[derive(Serialize)]
@@ -239,6 +248,7 @@ pub fn session_create(
     worktree: Option<String>,
     command: Option<String>,
     ssh: Option<cypher_core::ssh::SshTarget>,
+    clone_of: Option<u32>,
     on_output: Channel<InvokeResponseBody>,
 ) -> Result<u32, String> {
     let profile = state.config.profile(&profile).ok_or("알 수 없는 프로필입니다")?;
@@ -248,6 +258,46 @@ pub fn session_create(
     let cwd = PathBuf::from(cwd);
     if !cwd.is_dir() {
         return Err(format!("폴더가 없습니다: {}", cwd.display()));
+    }
+    // 출력 기록: 출력이 화면으로 가는 길에서 함께 받는다(기록을 켜기 전에는 아무것도 하지 않는다).
+    let log = Log::default();
+
+    // 내장 SSH: 이 앱이 직접 접속한다. 다루지 못하는 접속(추가 옵션, ProxyJump)이면 아래에서 OpenSSH(ssh.exe)로 띄운다.
+    if is_ssh {
+        let target = ssh.as_ref().ok_or("접속할 곳을 정하지 않았습니다. 워크스페이스 머리의 + → \"+ SSH 세션\"으로 접속할 곳을 적어 주세요.")?;
+        cypher_core::ssh::ssh_args(target)?; // 접속할 곳이 올바른지(빈칸·옵션이 끼어들지 않았는지)
+        let env = crate::sshc::SshEnv::system(state.config.ssh.keepalive);
+        let why = crate::sshc::unsupported(target, &env);
+        if state.config.ssh.builtin() && why.is_none() {
+            // 연결 복제: 그 세션의 연결이 살아 있으면 채널만 하나 더 연다(다시 인증하지 않는다).
+            let share = clone_of.and_then(|other| session(&state, other).ok()).and_then(|term| term.connection());
+            let id = state.next_id.fetch_add(1, Ordering::Relaxed);
+            let (tee, exit_log, exit_app) = (log.clone(), log.clone(), app.clone());
+            // 등록이 끝나기 전에 종료 알림이 먼저 지우려 들지 않도록 잠근 채로 띄운다.
+            let mut sessions = state.sessions.lock().unwrap();
+            let term = crate::sshc::SshTerm::start(
+                target.clone(),
+                env,
+                share,
+                (cols, rows),
+                move |bytes| {
+                    tee.feed(bytes);
+                    let _ = on_output.send(InvokeResponseBody::Raw(bytes.to_vec()));
+                },
+                move |code| {
+                    // 표에서 먼저 빼야 그사이 기록을 새로 시작하지 못한다.
+                    exit_app.state::<AppState>().sessions.lock().unwrap().remove(&id);
+                    exit_log.close();
+                    let _ = exit_app.emit("session-exit", ExitPayload { id, code });
+                },
+            );
+            sessions.insert(id, Arc::new(Term::ssh(term, log)));
+            return Ok(id);
+        }
+        if let (true, Some(why)) = (state.config.ssh.builtin(), why) {
+            let note = format!("\x1b[90m[{why}이라 Windows의 OpenSSH(ssh.exe)로 접속합니다 · 이 세션을 복제하면 다시 인증합니다]\x1b[0m\r\n");
+            let _ = on_output.send(InvokeResponseBody::Raw(note.into_bytes()));
+        }
     }
 
     // Claude 프로필은 사용자가 설정 → "Claude 실행 명령…"에 적어 둔 명령으로 띄운다(없으면 프로필의 것).
@@ -377,19 +427,22 @@ pub fn session_create(
 
     // 등록이 끝나기 전에 종료 알림이 먼저 지우려 들지 않도록 잠근 채로 띄운다.
     let mut sessions = state.sessions.lock().unwrap();
-    let exit_app = app.clone();
+    let (tee, exit_log, exit_app) = (log.clone(), log.clone(), app.clone());
     let session = PtySession::spawn(
         options,
         move |bytes| {
+            tee.feed(bytes);
             let _ = on_output.send(InvokeResponseBody::Raw(bytes.to_vec()));
         },
         move |code| {
+            // 표에서 먼저 빼야 그사이 기록을 새로 시작하지 못한다.
             exit_app.state::<AppState>().sessions.lock().unwrap().remove(&id);
+            exit_log.close();
             let _ = exit_app.emit("session-exit", ExitPayload { id, code });
         },
     )
     .map_err(|e| format!("{e:#}"))?;
-    sessions.insert(id, Arc::new(session));
+    sessions.insert(id, Arc::new(Term::pty(session, log)));
     Ok(id)
 }
 
@@ -465,11 +518,11 @@ pub fn run_start(
         },
     )
     .map_err(|e| format!("{e:#}"))?;
-    sessions.insert(id, Arc::new(session));
+    sessions.insert(id, Arc::new(Term::pty(session, Log::default())));
     Ok(id)
 }
 
-fn session(state: &State<'_, AppState>, id: u32) -> Result<Arc<PtySession>, String> {
+fn session(state: &State<'_, AppState>, id: u32) -> Result<Arc<Term>, String> {
     state.sessions.lock().unwrap().get(&id).cloned().ok_or_else(|| "끝난 세션입니다".to_string())
 }
 
@@ -478,12 +531,12 @@ fn session(state: &State<'_, AppState>, id: u32) -> Result<Arc<PtySession>, Stri
 /// 화면은 한 번에 하나씩 보내고 끝나기를 기다리므로 입력 순서는 그대로다.
 #[tauri::command(async)]
 pub fn session_write(state: State<'_, AppState>, id: u32, data: String) -> Result<(), String> {
-    session(&state, id)?.write(data.as_bytes()).map_err(|e| e.to_string())
+    session(&state, id)?.write(data.as_bytes())
 }
 
 #[tauri::command]
 pub fn session_resize(state: State<'_, AppState>, id: u32, cols: u16, rows: u16) -> Result<(), String> {
-    session(&state, id)?.resize(cols, rows).map_err(|e| e.to_string())
+    session(&state, id)?.resize(cols, rows)
 }
 
 /// 화면이 출력을 못 따라갈 때 읽기를 잠시 멈춘다.
@@ -499,6 +552,52 @@ pub fn session_close(state: State<'_, AppState>, id: u32) {
     if let Ok(s) = session(&state, id) {
         s.kill();
     }
+}
+
+/// 세션 출력을 기록할 파일을 고른다(저장 창). 취소하면 None.
+#[tauri::command]
+pub async fn session_log_pick(name: String, start: Option<String>) -> Option<String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("세션 출력을 기록할 파일")
+            .set_file_name(name)
+            .add_filter("기록 파일", &["log", "txt"])
+            .add_filter("모든 파일", &["*"]);
+        if let Some(dir) = start.filter(|d| Path::new(d).is_dir()) {
+            dialog = dialog.set_directory(dir);
+        }
+        dialog.save_file().map(|p| p.to_string_lossy().into_owned())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
+/// 세션 출력을 그 파일에 기록하기 시작한다(그 뒤에 나오는 출력을 글자로 적는다). 기록하는 파일의 경로를 돌려준다.
+/// 파일 열기는 작업 스레드에서 한다(느린 드라이브에서 창이 멈추지 않게). 적다가 실패하면 `session-log-failed`로 알린다.
+#[tauri::command]
+pub async fn session_log_start(app: AppHandle, state: State<'_, AppState>, id: u32, path: String, label: String) -> Result<String, String> {
+    let term = session(&state, id)?;
+    let path = PathBuf::from(path);
+    if !path.is_absolute() {
+        return Err("기록할 파일의 경로가 올바르지 않습니다".into());
+    }
+    let failed: crate::terms::LogFailed = Arc::new(move |file: &Path, why: &str| {
+        let _ = app.emit("session-log-failed", LogFailedPayload { id, path: file.to_string_lossy().into_owned(), error: why.to_string() });
+    });
+    tauri::async_runtime::spawn_blocking(move || {
+        term.log.start(&path, &label, failed).map_err(|e| format!("기록 파일을 열지 못했습니다({}): {e}", path.display()))?;
+        Ok(path.to_string_lossy().into_owned())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+/// 세션 출력 기록을 멈춘다. 기록하던 파일의 경로(기록 중이 아니었거나 적다가 실패했으면 None).
+#[tauri::command]
+pub async fn session_log_stop(state: State<'_, AppState>, id: u32) -> Result<Option<String>, String> {
+    let Ok(term) = session(&state, id) else { return Ok(None) };
+    tauri::async_runtime::spawn_blocking(move || term.log.stop().map(|path| path.to_string_lossy().into_owned())).await.map_err(|e| e.to_string())
 }
 
 /// 한 줄에서 링크를 찾는다. 느린 드라이브에서 창이 멈추지 않도록 작업 스레드에서 돈다.
