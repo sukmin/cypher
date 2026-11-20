@@ -388,7 +388,6 @@ fn main() {
             hex::hex_find,
             hex::hex_save,
             commands::ssh_hosts,
-            commands::ssh_pick_key,
             commands::wake_after,
             commands::link_detect,
             commands::link_open,

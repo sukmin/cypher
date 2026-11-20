@@ -617,7 +617,7 @@ async function newSession(profileId, opts = {}) {
     startCwd: cwd, cwd, project: '', worktree: opts.worktree || '',
     name: opts.name || '', color: opts.color || '', mark: freeMark(opts.mark),
     group,
-    ssh,               // SSH 세션이면 접속할 곳 { target, name?, port?, identity?, options? }
+    ssh,               // SSH 세션이면 접속할 곳 { target(주소), port?, name? } — 사용자 이름은 담지 않는다(세션 화면에서 묻는다)
     cloneOf: opts.cloneOf ?? null, // 연결 복제: 이 세션 번호의 연결을 같이 쓴다(처음 띄울 때만)
     logPath: '',       // 출력을 기록하고 있는 파일(기록하지 않으면 빈 글)
     title: '', model: '', effort: '', context: null, cost: 0,
@@ -683,13 +683,8 @@ async function startProcess(s, worktree = null) {
   // 기본 Claude 프로필은 사용자가 정해 둔 실행 명령으로 띄운다. 그 명령으로 띄우지 못하거나 뜨자마자 끝나면 어디서 고치는지 알려 준다.
   const command = s.profile.id === 'claude' && claudeCommand ? claudeCommand : null;
   s.launch = { command, at: Date.now() };
-  // 같은 서버(접속할 곳·포트·키 파일·옵션이 모두 같은 곳)에 이미 접속해 있는 세션이 있으면 그 연결을 같이 쓴다:
-  // 다시 시작한 뒤 쉬던 SSH 세션을 차례로 누를 때, 같은 서버에 새로 열 때 비밀번호를 거듭 묻지 않게.
-  if (s.ssh && s.cloneOf == null) {
-    const sameServer = (a, b) => a.target === b.target && (a.port || 0) === (b.port || 0) && (a.identity || '') === (b.identity || '') && (a.options || '') === (b.options || '');
-    const open = [...sessions.values()].find((o) => o !== s && o.ssh && o.id != null && !o.exited && !o.dormant && sameServer(o.ssh, s.ssh));
-    if (open) s.cloneOf = open.id;
-  }
+  // 같은 서버에 이미 접속해 있는 연결을 같이 쓸지는 앱이 정한다: 접속할 곳에는 주소와 포트만 있고 사용자 이름은 세션 화면에서
+  // 물어야 알기 때문이다(같은 사용자일 때만 같이 쓴다). 여기서는 연결 복제(cloneOf)만 넘긴다.
   // SSH 세션은 셸이 열렸다는 알림(session-ready)이 올 때까지 로그인 중으로 본다(동시 입력에서 뺀다).
   if (s.ssh) s.sshReady = false;
   try {
@@ -2122,7 +2117,7 @@ function currentGroup() {
 function templateItem(s) {
   const base = { kind: s.kind, cwd: s.project || s.startCwd, name: s.name || undefined, color: s.color || undefined };
   // 세션은 프로필과 폴더만 담는다(대화는 담지 않고, 펼칠 때 새로 시작한다).
-  // SSH 세션은 접속할 곳(주소·포트·이름)도 담는다. 키 파일과 추가 옵션은 담지 않는다(다른 PC에는 없는 경로이고, 옵션은 명령을 실행할 수 있다).
+  // SSH 세션은 접속할 곳(주소·포트·이름)도 담는다. 사용자 이름은 담지 않는다(접속할 때 세션 화면에서 묻는다).
   if (isTerm(s)) return { ...base, profile: s.profile.id, ...(s.ssh ? { ssh: { target: s.ssh.target, name: s.ssh.name, port: s.ssh.port } } : {}) };
   const state = s.view.state();
   switch (s.kind) {
@@ -2204,7 +2199,7 @@ async function openTemplate(template, { group, cwd = null }) {
     const saved = term ? null : templateSaved(item.kind, item.saved);
     // 다른 폴더에서 펼치는 코드 보기는 그 폴더를 본다.
     if (saved && item.kind === 'code' && cwd) saved.root = cwd;
-    // 틀 파일은 다른 사람에게서 받은 것일 수 있다. SSH 세션은 주소·포트·이름만 받는다(키 파일·추가 옵션은 받지 않는다).
+    // 틀 파일은 다른 사람에게서 받은 것일 수 있다. SSH 세션은 주소·포트·이름만 받는다(예전 틀의 `user@`은 뗀다).
     const ssh = term && item.profile === SSH ? cleanSpec({ target: item.ssh?.target, name: item.ssh?.name, port: item.ssh?.port }) : null;
     const known = term ? config.profiles.some((p) => p.id === item.profile) && (item.profile !== SSH || !!ssh) : !!KINDS[item.kind] && !!saved;
     const title = typeof item.name === 'string' ? item.name : '';

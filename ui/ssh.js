@@ -1,11 +1,14 @@
 // SSH 세션: 접속할 곳을 고르거나 적는 창, 저장해 둔 서버 목록.
 //
+// 서버는 주소와 포트만 저장한다(사이드바에 보일 이름은 붙일 수 있다). 사용자 이름·비밀번호·키 파일의 암호·일회용 번호·
+// 처음 보는 서버의 키는 접속할 때마다 세션 화면에서 차례로 묻고(키보드 대화식), 저장하지 않는다.
+// ~/.ssh/config에 User를 적어 둔 호스트는 그 사용자로 접속한다(사용자 이름을 묻지 않는다).
 // 접속은 Cypher에 든 SSH(앱의 sshc 모듈)로 한다. ~/.ssh/config·키 파일·known_hosts·SSH 에이전트(Windows OpenSSH, Pageant)를
-// 명령줄의 ssh처럼 쓰고, 처음 보는 서버의 키·키 파일의 암호·비밀번호·2단계 인증은 세션 화면에서 묻는다(저장하지 않는다).
-// 같은 서버에 세션을 더 열 때(연결 복제)는 인증을 마친 연결에 채널만 하나 더 열어 다시 묻지 않는다.
-// "추가 옵션"을 적었거나 ~/.ssh/config에서 내장 SSH가 따르지 못하는 설정(경유, 포트 포워딩, 원격 명령, 따질 수 없는 Match 등)이
-// 걸리면 그 세션은 Windows의 OpenSSH(ssh.exe)로 띄운다.
-// 저장해 둔 서버는 이 컴퓨터에 기억한다(localStorage): 이름, 접속할 곳(user@host), 포트, 키 파일, 추가 옵션.
+// 명령줄의 ssh처럼 쓴다. 같은 서버에 같은 사용자로 인증을 마친 연결이 있으면 사용자 이름을 받은 뒤 그 연결을 같이 써서
+// 비밀번호를 다시 묻지 않는다. 연결 복제(세션의 오른쪽 클릭 → 이 연결 복제)는 사용자 이름도 묻지 않는다.
+// ~/.ssh/config에서 내장 SSH가 따르지 못하는 설정(경유, 포트 포워딩, 원격 명령, 따질 수 없는 Match 등)이 걸리면 그 세션은
+// Windows의 OpenSSH(ssh.exe)로 띄운다(사용자 이름을 모르면 띄우기 전에 묻는다).
+// 저장해 둔 서버는 이 컴퓨터에 기억한다(localStorage): 주소, 포트, 이름.
 
 const KEY = 'cypher.ssh.hosts';
 const MAX_HOSTS = 100;
@@ -16,32 +19,46 @@ export function initSsh(given) {
   api = given;
 }
 
-/** 접속할 곳을 저장·전달하기 좋게 다듬는다: 글자만 남기고, 빈 값은 뺀다. 쓸 수 없으면 null. */
+/** 주소에서 사용자 이름(`user@`)을 뗀다: 예전에 `user@host`로 저장한 서버·세션도 주소만 남긴다. */
+const hostOnly = (target) => target.slice(target.lastIndexOf('@') + 1).trim();
+
+/**
+ * 접속할 곳을 저장·전달하기 좋게 다듬는다: 주소·포트·이름만 남기고(예전에 저장한 사용자 이름·키 파일·추가 옵션은 버린다),
+ * 빈 값은 뺀다. 쓸 수 없으면 null.
+ */
 export function cleanSpec(spec) {
   if (!spec || typeof spec !== 'object') return null;
   const text = (value) => (typeof value === 'string' ? value.trim() : '');
-  const target = text(spec.target);
+  const target = hostOnly(text(spec.target));
   if (!target) return null;
   const port = Number(spec.port);
   return {
     target,
     ...(text(spec.name) ? { name: text(spec.name) } : {}),
     ...(Number.isInteger(port) && port > 0 && port < 65536 ? { port } : {}),
-    ...(text(spec.identity) ? { identity: text(spec.identity) } : {}),
-    ...(text(spec.options) ? { options: text(spec.options) } : {}),
   };
 }
 
-/** 사이드바와 창 제목에 보일 이름: 붙여 둔 이름, 없으면 접속할 곳(포트가 있으면 함께). */
+/** 사이드바와 창 제목에 보일 이름: 붙여 둔 이름, 없으면 주소(포트가 있으면 함께). */
 export const specLabel = (spec) => spec?.name || (spec?.target ? `${spec.target}${spec.port ? `:${spec.port}` : ''}` : '');
 
-/** 두 접속이 같은 곳인지(이름은 보지 않는다). */
-const sameServer = (a, b) => a.target === b.target && (a.port || 0) === (b.port || 0) && (a.identity || '') === (b.identity || '') && (a.options || '') === (b.options || '');
+/** 두 접속이 같은 서버인지(주소와 포트. 이름은 보지 않는다). */
+const sameServer = (a, b) => a.target === b.target && (a.port || 0) === (b.port || 0);
+
+/** 두 저장 항목이 같은 것인지(같은 서버이고 이름도 같다). */
+const sameEntry = (a, b) => sameServer(a, b) && (a.name || '') === (b.name || '');
 
 function load() {
-  let list = [];
-  try { list = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch { /* 깨진 기록은 버린다 */ }
-  return Array.isArray(list) ? list.map(cleanSpec).filter(Boolean) : [];
+  let stored = [];
+  try { stored = JSON.parse(localStorage.getItem(KEY) || '[]'); } catch { /* 깨진 기록은 버린다 */ }
+  if (!Array.isArray(stored)) return [];
+  const list = [];
+  for (const spec of stored.map(cleanSpec)) {
+    if (spec && !list.some((other) => sameEntry(other, spec))) list.push(spec);
+  }
+  // 예전 판이 저장해 둔 사용자 이름·키 파일·추가 옵션은 기록에서도 지운다(주소와 포트만 저장한다).
+  if (JSON.stringify(list) !== JSON.stringify(stored)) save(list);
+  return list;
 }
 
 function save(list) {
@@ -51,11 +68,8 @@ function save(list) {
 /** 저장해 둔 서버 목록(시험·빠른 이동용). */
 export const savedHosts = () => load();
 
-/** 두 저장 항목이 같은 것인지(같은 곳이고 이름도 같다). */
-const sameEntry = (a, b) => sameServer(a, b) && (a.name || '') === (b.name || '');
-
 /**
- * 서버를 저장한다. `original`(고치려고 불러온 항목)을 주면 그 자리의 것을 바꾸고, 아니면 같은 곳이 이미 있을 때 그것을 바꾼다
+ * 서버를 저장한다. `original`(고치려고 불러온 항목)을 주면 그 자리의 것을 바꾸고, 아니면 같은 서버가 이미 있을 때 그것을 바꾼다
  * (이름만 고쳐 저장할 때). 이름만 같은 다른 서버는 건드리지 않는다.
  */
 export function saveHost(spec, original = null) {
@@ -69,6 +83,27 @@ export function saveHost(spec, original = null) {
   // 고친 결과가 다른 항목과 똑같아졌으면 하나만 남긴다.
   save(list.filter((other, index) => index === at || !sameEntry(other, clean)));
   return true;
+}
+
+/**
+ * 주소 칸과 포트 칸에 적은 것을 읽는다. 주소 칸에 포트를 붙여 적었으면(`host:2222`, `[::1]:2222`) 포트를 떼어 낸다.
+ * { target, port } 또는 { problem: 까닭, field: 'target' | 'port' }.
+ */
+function readAddress(given, portText) {
+  let target = (given || '').trim();
+  let port = (portText || '').trim();
+  if (!target) return { problem: '접속할 주소를 적어 주세요 (예: 192.168.0.10, example.com).', field: 'target' };
+  if (target.includes('@')) return { problem: '주소만 적어 주세요. 사용자 이름은 접속할 때 세션 화면에서 묻습니다.', field: 'target' };
+  // `host:2222`(콜론이 하나뿐인 것. 대괄호 없는 IPv6 주소는 콜론이 여럿이라 그대로 둔다)나 `[IPv6 주소]:2222`
+  const joined = /^([^:[\]]+):(\d{1,5})$/.exec(target) || /^\[([^\]]+)\](?::(\d{1,5}))?$/.exec(target);
+  if (joined && !joined[2]) target = joined[1];
+  else if (joined) {
+    if (port && port !== joined[2]) return { problem: '포트를 두 곳에 다르게 적었습니다. 포트는 포트 칸에만 적어 주세요.', field: 'port' };
+    [target, port] = [joined[1], joined[2]];
+  }
+  if (/\s/.test(target) || target.startsWith('-')) return { problem: '주소는 빈칸 없이 적습니다 (예: example.com).', field: 'target' };
+  if (port && !(/^\d{1,5}$/.test(port) && Number(port) > 0 && Number(port) < 65536)) return { problem: '포트는 1~65535의 숫자입니다.', field: 'port' };
+  return { target, port: port ? Number(port) : 0 };
 }
 
 /**
@@ -93,40 +128,25 @@ export async function showSsh(opts = {}, fill = null) {
     row.append(make('span', '', labelText), input);
     return { row, input };
   };
-  const target = field('접속할 곳', 'user@example.com 또는 ~/.ssh/config의 이름', fill?.target, '사용자@호스트. 사용자를 빼면 ~/.ssh/config의 User나 Windows 계정 이름을 씁니다.');
-  const name = field('이름', '(선택) 사이드바에 보일 이름 · 예: 운영 웹 1', fill?.name);
+  const target = field('주소', '예: 192.168.0.10, example.com 또는 ~/.ssh/config의 이름', fill?.target, '서버의 주소(호스트 이름이나 IP)나 ~/.ssh/config에 적어 둔 이름.\n사용자 이름은 적지 않습니다: 접속할 때 세션 화면에서 묻습니다.');
   const port = field('포트', '(선택) 기본 22', fill?.port ? String(fill.port) : '');
-  const identity = field('키 파일', '(선택) 개인 키 경로 · 비우면 ~/.ssh의 키와 에이전트를 씀', fill?.identity);
-  const options = field('추가 옵션', '(선택) 예: -J jump@gate -L 8080:localhost:80 · 적으면 ssh.exe로 접속', fill?.options, 'ssh 명령에 그대로 붙일 옵션. 빈칸으로 나누고, 빈칸이 든 값은 큰따옴표로 감쌉니다.\n옵션을 적은 접속은 Windows의 OpenSSH(ssh.exe)로 띄웁니다(이 접속은 연결 복제 때 다시 인증합니다).');
+  const name = field('이름', '(선택) 사이드바에 보일 이름 · 예: 운영 웹 1', fill?.name);
   port.input.inputMode = 'numeric';
-  const pick = make('button', '', '고르기…');
-  pick.type = 'button';
-  pick.onclick = async () => {
-    const path = await invoke('ssh_pick_key').catch(() => null);
-    if (path) identity.input.value = path;
-  };
-  identity.row.append(pick);
 
   const problem = make('p', 'form-problem', '');
   /** 칸에 적은 것을 접속으로 읽는다. 잘못됐으면 까닭을 보여 주고 null. */
   const read = () => {
-    const given = target.input.value.trim();
-    const portText = port.input.value.trim();
-    let bad = null, message = '';
-    if (!given) [bad, message] = [target, '접속할 곳을 적어 주세요 (예: user@example.com).'];
-    else if (/\s/.test(given) || given.startsWith('-')) [bad, message] = [target, '접속할 곳은 빈칸 없이 user@host 꼴로 적습니다. 옵션은 "추가 옵션" 칸에 적으세요.'];
-    else if (portText && !(/^\d{1,5}$/.test(portText) && Number(portText) > 0 && Number(portText) < 65536)) [bad, message] = [port, '포트는 1~65535의 숫자입니다.'];
-    else if ((options.input.value.match(/"/g) || []).length % 2) [bad, message] = [options, '추가 옵션의 큰따옴표가 닫히지 않았습니다.'];
-    problem.textContent = message;
-    if (bad) { bad.input.focus(); return null; }
-    return cleanSpec({ target: given, name: name.input.value, port: portText ? Number(portText) : 0, identity: identity.input.value, options: options.input.value });
+    const address = readAddress(target.input.value, port.input.value);
+    problem.textContent = address.problem || '';
+    if (address.problem) { (address.field === 'port' ? port : target).input.focus(); return null; }
+    return cleanSpec({ target: address.target, port: address.port, name: name.input.value });
   };
 
   const go = make('button', 'ssh-go', '접속');
-  go.title = '적은 곳에 접속 (Enter)';
+  go.title = '적은 곳에 접속 (Enter) · 사용자 이름과 비밀번호는 세션 화면에서 묻습니다';
   go.onclick = () => { const spec = read(); if (spec) connect(spec); };
   const keep = make('button', '', '저장하고 접속');
-  keep.title = '다음에 한 번 눌러 접속할 수 있게 저장해 두고 접속';
+  keep.title = '주소와 포트를 저장해 두고(다음에 한 번 눌러 접속) 접속';
   keep.onclick = () => { const spec = read(); if (spec && saveHost(spec, fill)) connect(spec); };
   const only = make('button', '', '저장만');
   only.onclick = () => {
@@ -139,7 +159,7 @@ export async function showSsh(opts = {}, fill = null) {
   const buttons = make('div', 'ssh-buttons');
   buttons.append(go, keep, only);
   const form = make('div', 'ssh-form');
-  form.append(target.row, name.row, port.row, identity.row, options.row, problem, buttons);
+  form.append(target.row, port.row, name.row, problem, buttons);
   form.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter' && ev.target.tagName === 'INPUT') { ev.preventDefault(); go.click(); }
   });
@@ -148,7 +168,7 @@ export async function showSsh(opts = {}, fill = null) {
     const row = make('div', 'row');
     const use = make('button', 'row-title', `⇌ ${specLabel(spec)}`);
     if (spec.name) use.append(make('span', 'template-summary', `${spec.target}${spec.port ? `:${spec.port}` : ''}`));
-    use.title = `${specLabel(spec)}\n${note}\n클릭: 접속`;
+    use.title = `${specLabel(spec)}${note ? `\n${note}` : ''}\n클릭: 접속`;
     use.onclick = () => connect(spec);
     row.append(use, make('span', 'row-note', note));
     if (stored) {
@@ -176,13 +196,15 @@ export async function showSsh(opts = {}, fill = null) {
 
   const close = openPopup(`SSH 접속${opts.group ? ` — 워크스페이스 "${opts.group}"` : ''}`, [
     ...(saved.length ? [make('div', 'menu-caption', '저장해 둔 서버 (누르면 접속)')] : []),
-    ...saved.map((spec) => serverRow(spec, [spec.identity ? '키 지정' : '', spec.options ? '옵션 있음' : ''].filter(Boolean).join(' · '), true)),
+    ...saved.map((spec) => serverRow(spec, '', true)),
     ...(configRows.length ? [make('div', 'menu-caption', '~/.ssh/config에 적어 둔 호스트 (누르면 접속)'), ...configRows] : []),
     make('div', 'menu-caption', fill ? '고쳐서 접속하거나 저장' : '새로 접속'),
     form,
-    make('p', 'note', 'Cypher에 든 SSH로 접속합니다. 처음 보는 서버의 키·키 파일의 암호·비밀번호·일회용 번호는 세션 화면에서 묻고, 저장하지 않습니다. '
-      + '~/.ssh/config·키 파일·known_hosts·SSH 에이전트(Windows OpenSSH, Pageant)는 명령줄의 ssh처럼 씁니다. '
-      + '같은 서버에 세션을 더 열려면 세션의 오른쪽 클릭 → "이 연결 복제"(Ctrl+Shift+T·D): 열린 연결을 같이 써서 다시 인증하지 않습니다. '
+    make('p', 'note', '주소와 포트만 저장합니다. 사용자 이름·비밀번호·키 파일의 암호·일회용 번호·처음 보는 서버의 키는 접속할 때마다 세션 화면에서 차례로 묻고, 저장하지 않습니다 '
+      + '(로그인하지 못하면 사용자 이름부터 다시 묻습니다 · ~/.ssh/config에 User를 적어 둔 호스트는 그 사용자로 접속). '
+      + 'Cypher에 든 SSH로 접속하며, ~/.ssh/config·키 파일·known_hosts·SSH 에이전트(Windows OpenSSH, Pageant)는 명령줄의 ssh처럼 씁니다. '
+      + '같은 서버에 같은 사용자로 접속해 있으면 비밀번호를 다시 묻지 않고 그 연결을 같이 씁니다. '
+      + '사용자 이름도 묻지 않고 세션을 더 열려면 세션의 오른쪽 클릭 → "이 연결 복제"(Ctrl+Shift+T·D). '
       + '출력을 파일로 남기려면 SSH 창 위쪽의 [● 출력 기록]을 누르세요. '
       + '여러 서버에 같은 명령을 넣으려면 SSH 창 위쪽의 [≫ 동시 입력]을 누르세요(같은 워크스페이스의 SSH 세션들을 나란히 띄웁니다).'),
   ]);

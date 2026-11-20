@@ -1,8 +1,10 @@
 //! 내장 SSH: Cypher가 직접 SSH로 서버에 접속해 터미널 세션 하나를 연다.
 //!
-//! - 접속·인증에 필요한 물음(처음 보는 서버의 키, 키 파일의 암호, 비밀번호, 서버가 묻는 2단계 인증)은 그 세션의 화면에서
-//!   묻고 그 화면에서 친 글로 답한다(OpenSSH를 터미널에 띄우던 때와 같은 모습). 비밀번호는 저장하지 않는다.
+//! - 화면은 주소와 포트만 넘긴다. 접속·인증에 필요한 물음(사용자 이름, 처음 보는 서버의 키, 키 파일의 암호, 비밀번호,
+//!   서버가 묻는 2단계 인증)은 그 세션의 화면에서 묻고 그 화면에서 친 글로 답한다. 어느 것도 저장하지 않는다.
+//!   `~/.ssh/config`에 User를 적어 둔 호스트는 그 사용자로 접속한다(묻지 않는다).
 //! - 인증을 마친 연결은 세션끼리 나눠 쓸 수 있다: "연결 복제"는 같은 연결에 채널을 하나 더 열어, 다시 인증하지 않는다.
+//!   같은 서버에 같은 사용자로 인증을 마친 연결이 있으면 새 세션도 사용자 이름을 받은 뒤 그 연결을 같이 쓴다.
 //!   연결은 그 연결을 쓰는 마지막 세션이 끝날 때 닫는다.
 //! - 키는 사용자의 `~/.ssh`(설정 파일의 IdentityFile, 없으면 id_ed25519·id_ecdsa·id_rsa)와 Windows의 OpenSSH 에이전트,
 //!   Pageant에서 찾는다. 서버의 키는 `~/.ssh/known_hosts`로 확인하고, 처음 보는 서버는 물어본 뒤 거기에 적는다.
@@ -13,7 +15,7 @@ use russh::keys::{HashAlg, PrivateKeyWithHashAlg, PublicKey, PublicKeyOrCertific
 use russh::{ChannelMsg, Disconnect, MethodKind, Pty};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Weak};
 use std::time::Duration;
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -95,13 +97,21 @@ fn wildcard(pattern: &str, name: &str) -> bool {
 
 /// 내장 SSH가 이 접속을 다룰 수 있는지. 다루지 못하면 그 까닭(그때는 OpenSSH로 접속한다).
 pub fn unsupported(spec: &SshTarget, env: &SshEnv) -> Option<String> {
-    if spec.options.as_deref().is_some_and(|text| !text.trim().is_empty()) {
-        return Some("추가 옵션을 적은 접속".into());
-    }
     let (_, host) = rules::split_target(&spec.target);
     let settings = env.settings(host);
     // 따르지 못하는 설정(경유, 포트 포워딩, 원격 명령, 따질 수 없는 Match…)은 무시하지 않고 OpenSSH에 맡긴다.
     settings.proxy.or(settings.unsupported).map(|what| format!("~/.ssh/config의 {what}"))
+}
+
+/// 묻지 않고도 아는 사용자 이름: 접속할 곳에 적힌 것(`사용자@호스트`), 없으면 `~/.ssh/config`의 User.
+/// 모르면 None(세션 화면에서 묻는다).
+pub fn login_user(spec: &SshTarget, env: &SshEnv) -> Option<String> {
+    let (given, alias) = rules::split_target(&spec.target);
+    known_user(given, &env.settings(alias))
+}
+
+fn known_user(given: Option<&str>, settings: &HostSettings) -> Option<String> {
+    given.map(str::to_string).or_else(|| settings.user.clone()).filter(|user| !user.trim().is_empty())
 }
 
 // ───────────────────────── 연결(인증을 마친 것, 세션끼리 나눠 씀) ─────────────────────────
@@ -113,6 +123,10 @@ pub struct Conn {
     users: AtomicUsize,
     /// 화면에 보일 이름(`user@host:port`).
     label: String,
+    /// 접속한 서버(HostName을 푼 이름)·포트와 인증한 사용자. 새 세션이 같이 쓸 연결을 찾을 때 맞춰 본다.
+    host: String,
+    port: u16,
+    user: String,
 }
 
 impl Conn {
@@ -146,6 +160,29 @@ impl Conn {
     pub fn alive(&self) -> bool {
         !self.handle.is_closed() && self.users.load(Ordering::SeqCst) > 0
     }
+}
+
+/// 인증을 마친 연결들. 같은 서버에 같은 사용자로 새로 여는 세션(다시 시작한 뒤 쉬던 세션을 차례로 누를 때, 같은 서버에
+/// 세션을 새로 열 때)은 사용자 이름을 받은 뒤 이것을 같이 써서 비밀번호를 거듭 묻지 않는다. 사용자 이름은 묻기 전에는
+/// 모르므로, 주소만으로 맞추지 않는다(다른 사용자로 인증한 연결에 붙지 않게).
+static LIVE: Mutex<Vec<Weak<Conn>>> = Mutex::new(Vec::new());
+
+/// 끝난 연결을 목록에서 치운다.
+fn prune(live: &mut Vec<Weak<Conn>>) {
+    live.retain(|weak| weak.upgrade().is_some_and(|conn| conn.alive()));
+}
+
+fn remember(conn: &Arc<Conn>) {
+    let mut live = LIVE.lock().unwrap();
+    prune(&mut live);
+    live.push(Arc::downgrade(conn));
+}
+
+/// 그 서버·포트에 그 사용자로 인증을 마친 살아 있는 연결.
+fn live_conn(host: &str, port: u16, user: &str) -> Option<Arc<Conn>> {
+    let mut live = LIVE.lock().unwrap();
+    prune(&mut live);
+    live.iter().filter_map(Weak::upgrade).find(|conn| conn.host.eq_ignore_ascii_case(host) && conn.port == port && conn.user == user)
 }
 
 // ───────────────────────── 세션 하나 ─────────────────────────
@@ -355,31 +392,17 @@ enum Step {
 
 /// 접속하고(또는 나눠 쓸 연결에 붙고) 셸을 열어 끝날 때까지 잇는다. 종료 코드를 돌려준다.
 async fn run(io: &mut Io, spec: SshTarget, env: SshEnv, share: Option<Arc<Conn>>, paused: watch::Receiver<bool>, slot: Arc<Mutex<Option<Arc<Conn>>>>) -> Option<u32> {
-    // 나눠 쓸 연결이 정말 살아 있는지 먼저 묻는다: 컴퓨터가 잠들었다 깨어 서버 쪽에서는 끊긴 연결(반쯤 열린 것)을
-    // 고르면 채널 열기가 keepalive 시간 초과까지 멈춘다. 답이 없으면 새로 접속한다.
+    // 연결 복제: 그 연결에 붙는다(사용자 이름도 묻지 않는다). 연결이 답하지 않으면 새로 접속한다.
     let mut shared = None;
-    if let Some(conn) = share.filter(|conn| conn.acquire()) {
-        let ping = tokio::time::timeout(SHARE_CHECK, conn.handle.send_ping());
-        let alive = tokio::select! {
-            result = ping => matches!(result, Ok(Ok(()))) && !conn.handle.is_closed(),
-            _ = io.killed.changed() => {
-                conn.release();
-                return None;
-            }
-        };
-        if alive {
-            shared = Some(conn);
-        } else {
-            io.note(&format!("[{} 연결이 답하지 않아 새로 접속합니다]", conn.label));
-            conn.release();
+    if let Some(conn) = share {
+        match join(io, conn).await {
+            Ok(found) => shared = found,
+            Err(Closed) => return None,
         }
     }
     let conn = match shared {
-        Some(conn) => {
-            io.note(&format!("[{} 연결을 같이 씁니다 · 다시 인증하지 않습니다]", conn.label));
-            conn
-        }
-        None => match connect(io, &spec, &env).await {
+        Some(conn) => conn,
+        None => match login(io, &spec, &env).await {
             Some(conn) => conn,
             None => return Some(255),
         },
@@ -389,6 +412,89 @@ async fn run(io: &mut Io, spec: SshTarget, env: SshEnv, share: Option<Arc<Conn>>
     *slot.lock().unwrap() = None;
     conn.release();
     code
+}
+
+/// 붙으려던 사이에 사용자가 세션을 닫았다.
+struct Closed;
+
+/// 나눠 쓸 연결에 붙는다. 정말 살아 있는지 먼저 묻는다: 컴퓨터가 잠들었다 깨어 서버 쪽에서는 끊긴 연결(반쯤 열린 것)을
+/// 고르면 채널 열기가 keepalive 시간 초과까지 멈춘다. 답이 없거나 이미 닫혔으면 Ok(None)(새로 접속한다).
+async fn join(io: &mut Io, conn: Arc<Conn>) -> Result<Option<Arc<Conn>>, Closed> {
+    if !conn.acquire() {
+        return Ok(None);
+    }
+    let ping = tokio::time::timeout(SHARE_CHECK, conn.handle.send_ping());
+    let alive = tokio::select! {
+        result = ping => matches!(result, Ok(Ok(()))) && !conn.handle.is_closed(),
+        _ = io.killed.changed() => {
+            conn.release();
+            return Err(Closed);
+        }
+    };
+    if alive {
+        io.note(&format!("[{} 연결을 같이 씁니다 · 다시 인증하지 않습니다]", conn.label));
+        Ok(Some(conn))
+    } else {
+        io.note(&format!("[{} 연결이 답하지 않아 새로 접속합니다]", conn.label));
+        conn.release();
+        Ok(None)
+    }
+}
+
+/// 사용자 이름을 정하고 로그인한다. 사용자 이름을 모르면(화면은 주소와 포트만 넘긴다) 세션 화면에서 묻는다.
+/// 같은 서버에 같은 사용자로 인증을 마친 연결이 있으면 그것을 같이 쓴다.
+/// 물어서 정한 사용자로 로그인하지 못했으면(비밀번호가 틀림, 비밀번호를 묻는 중에 Ctrl+C) 사용자 이름부터 다시 묻는다.
+/// 사용자 이름을 묻는 데서 Ctrl+C·Ctrl+D를 치거나 접속 자체가 안 되면(주소, 서버 키) 그만둔다.
+async fn login(io: &mut Io, spec: &SshTarget, env: &SshEnv) -> Option<Arc<Conn>> {
+    let (given, alias) = rules::split_target(&spec.target);
+    let settings = env.settings(alias);
+    let known = known_user(given, &settings);
+    if known.is_none() {
+        let (host, port) = endpoint(spec, &settings, alias);
+        io.note(&format!("[내장 SSH로 {}에 접속합니다 · 사용자 이름과 비밀번호는 여기서 묻고 저장하지 않습니다]", host_port(&host, port)));
+    }
+    loop {
+        let user = match &known {
+            Some(user) => user.clone(),
+            None => ask_user(io).await?,
+        };
+        let plan = plan(spec, env, &user);
+        if let Some(conn) = live_conn(&plan.host, plan.port, &plan.user) {
+            match join(io, conn).await {
+                Ok(Some(conn)) => return Some(conn),
+                Ok(None) => {}
+                Err(Closed) => return None,
+            }
+        }
+        match connect(io, &plan, env).await {
+            Login::Done(conn) => {
+                remember(&conn);
+                return Some(conn);
+            }
+            Login::Retry if known.is_none() && !io.is_killed() => io.note("[사용자 이름부터 다시 묻습니다 · 그만두려면 Ctrl+C]"),
+            Login::Retry | Login::Stop => return None,
+        }
+    }
+}
+
+/// 사용자 이름을 묻는다(친 글이 보인다). 비워 두면 다시 묻는다. Ctrl+C·Ctrl+D·세션 닫기면 None.
+async fn ask_user(io: &mut Io) -> Option<String> {
+    loop {
+        let answer = io.ask("사용자 이름: ", true).await?;
+        let user = answer.trim();
+        if !user.is_empty() {
+            return Some(user.to_string());
+        }
+    }
+}
+
+/// 화면에 보일 `호스트` 또는 `호스트:포트`(기본 포트는 적지 않는다).
+fn host_port(host: &str, port: u16) -> String {
+    match port {
+        22 => host.to_string(),
+        _ if host.contains(':') => format!("[{host}]:{port}"), // IPv6 주소
+        _ => format!("{host}:{port}"),
+    }
 }
 
 /// 나눠 쓸 연결이 살아 있는지 묻고 기다리는 시간.
@@ -593,20 +699,23 @@ fn key_order(known: &[String]) -> Vec<russh::keys::Algorithm> {
     all
 }
 
-fn plan(spec: &SshTarget, env: &SshEnv) -> Plan {
-    let (given_user, alias) = rules::split_target(&spec.target);
-    let settings = env.settings(alias);
-    let home = env.home.to_string_lossy().into_owned();
+/// 실제로 접속할 호스트(설정 파일의 HostName을 푼 것)와 포트(적어 준 것, 설정 파일의 Port, 22 차례).
+fn endpoint(spec: &SshTarget, settings: &HostSettings, alias: &str) -> (String, u16) {
     let host = settings.hostname.as_deref().map(|name| name.replace("%h", alias).replace("%%", "%")).unwrap_or_else(|| alias.to_string());
     let host = host.trim_start_matches('[').trim_end_matches(']').to_string();
-    let user = given_user.map(str::to_string).or(settings.user.clone()).unwrap_or_else(|| env.local_user.clone());
     let port = spec.port.filter(|port| *port != 0).or(settings.port).unwrap_or(22);
+    (host, port)
+}
+
+/// 그 사용자로 접속할 때의 값(키 파일·known_hosts 경로의 `%r`은 그 사용자로 푼다).
+fn plan(spec: &SshTarget, env: &SshEnv, user: &str) -> Plan {
+    let (_, alias) = rules::split_target(&spec.target);
+    let settings = env.settings(alias);
+    let home = env.home.to_string_lossy().into_owned();
+    let (host, port) = endpoint(spec, &settings, alias);
+    let user = user.to_string();
     let expand = |value: &str| PathBuf::from(rules::expand_path(value, &home, &env.local_user, &host, &user));
-    let mut identities: Vec<PathBuf> = Vec::new();
-    if let Some(given) = spec.identity.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
-        identities.push(expand(given));
-    }
-    identities.extend(settings.identity_files.iter().map(|file| expand(file)));
+    let mut identities: Vec<PathBuf> = settings.identity_files.iter().map(|file| expand(file)).collect();
     if identities.is_empty() {
         // ssh가 기본으로 찾는 키 파일(있는 것만 쓴다).
         identities.extend(["id_rsa", "id_ecdsa", "id_ed25519"].iter().map(|name| env.ssh_dir().join(name)));
@@ -643,10 +752,18 @@ fn plan(spec: &SshTarget, env: &SshEnv) -> Plan {
     }
 }
 
-/// 접속하고 인증한다. 실패하면 까닭을 화면에 적고 None.
-async fn connect(io: &mut Io, spec: &SshTarget, env: &SshEnv) -> Option<Arc<Conn>> {
-    let plan = plan(spec, env);
-    let label = format!("{}@{}{}", plan.user, plan.host, if plan.port == 22 { String::new() } else { format!(":{}", plan.port) });
+/// 접속해 본 결과.
+enum Login {
+    Done(Arc<Conn>),
+    /// 인증하지 못했다(답이 틀림, 묻는 중에 Ctrl+C, 인증하는 동안 끊김). 사용자 이름을 물었으면 처음부터 다시 묻는다.
+    Retry,
+    /// 접속 자체가 안 됐거나(주소·포트, 서버 키) 세션을 닫았다. 까닭은 화면에 적었다.
+    Stop,
+}
+
+/// 접속하고 인증한다. 실패하면 까닭을 화면에 적는다.
+async fn connect(io: &mut Io, plan: &Plan, env: &SshEnv) -> Login {
+    let label = format!("{}@{}", plan.user, host_port(&plan.host, plan.port));
     io.note(&format!("[내장 SSH로 {label}에 접속하는 중…]"));
 
     // TCP 연결에만 시간 제한을 둔다(그 뒤의 물음에는 사용자가 답하는 시간이 든다).
@@ -655,15 +772,15 @@ async fn connect(io: &mut Io, spec: &SshTarget, env: &SshEnv) -> Option<Arc<Conn
         result = tokio::time::timeout(plan.timeout, tokio::net::TcpStream::connect(address)) => match result {
             Ok(Ok(stream)) => stream,
             Ok(Err(err)) => {
-                io.fail(&format!("{}:{}에 연결하지 못했습니다: {err}", plan.host, plan.port));
-                return None;
+                io.fail(&format!("{}에 연결하지 못했습니다: {err}", host_port(&plan.host, plan.port)));
+                return Login::Stop;
             }
             Err(_) => {
-                io.fail(&format!("{}:{}에 {}초 동안 연결되지 않았습니다(주소·포트·방화벽을 확인하세요)", plan.host, plan.port, plan.timeout.as_secs()));
-                return None;
+                io.fail(&format!("{}에 {}초 동안 연결되지 않았습니다(주소·포트·방화벽을 확인하세요)", host_port(&plan.host, plan.port), plan.timeout.as_secs()));
+                return Login::Stop;
             }
         },
-        _ = io.killed.changed() => return None,
+        _ = io.killed.changed() => return Login::Stop,
     };
     let _ = stream.set_nodelay(true);
 
@@ -702,7 +819,7 @@ async fn connect(io: &mut Io, spec: &SshTarget, env: &SshEnv) -> Option<Arc<Conn
                     if !matches!(err, russh::Error::UnknownKey) {
                         io.fail(&format!("SSH 연결을 맺지 못했습니다: {err}"));
                     }
-                    return None;
+                    return Login::Stop;
                 }
             },
             Some(question) = questions.recv() => match question {
@@ -713,7 +830,7 @@ async fn connect(io: &mut Io, spec: &SshTarget, env: &SshEnv) -> Option<Arc<Conn
                         match answer.as_deref().map(|a| a.trim().to_lowercase()) {
                             None => {
                                 let _ = reply.send(false);
-                                return None;
+                                return Login::Stop;
                             }
                             Some(a) if matches!(a.as_str(), "yes" | "y" | "예" | "네") => {
                                 let _ = reply.send(true);
@@ -722,26 +839,26 @@ async fn connect(io: &mut Io, spec: &SshTarget, env: &SshEnv) -> Option<Arc<Conn
                             Some(a) if matches!(a.as_str(), "no" | "n" | "아니오" | "아니요") => {
                                 let _ = reply.send(false);
                                 io.fail("접속하지 않습니다.");
-                                return None;
+                                return Login::Stop;
                             }
                             Some(_) => answer = io.ask("yes 또는 no를 치세요: ", true).await,
                         }
                     }
                 }
             },
-            _ = io.killed.changed() => return None,
+            _ = io.killed.changed() => return Login::Stop,
         }
     };
     // 배너는 인증하는 동안에 올 수 있다: 인증하면서도 받아 보여 준다.
-    let authed = authenticate(io, &mut handle, &plan, env, &mut questions).await;
+    let authed = authenticate(io, &mut handle, plan, env, &mut questions).await;
     while let Ok(Ask::Notice(text)) = questions.try_recv() {
         io.say(&format!("{text}\n"));
     }
     if !authed {
         let _ = handle.disconnect(Disconnect::ByApplication, "", "").await;
-        return None;
+        return Login::Retry;
     }
-    Some(Arc::new(Conn { handle, users: AtomicUsize::new(1), label }))
+    Login::Done(Arc::new(Conn { handle, users: AtomicUsize::new(1), label, host: plan.host.clone(), port: plan.port, user: plan.user.clone() }))
 }
 
 // ───────────────────────── 인증 ─────────────────────────
@@ -1288,13 +1405,18 @@ mod tests {
     }
 
     impl Probe {
+        /// 사용자 이름을 적어 준 접속(`tester@127.0.0.1`): 사용자 이름을 묻지 않는다.
         fn start(port: u16, env: &SshEnv, share: Option<Arc<Conn>>) -> Probe {
+            Probe::open("tester@127.0.0.1", port, env, share)
+        }
+
+        fn open(target: &str, port: u16, env: &SshEnv, share: Option<Arc<Conn>>) -> Probe {
             let seen = Arc::new(Mutex::new(String::new()));
             let exit = Arc::new(Mutex::new(None));
             let (out, done) = (seen.clone(), exit.clone());
             let ready = Arc::new(std::sync::atomic::AtomicBool::new(false));
             let opened = ready.clone();
-            let spec = SshTarget { target: "tester@127.0.0.1".into(), port: Some(port), ..Default::default() };
+            let spec = SshTarget { target: target.into(), port: Some(port) };
             let term = SshTerm::start(
                 spec,
                 env.clone(),
@@ -1316,6 +1438,21 @@ mod tests {
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
             panic!("화면에 {text:?}가 나오지 않았습니다. 지금 화면:\n{}", self.seen.lock().unwrap());
+        }
+
+        /// 화면에 그 글이 `times`번 나올 때까지 기다린다(같은 물음을 다시 묻는 것을 볼 때).
+        async fn wait_count(&self, text: &str, times: usize) {
+            for _ in 0..500 {
+                if self.seen.lock().unwrap().matches(text).count() >= times {
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+            panic!("화면에 {text:?}가 {times}번 나오지 않았습니다. 지금 화면:\n{}", self.seen.lock().unwrap());
+        }
+
+        fn saw(&self, text: &str) -> bool {
+            self.seen.lock().unwrap().contains(text)
         }
 
         async fn wait_exit(&self) -> Option<u32> {
@@ -1397,6 +1534,77 @@ mod tests {
             assert!(!again.seen.lock().unwrap().contains("(yes/no)"));
             again.term.kill();
             again.wait_exit().await;
+            let _ = std::fs::remove_dir_all(&env.home);
+        });
+    }
+
+    #[test]
+    fn 주소만_주면_사용자_이름부터_묻고_같은_사용자의_연결은_같이_쓴다() {
+        tauri::async_runtime::block_on(async {
+            let (port, public, auths) = serve().await;
+            let env = test_env("ask-user");
+            let blob = public.to_openssh().unwrap().split_whitespace().nth(1).unwrap().to_string();
+            std::fs::write(env.home.join(".ssh").join("known_hosts"), format!("{}\n", rules::known_host_line("127.0.0.1", port, "ssh-ed25519", &blob))).unwrap();
+
+            // 사용자 이름을 묻는다(친 글이 보인다). 비워 두면 다시 묻는다. 이 컴퓨터의 사용자 이름(nobody)으로 넘어가지 않는다.
+            let probe = Probe::open("127.0.0.1", port, &env, None);
+            probe.wait_for(&format!("127.0.0.1:{port}에 접속합니다")).await;
+            probe.wait_for("사용자 이름: ").await;
+            probe.term.write(b"  \r");
+            probe.wait_count("사용자 이름: ", 2).await;
+            probe.term.write(b"tester\r");
+            probe.wait_for("tester@127.0.0.1의 비밀번호: ").await;
+            assert!(probe.saw("사용자 이름: tester") && !probe.saw("nobody"));
+            probe.term.write(b"secret\r");
+            probe.wait_for("welcome").await;
+            assert_eq!(auths.load(Ordering::SeqCst), 1);
+
+            // 같은 서버에 같은 사용자로 여는 새 세션은 사용자 이름만 받고 그 연결을 같이 쓴다(비밀번호를 묻지 않는다).
+            let second = Probe::open("127.0.0.1", port, &env, None);
+            second.wait_for("사용자 이름: ").await;
+            second.term.write(b"tester\r");
+            second.wait_for("연결을 같이 씁니다").await;
+            second.wait_for("welcome").await;
+            assert!(!second.saw("의 비밀번호: "));
+            assert_eq!(auths.load(Ordering::SeqCst), 1);
+
+            // 다른 사용자는 그 연결을 쓰지 않고 새로 접속한다. 비밀번호를 묻는 중에 Ctrl+C면 사용자 이름부터 다시 묻는다.
+            let other = Probe::open("127.0.0.1", port, &env, None);
+            other.wait_for("사용자 이름: ").await;
+            other.term.write(b"other\r");
+            other.wait_for("other@127.0.0.1의 비밀번호: ").await;
+            assert!(!other.saw("연결을 같이 씁니다"));
+            other.term.write(b"\x03");
+            other.wait_for("사용자 이름부터 다시 묻습니다").await;
+            other.wait_count("사용자 이름: ", 2).await;
+            // 틀린 비밀번호를 세 번 넣어 인증하지 못해도 사용자 이름부터 다시 묻는다.
+            other.term.write(b"other\r");
+            for attempt in 2..=4 {
+                other.wait_count("other@127.0.0.1의 비밀번호: ", attempt).await;
+                other.term.write(b"wrong\r");
+            }
+            other.wait_for("인증하지 못했습니다").await;
+            other.wait_count("사용자 이름: ", 3).await;
+            assert!(other.exit.lock().unwrap().is_none(), "세션은 끝나지 않고 다시 묻는다");
+            other.term.write(b"tester\r");
+            other.wait_for("welcome").await;
+            assert_eq!(auths.load(Ordering::SeqCst), 1);
+            assert!(!other.saw("secret") && !other.saw("wrong"));
+
+            // 사용자 이름을 묻는 데서 Ctrl+C면 그만둔다.
+            let quit = Probe::open("127.0.0.1", port, &env, None);
+            quit.wait_for("사용자 이름: ").await;
+            quit.term.write(b"\x03");
+            assert_eq!(quit.wait_exit().await, Some(255));
+
+            // 연결 복제는 사용자 이름도 묻지 않는다.
+            let clone = Probe::open("127.0.0.1", port, &env, probe.term.connection());
+            clone.wait_for("welcome").await;
+            assert!(!clone.saw("사용자 이름"));
+            for p in [&probe, &second, &other, &clone] {
+                p.term.kill();
+                p.wait_exit().await;
+            }
             let _ = std::fs::remove_dir_all(&env.home);
         });
     }
@@ -1547,21 +1755,26 @@ mod tests {
         std::fs::create_dir_all(env.home.join(".ssh").join("conf.d")).unwrap();
         std::fs::write(env.home.join(".ssh").join("conf.d").join("a.conf"), "Host db\n  HostName db.internal\n").unwrap();
         let spec = |target: &str| SshTarget { target: target.into(), ..Default::default() };
-        let web = plan(&spec("web"), &env);
+        // 사용자 이름: 적어 준 것, 설정 파일의 User 차례. 둘 다 없으면 모른다(세션 화면에서 묻는다 — 이 컴퓨터의 사용자 이름을 쓰지 않는다).
+        assert_eq!(login_user(&spec("web"), &env).as_deref(), Some("deploy"));
+        assert_eq!(login_user(&spec("root@web"), &env).as_deref(), Some("root"));
+        assert_eq!(login_user(&spec("db"), &env), None);
+        assert_eq!(login_user(&spec("10.0.0.9"), &env), None);
+        let web = plan(&spec("web"), &env, "deploy");
         assert_eq!((web.host.as_str(), web.port, web.user.as_str()), ("10.1.2.3", 2200, "deploy"));
         assert_eq!(web.identities, [env.home.join(".ssh").join("web_key")]);
         assert_eq!(web.learn, Some(env.home.join(".ssh").join("known_hosts")));
-        // 적어 준 사용자·포트가 설정 파일보다 먼저다.
-        let given = plan(&SshTarget { target: "root@web".into(), port: Some(22), ..Default::default() }, &env);
+        // 적어 준 포트가 설정 파일보다 먼저다.
+        let given = plan(&SshTarget { target: "web".into(), port: Some(22) }, &env, "root");
         assert_eq!((given.user.as_str(), given.port), ("root", 22));
-        // Include한 파일의 값, 기본 키 파일, 이 컴퓨터의 사용자 이름
-        let db = plan(&spec("db"), &env);
-        assert_eq!((db.host.as_str(), db.user.as_str()), ("db.internal", "nobody"));
+        // Include한 파일의 값, 기본 키 파일
+        let db = plan(&spec("db"), &env, "물은사람");
+        assert_eq!((db.host.as_str(), db.user.as_str()), ("db.internal", "물은사람"));
         assert_eq!(db.identities.len(), 3);
-        // 경유 서버를 쓰는 호스트와 추가 옵션은 내장 SSH가 다루지 않는다.
+        // 경유 서버를 쓰는 호스트는 내장 SSH가 다루지 않는다.
         assert!(unsupported(&spec("jump"), &env).is_some_and(|why| why.contains("proxyjump")));
-        assert!(unsupported(&SshTarget { target: "web".into(), options: Some("-L 80:a:80".into()), ..Default::default() }, &env).is_some());
         assert!(unsupported(&spec("web"), &env).is_none());
+        assert_eq!((host_port("h", 22), host_port("h", 2200), host_port("::1", 2200)), ("h".into(), "h:2200".into(), "[::1]:2200".into()));
         let _ = std::fs::remove_dir_all(&env.home);
     }
 }

@@ -192,22 +192,6 @@ pub async fn ssh_hosts() -> Vec<cypher_core::ssh::ConfigHost> {
         .unwrap_or_default()
 }
 
-/// SSH 접속에 쓸 개인 키 파일을 고른다. 취소하면 None. 고른 경로는 화면이 접속 창에 채울 뿐 여기서 읽지 않는다.
-#[tauri::command]
-pub async fn ssh_pick_key() -> Option<String> {
-    tauri::async_runtime::spawn_blocking(move || {
-        let mut dialog = rfd::FileDialog::new().set_title("SSH 개인 키 파일");
-        let dir = ssh_dir();
-        if dir.is_dir() {
-            dialog = dialog.set_directory(dir);
-        }
-        dialog.pick_file().map(|p| p.to_string_lossy().into_owned())
-    })
-    .await
-    .ok()
-    .flatten()
-}
-
 /// Claude 세션 ID(UUID) 모양인지. 명령 인자로 넘기기 전에 확인한다.
 fn is_session_id(s: &str) -> bool {
     s.len() == 36 && s.chars().all(|c| c.is_ascii_hexdigit() || c == '-')
@@ -268,11 +252,12 @@ pub fn session_create(
     // 출력 기록: 출력이 화면으로 가는 길에서 함께 받는다(기록을 켜기 전에는 아무것도 하지 않는다).
     let log = Log::default();
 
-    // 내장 SSH: 이 앱이 직접 접속한다. 다루지 못하는 접속(추가 옵션, ProxyJump)이면 아래에서 OpenSSH(ssh.exe)로 띄운다.
-    if is_ssh {
-        let target = ssh.as_ref().ok_or("접속할 곳을 정하지 않았습니다. 워크스페이스 머리의 + → \"+ SSH 세션\"으로 접속할 곳을 적어 주세요.")?;
+    // 내장 SSH: 이 앱이 직접 접속한다. 다루지 못하는 접속(~/.ssh/config의 ProxyJump 등)이면 아래에서 OpenSSH(ssh.exe)로 띄운다.
+    // 화면은 주소와 포트만 넘긴다: 사용자 이름·비밀번호는 어느 쪽이든 세션 화면에서 묻는다.
+    let ssh_env = is_ssh.then(|| crate::sshc::SshEnv::system(state.config.ssh.keepalive));
+    if let Some(env) = ssh_env.clone() {
+        let target = ssh.as_ref().ok_or("접속할 곳을 정하지 않았습니다. 워크스페이스 머리의 + → \"+ SSH 세션\"으로 접속할 주소를 적어 주세요.")?;
         cypher_core::ssh::ssh_args(target)?; // 접속할 곳이 올바른지(빈칸·옵션이 끼어들지 않았는지)
-        let env = crate::sshc::SshEnv::system(state.config.ssh.keepalive);
         let why = crate::sshc::unsupported(target, &env);
         if state.config.ssh.builtin() && why.is_none() {
             // 연결 복제: 그 세션의 연결이 살아 있으면 채널만 하나 더 연다(다시 인증하지 않는다).
@@ -312,7 +297,7 @@ pub fn session_create(
 
     // Claude 프로필은 사용자가 설정 → "Claude 실행 명령…"에 적어 둔 명령으로 띄운다(없으면 프로필의 것).
     let custom = command.as_deref().map(str::trim).filter(|text| profile.claude && !text.is_empty());
-    let (program, mut args) = match custom {
+    let (mut program, mut args) = match custom {
         Some(text) => {
             let (program, args) = cypher_core::profile::split_command(text)
                 .ok_or("Claude 실행 명령을 읽지 못했습니다(따옴표가 닫히지 않았거나 비어 있습니다). 설정 → Claude 실행 명령에서 고치세요.")?;
@@ -330,10 +315,16 @@ pub fn session_create(
     // 사용자가 적어 준 실행 명령의 프로그램을 파일로 찾지 못하면 PowerShell의 명령(프로필에 만들어 둔 별칭·함수)으로 실행해 본다.
     // 기본 명령(claude)은 지금까지처럼 찾지 못하면 "실행하지 못했습니다"로 알린다.
     let shell_fallback = custom.is_some();
-    // SSH 세션: 접속할 곳을 ssh의 인자로 붙인다(프로필에 적어 둔 인자 뒤에).
-    if is_ssh {
-        let target = ssh.as_ref().ok_or("접속할 곳을 정하지 않았습니다. 워크스페이스 머리의 + → \"+ SSH 세션\"으로 접속할 곳을 적어 주세요.")?;
+    // SSH 세션(ssh.exe로 접속): 접속할 곳을 ssh의 인자로 붙인다(프로필에 적어 둔 인자 뒤에).
+    // 사용자 이름을 모르면(~/.ssh/config에 User가 없으면) ssh를 띄우기 전에 세션 화면에서 묻는다(PowerShell의 Read-Host).
+    if let Some(env) = &ssh_env {
+        let target = ssh.as_ref().ok_or("접속할 곳을 정하지 않았습니다. 워크스페이스 머리의 + → \"+ SSH 세션\"으로 접속할 주소를 적어 주세요.")?;
         args.extend(cypher_core::ssh::ssh_args(target)?);
+        if crate::sshc::login_user(target, env).is_none() {
+            let script = cypher_core::ssh::login_script(&program, &args);
+            program = "powershell.exe".into();
+            args = vec!["-NoLogo".into(), "-NoProfile".into(), "-EncodedCommand".into(), cypher_core::ssh::encoded_command(&script)];
+        }
     }
 
     let id = state.next_id.fetch_add(1, Ordering::Relaxed);

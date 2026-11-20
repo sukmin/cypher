@@ -132,7 +132,7 @@ pub struct Window {
 pub struct Ssh {
     /// "builtin": Cypher에 든 SSH로 접속한다(연결 복제가 다시 인증하지 않는다, 기본값).
     /// "openssh": Windows의 OpenSSH(`ssh.exe`)를 터미널에 띄워 접속한다(예전 방식).
-    /// 내장 SSH로도 접속할 곳의 "추가 옵션"을 적었거나 `~/.ssh/config`에 ProxyJump·ProxyCommand가 있으면 그 세션은 OpenSSH로 접속한다.
+    /// 내장 SSH로도 `~/.ssh/config`에 ProxyJump·ProxyCommand 같은 따르지 못하는 설정이 있으면 그 세션은 OpenSSH로 접속한다.
     pub engine: String,
     /// 서버에서 이만큼(초) 아무것도 오지 않으면 연결이 살아 있는지 물어본다. 0이면 묻지 않는다(내장 SSH만).
     pub keepalive: u64,

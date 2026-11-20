@@ -2,54 +2,79 @@
 //!
 //! 기본은 Cypher에 든 SSH(앱의 `sshc` 모듈)로 접속한다. 여기서는 그 접속에 필요한 것 가운데 화면·네트워크와 무관한 것
 //! (접속할 곳 나누기, 설정 파일에서 그 호스트에 걸리는 값 고르기, known_hosts에서 호스트 키 찾기)을 다룬다.
-//! 설정의 `[ssh] engine = "openssh"`이거나 내장 SSH가 다루지 못하는 설정(추가 옵션, ProxyJump)이면 Windows의 OpenSSH(`ssh.exe`)를
-//! 가상 터미널에 띄운다(`ssh_args`). 어느 쪽이든 비밀번호는 Cypher가 저장하지 않는다.
+//! 설정의 `[ssh] engine = "openssh"`이거나 `~/.ssh/config`에 내장 SSH가 다루지 못하는 설정(ProxyJump 등)이 있으면
+//! Windows의 OpenSSH(`ssh.exe`)를 가상 터미널에 띄운다(`ssh_args`, 사용자 이름을 모르면 `login_script`로 먼저 묻는다).
+//! 접속할 곳은 주소와 포트만 받는다: 사용자 이름·비밀번호 등은 접속할 때마다 세션 화면에서 묻고, Cypher가 저장하지 않는다.
 
-use crate::profile::split_command;
 use serde::{Deserialize, Serialize};
 
-/// 접속할 곳. 화면이 세션을 만들 때 넘기고, 세션을 되살릴 때 쓰려고 그대로 적어 둔다.
+/// 접속할 곳: 주소와 포트만. 화면이 세션을 만들 때 넘기고, 세션을 되살릴 때 쓰려고 그대로 적어 둔다.
+/// 사용자 이름은 담지 않는다(접속할 때 세션 화면에서 묻는다). 예전 기록에 있던 키 파일·추가 옵션 칸은 읽지 않고 버린다.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct SshTarget {
-    /// `사용자@호스트`, 호스트만, 또는 `~/.ssh/config`에 적어 둔 이름.
+    /// 호스트(이름이나 IP) 또는 `~/.ssh/config`에 적어 둔 이름. 화면은 보내지 않지만 `사용자@호스트`도 읽는다.
     pub target: String,
-    /// 포트(비우면 ssh의 기본값이나 설정 파일의 값).
+    /// 포트(비우면 설정 파일의 값이나 22).
     #[serde(default)]
     pub port: Option<u16>,
-    /// 개인 키 파일(비우면 ssh가 알아서 고른다).
-    #[serde(default)]
-    pub identity: Option<String>,
-    /// 그 밖에 붙일 ssh 옵션(`-J 경유서버`, `-L 8080:localhost:80` 등). 명령줄에 적듯이 빈칸으로 나눠 적는다.
-    #[serde(default)]
-    pub options: Option<String>,
 }
 
 /// 접속할 곳을 `ssh`에 넘길 인자로 바꾼다. 대상이 비었거나 옵션처럼 보이면(`-`로 시작) 오류다.
 pub fn ssh_args(spec: &SshTarget) -> Result<Vec<String>, String> {
     let target = spec.target.trim();
     if target.is_empty() {
-        return Err("접속할 곳이 비어 있습니다(예: user@example.com).".into());
+        return Err("접속할 주소가 비어 있습니다(예: example.com).".into());
     }
     // 대상 자리에 옵션이 끼어들지 못하게 한다(`-oProxyCommand=…` 같은 것이 대상으로 넘어가면 명령이 실행된다).
     if target.starts_with('-') || target.chars().any(|c| c.is_whitespace() || c.is_control()) {
-        return Err(format!("접속할 곳이 올바르지 않습니다: {target} (빈칸 없이 user@host 꼴로 적으세요. 옵션은 \"추가 옵션\" 칸에 적습니다)"));
+        return Err(format!("접속할 주소가 올바르지 않습니다: {target} (빈칸 없이 주소만 적으세요)"));
     }
     let mut args = Vec::new();
-    if let Some(options) = spec.options.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
-        let (first, rest) = split_command(options).ok_or("추가 옵션의 큰따옴표가 닫히지 않았습니다.")?;
-        args.push(first);
-        args.extend(rest);
-    }
     if let Some(port) = spec.port.filter(|port| *port != 0) {
         args.push("-p".into());
         args.push(port.to_string());
     }
-    if let Some(identity) = spec.identity.as_deref().map(str::trim).filter(|text| !text.is_empty()) {
-        args.push("-i".into());
-        args.push(identity.to_string());
-    }
     args.push(target.to_string());
     Ok(args)
+}
+
+/// PowerShell의 작은따옴표 글. PowerShell은 굽은 작은따옴표(‘ ’ ‚ ‛)도 작은따옴표로 읽으므로 모두 두 번 적는다.
+fn ps_quote(text: &str) -> String {
+    let mut out = String::from("'");
+    for c in text.chars() {
+        if matches!(c, '\'' | '\u{2018}' | '\u{2019}' | '\u{201a}' | '\u{201b}') {
+            out.push(c);
+        }
+        out.push(c);
+    }
+    out.push('\'');
+    out
+}
+
+/// ssh.exe로 접속하는데 사용자 이름을 모를 때 띄울 PowerShell 명령: 세션 화면에서 사용자 이름을 물은 뒤(비우면 다시 묻는다)
+/// ssh를 띄우고 그 종료 코드로 끝난다. 사용자 이름은 `-l`의 값으로 넘긴다(`-`로 시작해도 옵션으로 읽히지 않는다).
+/// 창 제목(사이드바에 보이는 것)은 PowerShell의 경로 대신 `ssh 주소`, 이름을 받은 뒤에는 `ssh 사용자@주소`로 둔다.
+/// `args`의 마지막은 접속할 곳이다(`ssh_args`).
+pub fn login_script(program: &str, args: &[String]) -> String {
+    let target = ps_quote(args.last().map(String::as_str).unwrap_or(""));
+    let args: Vec<String> = args.iter().map(|arg| ps_quote(arg)).collect();
+    format!(
+        "try {{ $Host.UI.RawUI.WindowTitle = 'ssh ' + {target} }} catch {{ }}\n\
+         $user = ''\n\
+         while (-not $user) {{\n  $line = Read-Host '사용자 이름'\n  if ($null -eq $line) {{ exit 255 }}\n  $user = $line.Trim()\n}}\n\
+         try {{ $Host.UI.RawUI.WindowTitle = 'ssh ' + $user + '@' + {target} }} catch {{ }}\n\
+         try {{ & {} -l $user {} }} catch {{ Write-Host $_.Exception.Message -ForegroundColor Red; exit 255 }}\n\
+         exit $LASTEXITCODE\n",
+        ps_quote(program),
+        args.join(" ")
+    )
+}
+
+/// PowerShell의 `-EncodedCommand`에 넘길 글(UTF-16LE를 base64로). 명령줄의 따옴표 풀이를 거치지 않는다.
+pub fn encoded_command(script: &str) -> String {
+    use base64::Engine;
+    let bytes: Vec<u8> = script.encode_utf16().flat_map(u16::to_le_bytes).collect();
+    base64::engine::general_purpose::STANDARD.encode(bytes)
 }
 
 /// `~/.ssh/config`에 적어 둔 호스트 하나.
@@ -607,27 +632,31 @@ Include never
 
     #[test]
     fn 접속할_곳을_ssh_인자로_바꾼다() {
-        assert_eq!(ssh_args(&spec("me@example.com")).unwrap(), ["me@example.com"]);
+        assert_eq!(ssh_args(&spec("example.com")).unwrap(), ["example.com"]);
         assert_eq!(ssh_args(&spec("  web1  ")).unwrap(), ["web1"]);
-        let full = SshTarget {
-            target: "me@10.0.0.5".into(),
-            port: Some(2222),
-            identity: Some(r"C:\Users\나\.ssh\id work".into()),
-            options: Some(r#"-J jump@gate -o "ServerAliveInterval 30""#.into()),
-        };
-        assert_eq!(
-            ssh_args(&full).unwrap(),
-            ["-J", "jump@gate", "-o", "ServerAliveInterval 30", "-p", "2222", "-i", r"C:\Users\나\.ssh\id work", "me@10.0.0.5"]
-        );
-        // 빈 값은 없는 것과 같다.
-        let blank = SshTarget { target: "h".into(), port: Some(0), identity: Some("  ".into()), options: Some(String::new()) };
-        assert_eq!(ssh_args(&blank).unwrap(), ["h"]);
+        assert_eq!(ssh_args(&SshTarget { target: "10.0.0.5".into(), port: Some(2222) }).unwrap(), ["-p", "2222", "10.0.0.5"]);
+        // 포트 0은 없는 것과 같다.
+        assert_eq!(ssh_args(&SshTarget { target: "h".into(), port: Some(0) }).unwrap(), ["h"]);
         // 대상 자리에 옵션이나 빈칸이 든 것은 받지 않는다.
-        for bad in ["", "   ", "-oProxyCommand=calc", "me@host -p 22", "a\tb", "a\nb"] {
+        for bad in ["", "   ", "-oProxyCommand=calc", "host -p 22", "a\tb", "a\nb"] {
             assert!(ssh_args(&spec(bad)).is_err(), "{bad:?}");
         }
-        let open = SshTarget { target: "h".into(), options: Some(r#"-o "열린 따옴표"#.into()), ..Default::default() };
-        assert!(ssh_args(&open).is_err());
+        // 예전 기록의 키 파일·추가 옵션 칸은 읽지 않는다(사용자 이름·옵션은 저장하지 않는다).
+        let old: SshTarget = toml::from_str("target = 'h'\nport = 22\nidentity = 'C:\\k'\noptions = '-J gate'\nname = '웹'\n").unwrap();
+        assert_eq!(old, SshTarget { target: "h".into(), port: Some(22) });
+    }
+
+    #[test]
+    fn 사용자_이름을_물은_뒤_ssh를_띄우는_명령을_만든다() {
+        let script = login_script(r"C:\Program Files\OpenSSH\ssh.exe", &["-p".into(), "2222".into(), "it's’host".into()]);
+        assert!(script.contains("Read-Host '사용자 이름'"), "{script}");
+        // 작은따옴표(굽은 것 포함)는 두 번 적어 글 밖으로 나가지 못한다.
+        assert!(script.contains(r"& 'C:\Program Files\OpenSSH\ssh.exe' -l $user '-p' '2222' 'it''s’’host'"), "{script}");
+        assert!(script.ends_with("exit $LASTEXITCODE\n"));
+        // 창 제목은 접속할 곳(마지막 인자)으로 둔다.
+        assert!(script.contains("$Host.UI.RawUI.WindowTitle = 'ssh ' + $user + '@' + 'it''s’’host'"), "{script}");
+        // UTF-16LE를 base64로: "a한" → 61 00 5C D5
+        assert_eq!(encoded_command("a한"), "YQBc1Q==");
     }
 
     #[test]
