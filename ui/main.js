@@ -560,7 +560,8 @@ let askDone = null;
 
 /**
  * 세션을 새로 연다.
- * opts.show: 'replace'(지금 창 자리에), 'split'(나란히 추가), 'hidden'(목록에만)
+ * opts.show: 'replace'(지금 창 자리에. 기본), 'hidden'(목록에만). 화면을 나누는 것은 사용자가 끌어다 놓을 때뿐이다.
+ * opts.tabOf: SSH 세션이면 이 세션 바로 옆 탭으로 넣는다(연결 복제).
  * opts.cwd / opts.resume(이어갈 Claude 세션 번호) / opts.worktree(워크트리 이름) / opts.group(워크스페이스)
  */
 async function newSession(profileId, opts = {}) {
@@ -635,6 +636,14 @@ async function newSession(profileId, opts = {}) {
     dormant: !!opts.dormant,
   };
   sessions.set(s.key, s);
+  if (ssh) {
+    // SSH 탭 묶음: 복제(tabOf)는 원래 세션 바로 옆 탭으로 넣는다. 지금 창 자리에 여는 SSH 세션도, 그 자리에 같은 워크스페이스의
+    // SSH 탭이 보이고 있으면 그 옆 탭으로 넣는다(화면을 나누지 않고 탭으로 쌓는다).
+    s.tabSet = { list: [s] };
+    const anchor = opts.tabOf && sessions.has(opts.tabOf.key) ? opts.tabOf
+      : !opts.restoring && opts.show !== 'hidden' && active?.tabSet && visible.includes(active) && active.group === group ? active : null;
+    if (anchor) joinTabs(s, anchor);
+  }
   ensureGroup(s.group);
   if (!opts.restoring) rememberFolder(cwd);
   // 글자의 칸 수를 가상 터미널(conhost)과 같게 센다. 다르면 화면이 한 줄씩 밀린다.
@@ -647,8 +656,8 @@ async function newSession(profileId, opts = {}) {
   // 쉬는 세션은 화면에 올리지 않는다. 화면이 비어 있었으면 위에서 숨긴 빈 화면 안내를 되돌린다(배치를 다시 지으면 돌아온다).
   if (s.dormant) { if (!opts.restoring && !visible.length) layout(); render(); return s; }
 
-  if (opts.show === 'split' && visible.length < MAX_PANES) placeBeside(s);
-  else if (opts.show !== 'hidden') placeInActive(s);
+  // 화면은 나누지 않는다(창 분할은 사용자가 끌어다 놓을 때만): 지금 창 자리에 놓는다. SSH 탭은 그 묶음이 보이는 자리에서 탭을 바꾼다.
+  if (opts.show !== 'hidden') { if (s.tabSet) placeTab(s); else placeInActive(s); }
   layout();
   if (opts.show !== 'hidden') activate(s);
   await startProcess(s, opts.worktree);
@@ -791,8 +800,8 @@ async function newItem(kind, opts = {}) {
   ensureGroup(s.group);
   wirePane(s);
 
-  if (opts.show === 'split' && visible.length < MAX_PANES) placeBeside(s);
-  else if (opts.show !== 'hidden') placeInActive(s);
+  // 화면은 나누지 않는다(창 분할은 사용자가 끌어다 놓을 때만): 지금 창 자리에 놓는다.
+  if (opts.show !== 'hidden') placeInActive(s);
   // 화면에 놓지 않는 항목(Claude가 놓는 항목 등)은 배치가 바뀌지 않는다. 나란히 보기에서는 배치를 다시 짓지 않는다:
   // 다시 지으면 모든 창을 떼었다 붙여, 입력하던 창의 초점과 문서 창의 스크롤 자리가 날아간다.
   // (새 창은 만들 때 이미 보관 칸에 들어가 있다.)
@@ -810,13 +819,147 @@ const SSH = 'ssh';
 const isSshProfile = (profile) => profile?.id === SSH && !(profile.args || []).length;
 
 /**
- * 같은 서버에 세션을 하나 더 연다(연결 복제). 화면에 보이는 세션이면 그 옆에 나눠 열고, 아니면 지금 창 자리에 연다.
+ * 같은 서버에 세션을 하나 더 연다(연결 복제). 새 세션은 원래 세션 바로 옆 탭으로 들어가고(사이드바에도 놓인다) 그 탭이 보인다.
+ * 화면은 나누지 않는다(창 분할은 사용자가 탭이나 사이드바의 항목을 끌어다 놓을 때만 한다).
  * 내장 SSH로 접속해 있으면 그 연결에 채널만 하나 더 열어 다시 인증하지 않는다(연결이 끊겼거나 아직 접속 중이면 새로 접속한다).
  */
-function cloneSsh(s, show = visible.includes(s) ? 'split' : 'replace') {
+function cloneSsh(s) {
   if (!s?.ssh) return null;
   const live = s.id != null && !s.exited && !s.dormant;
-  return newSession(SSH, { ...besideOf(s), cwd: s.startCwd, ssh: s.ssh, color: s.color, show, cloneOf: live ? s.id : null });
+  return newSession(SSH, { ...besideOf(s), cwd: s.startCwd, ssh: s.ssh, color: s.color, show: 'replace', tabOf: s, cloneOf: live ? s.id : null });
+}
+
+// ───────────────────────── SSH 탭 ─────────────────────────
+// SSH 세션은 탭 묶음에 든다(s.tabSet = { list: [세션…] }, 탭 순서대로. 처음에는 저 혼자). 한 묶음은 화면의 창 자리 하나에
+// 그중 하나만 보이고, 그 창의 위쪽에 묶음의 탭이 늘어선다. 복제한 세션과 같은 워크스페이스의 SSH 창 자리에 여는 세션은
+// 그 옆 탭으로 들어간다. 탭을 화면 가장자리로 끌어다 놓으면 묶음에서 떼어 나눠 열고, 다른 SSH 창의 탭 줄(또는 가운데)에 놓으면
+// 그 묶음으로 옮긴다. 묶음과 탭 순서는 저장해 두었다가 다시 시작하면 되살린다.
+
+/** 그 SSH 세션과 같은 탭 묶음에 있는 세션들(탭 순서). 닫은 것, 다른 워크스페이스에 있는 것은 뺀다. */
+function tabsOf(s) {
+  if (!s?.tabSet) return s ? [s] : [];
+  return s.tabSet.list.filter((x) => sessions.has(x.key) && x.group === s.group);
+}
+
+/**
+ * s를 탭 묶음에서 뗀다. 화면에 보이던 탭이면 그 창 자리는 옆 탭이 받는다(남은 탭들이 화면에서 사라지지 않게).
+ * 다른 워크스페이스로 옮길 때 쓴다. 고른 것이 s였으면 자리를 받은 탭을 고른다.
+ */
+function leaveTabsShown(s) {
+  if (!s?.tabSet || tabsOf(s).length < 2) return leaveTabs(s);
+  const heir = visible.includes(s) ? handOffTab(s) : null;
+  leaveTabs(s);
+  if (!heir) return;
+  layout();
+  if (active === s) activate(heir);
+}
+
+/** s를 탭 묶음에서 떼어 혼자인 묶음으로 둔다(화면의 자리는 건드리지 않는다). */
+function leaveTabs(s) {
+  if (!s?.tabSet || s.tabSet.list.length < 2) return;
+  s.tabSet.list = s.tabSet.list.filter((x) => x !== s);
+  s.tabSet = { list: [s] };
+}
+
+/**
+ * s를 anchor의 탭 묶음에 넣는다(같은 묶음이면 순서만 바꾼다). `before`가 세션이면 그 탭 앞에, null이면 맨 끝에,
+ * 주지 않으면 anchor 바로 뒤에 넣는다. 화면의 자리는 건드리지 않는다.
+ */
+function joinTabs(s, anchor, before) {
+  if (!s?.tabSet || !anchor?.tabSet) return;
+  if (before === s || (s === anchor && before === undefined)) return; // 제자리에 놓았다.
+  if (s.tabSet !== anchor.tabSet) leaveTabs(s);
+  const set = anchor.tabSet;
+  const list = set.list.filter((x) => x !== s);
+  const at = before === undefined ? list.indexOf(anchor) + 1 : before === null ? list.length : list.indexOf(before);
+  list.splice(at < 0 ? list.length : at, 0, s);
+  set.list = list;
+  s.tabSet = set;
+}
+
+/** 화면에 보이던 탭 s 대신 그 창 자리에 옆 탭(오른쪽, 없으면 왼쪽)을 놓는다. 대신 놓은 세션, 옆 탭이 없으면 null. */
+function handOffTab(s) {
+  const leaf = findLeaf(s);
+  if (!leaf) return null;
+  const tabs = tabsOf(s);
+  const at = tabs.indexOf(s);
+  const heir = tabs[at + 1] || tabs[at - 1] || null;
+  if (heir) leaf.s = heir;
+  return heir;
+}
+
+/** 탭 s를 화면에 올린다: 같은 묶음의 탭이 보이는 창 자리가 있으면 그 자리에서 탭만 바꾸고, 없으면 지금 창 자리에 놓는다. */
+function placeTab(s) {
+  const shown = tabsOf(s).find((x) => x !== s && visible.includes(x));
+  const leaf = shown && findLeaf(shown);
+  if (leaf) leaf.s = s; else placeInActive(s);
+}
+
+/** 한 묶음에서 둘 이상이 화면에 보이면(되살린 배치, 끌어다 놓기) 뒤의 것을 묶음에서 떼어 낸다. 탭 하나는 한 창에만 보인다. */
+function untangleTabs() {
+  const seen = new Set();
+  for (const v of visible) {
+    if (!v.tabSet) continue;
+    if (seen.has(v.tabSet)) leaveTabs(v);
+    seen.add(v.tabSet);
+  }
+}
+
+/** 탭의 ×와 탭 메뉴로 SSH 세션을 닫는다. 정말 닫을지 먼저 묻는다. */
+function askCloseTab(s) {
+  if (!sessions.has(s.key)) return;
+  const nick = [s.name, s.ssh.name].find((text) => text && text !== sshServer(s));
+  const what = `${nick ? `${nick} · ` : ''}${s.sshUser ? `${s.sshUser}@` : ''}${sshServer(s)}`;
+  const live = s.id != null && !s.exited && !s.dormant;
+  if (!confirm(`SSH 세션 "${what}"을(를) 닫을까요?${live ? '\n이 세션의 접속을 끊습니다(복제한 다른 세션은 그대로 둡니다).' : ''}`)) return;
+  closeSession(s);
+}
+
+/** SSH 세션의 탭(창 위쪽 탭 줄에 놓인다): [이름] 사용자@서버 ×. 누르면 그 탭으로, 끌면 옮기거나 나눠 열고, 오른쪽 클릭하면 메뉴. */
+function sshTabFor(s) {
+  if (s.sshTab) return s.sshTab;
+  const tab = make('span', 'ssh-tab');
+  const text = make('span', 'ssh-tab-label');
+  const close = make('button', 'ssh-tab-close', '×');
+  close.title = '이 SSH 세션 닫기 (닫기 전에 묻습니다)';
+  close.onmousedown = (ev) => ev.stopPropagation(); // 끌기를 시작하지 않는다.
+  close.onclick = (ev) => { ev.stopPropagation(); askCloseTab(s); };
+  tab.append(text, close);
+  tab.dataset.key = s.key;
+  tab.onmousedown = (ev) => {
+    if (ev.button !== 0 || ev.target.closest('button')) return;
+    cancelDrag();
+    drag = { s, x: ev.clientX, y: ev.clientY, active: false };
+  };
+  tab.onclick = (ev) => {
+    if (ev.target.closest('button') || performance.now() - draggedAt < 300) return; // 끌다가 제자리에 놓은 것
+    activate(s);
+  };
+  tab.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); sshTabMenu(s, ev); };
+  s.sshTab = tab;
+  s.sshTabText = text;
+  return tab;
+}
+
+/** 창 위쪽의 탭 줄을 그 창에 보이는 세션의 묶음에 맞춘다. 같은 탭이면 그대로 둔다(누르는 사이에 바뀌면 그 클릭이 먹히지 않는다). */
+function paintTabStrip(s) {
+  const strip = s.tabStrip;
+  if (!strip) return;
+  const tabs = tabsOf(s);
+  const wanted = tabs.map(sshTabFor);
+  for (const t of tabs) paintSshTab(t);
+  const now = [...strip.children];
+  if (wanted.length === now.length && wanted.every((el, i) => el === now[i])) return;
+  strip.replaceChildren(...wanted);
+  revealTab(s);
+}
+
+/** 지금 탭이 보이게 탭 줄을 민다(탭이 많아 줄이 넘칠 때). 탭이 바뀔 때와 창 크기가 바뀔 때 부른다. */
+function revealTab(s) {
+  const strip = s.tabStrip, el = s.sshTab;
+  if (!strip || !el || el.parentElement !== strip || !strip.clientWidth) return;
+  if (el.offsetLeft < strip.scrollLeft) strip.scrollLeft = el.offsetLeft;
+  else if (el.offsetLeft + el.offsetWidth > strip.scrollLeft + strip.clientWidth) strip.scrollLeft = el.offsetLeft + el.offsetWidth - strip.clientWidth;
 }
 
 /** 모든 종류의 창에 공통인 동작: 나란히 보기에서 창을 누르면 그 창이 활성화된다. */
@@ -914,7 +1057,8 @@ function placeBeside(s) {
 
 /** 지금 창의 자리에 s를 놓는다(있던 세션은 화면에서만 빠지고 계속 살아 있다). */
 function placeInActive(s) {
-  const leaf = findLeaf(active);
+  // 지금 고른 것이 화면에 없으면 마지막 창 자리에 놓는다(화면은 나누지 않는다: 창 분할은 사용자가 끌어다 놓을 때만).
+  const leaf = findLeaf(active) || findLeaf(visible[visible.length - 1]);
   if (leaf) leaf.s = s; else if (!tree) tree = { s }; else placeBeside(s);
 }
 
@@ -932,6 +1076,7 @@ function layout() {
   // 창을 떼었다 붙이면 그 안의 스크롤이 맨 위로 돌아간다. 보던 자리를 스스로 지키는 항목(코드 보기)에 미리 알린다.
   for (const s of visible) { try { s.view?.freeze?.(); } catch { /* 그 화면의 문제로 배치가 멈추지 않게 */ } }
   visible = leavesOf(tree);
+  untangleTabs(); // 한 탭 묶음은 한 창에만 보인다.
   for (const s of sessions.values()) {
     const shown = visible.includes(s);
     s.pane.classList.toggle('hidden', !shown);
@@ -1003,23 +1148,69 @@ function fitVisible() {
 }
 
 /**
- * 사이드바에서 끌어온 세션을 창(target) 위에 놓았을 때.
+ * 사이드바나 SSH 탭 줄에서 끌어온 세션을 창(target) 위에 놓았을 때. 화면을 나누는 것은 이것뿐이다(사용자가 끌어다 놓을 때만).
  * 가장자리에 놓으면 그 창을 좌우·상하로 나눠 그쪽에 열고, 가운데에 놓으면 그 자리에 연다
- * (이미 화면에 있던 세션이면 둘의 자리를 바꾼다).
+ * (이미 화면에 있던 세션이면 둘의 자리를 바꾼다). SSH 세션을 같은 워크스페이스의 SSH 창 탭 줄이나 가운데에 놓으면(`tabs`)
+ * 그 창의 탭 묶음에 넣는다(`before` 탭 앞에, null이면 맨 끝, 주지 않으면 지금 탭 바로 뒤).
+ * 화면에 보이던 SSH 탭을 다른 곳에 놓으면 원래 창 자리에는 옆 탭이 남는다.
  */
-function dropOnPane(s, target, zone) {
-  if (s === target) return;
-  if (zone === 'center') {
-    const from = findLeaf(s), to = findLeaf(target);
+function dropOnPane(s, target, zone, before) {
+  if (zone === 'tabs') {
+    // 다른 창에 보이던 탭이면 그 창 자리를 옆 탭에 넘기고(옆 탭이 없으면 그 창을 닫고) 이 묶음으로 옮긴다.
+    if (s.tabSet !== target.tabSet && visible.includes(s) && !handOffTab(s)) tree = without(tree, s);
+    joinTabs(s, target, before);
+    const leaf = findLeaf(target);
+    if (leaf) leaf.s = s;
+  } else if (zone === 'center') {
+    if (s === target) return;
+    // 화면에 보이던 SSH 탭은 그 자리를 옆 탭에 넘기고 옮긴다(자리를 바꾸면 탭 묶음이 통째로 사라진다).
+    const heir = s.tabSet && visible.includes(s) ? handOffTab(s) : null;
+    // 남은 탭들은 원래 창에 그대로 두고, 옮긴 탭만 묶음에서 뗀다(사이드바에서 끌어온 숨은 탭도, 묶음이 다른 창에 보이면 뗀다).
+    if (heir || (s.tabSet && tabsOf(s).some((x) => x !== s && visible.includes(x)))) leaveTabs(s);
+    const from = heir ? null : findLeaf(s), to = findLeaf(target);
     if (from) from.s = target;
     to.s = s;
   } else {
-    if (!visible.includes(s) && visible.length >= MAX_PANES) return setStatus(`한 화면에 볼 수 있는 창은 ${MAX_PANES}개까지입니다.`);
+    // 새 창이 생기는지: 화면에 없던 것이거나, 화면에 보이던 탭을 묶음에서 떼어 내는 것.
+    const tearing = !!s.tabSet && visible.includes(s) && tabsOf(s).length > 1;
+    if ((!visible.includes(s) || tearing) && visible.length >= MAX_PANES) return setStatus(`한 화면에 볼 수 있는 창은 ${MAX_PANES}개까지입니다.`);
+    if (tearing) {
+      // 탭을 떼어 나눠 연다: 그 창 자리에는 옆 탭이 남는다. 자기 창의 가장자리에 놓았으면 남은 탭의 창을 나눈다.
+      const heir = handOffTab(s);
+      if (target === s) target = heir;
+      leaveTabs(s);
+    } else if (s.tabSet && tabsOf(s).some((x) => x !== s && visible.includes(x))) {
+      leaveTabs(s); // 묶음이 다른 창에 보이고 있으면 이것만 떼어 나눠 연다(묶음이 화면에 없으면 묶음째 연다).
+    }
+    if (s === target) return;
     tree = without(tree, s);
     splitAt(target, s, zone);
   }
   layout();
   activate(s);
+}
+
+/**
+ * 끄는 세션(s)을 그 위치에 놓으면 어떻게 되는지: { target, rect, zone, before }.
+ * SSH 세션을 같은 워크스페이스의 SSH 창 탭 줄에 놓으면 그 탭 묶음의 그 자리(`before` 탭 앞)에, 그 창 가운데에 놓으면 지금 탭 옆에 넣는다.
+ */
+function dropZoneAt(x, y, s) {
+  if (s?.tabSet) {
+    const head = document.elementFromPoint(x, y)?.closest?.('.pane.ssh > .pane-head');
+    const target = head && visible.find((v) => v.head === head);
+    if (target?.tabSet && target.group === s.group) {
+      const before = tabsOf(target).find((t) => {
+        const r = t.sshTab?.getBoundingClientRect();
+        return r && x < r.left + r.width / 2;
+      }) ?? null;
+      return { target, rect: head.getBoundingClientRect(), zone: 'tabs', before };
+    }
+  }
+  const hit = paneZoneAt(x, y);
+  if (hit?.zone === 'center' && s?.tabSet && hit.target.tabSet && hit.target.group === s.group && hit.target !== s) return { ...hit, zone: 'tabs', before: undefined };
+  // 가장자리에 놓아 창이 하나 늘어나는데 이미 한도면, 나눌 수 없다고 미리 보여 준다.
+  if (hit && hit.zone !== 'center' && s && visible.length >= MAX_PANES && (!visible.includes(s) || (s.tabSet && tabsOf(s).length > 1))) return { ...hit, full: true };
+  return hit;
 }
 
 /** 그 위치에 있는 창과, 창 안에서의 구역(left | right | top | bottom | center). */
@@ -1033,7 +1224,7 @@ function paneZoneAt(x, y) {
   return { target, rect, zone: distance < 0.3 ? nearest : 'center' };
 }
 
-const DROP_TEXT = { left: '왼쪽에 나눠 열기', right: '오른쪽에 나눠 열기', top: '위에 나눠 열기', bottom: '아래에 나눠 열기', center: '이 자리에 열기' };
+const DROP_TEXT = { left: '왼쪽에 나눠 열기', right: '오른쪽에 나눠 열기', top: '위에 나눠 열기', bottom: '아래에 나눠 열기', center: '이 자리에 열기', tabs: '이 창의 탭으로 넣기' };
 
 /** 끄는 동안, 놓으면 새 창이 차지할 영역을 미리 보여 준다. */
 function showDropHint(hit) {
@@ -1047,16 +1238,18 @@ function showDropHint(hit) {
     top: [r.left, r.top, r.width, r.height / 2],
     bottom: [r.left, r.top + r.height / 2, r.width, r.height / 2],
     center: [r.left, r.top, r.width, r.height],
+    tabs: [r.left, r.top, r.width, r.height],
   }[zone];
   Object.assign(hint.style, { left: `${box[0]}px`, top: `${box[1]}px`, width: `${box[2]}px`, height: `${box[3]}px` });
-  hint.textContent = DROP_TEXT[zone];
+  hint.textContent = hit.full ? `화면에 창이 ${MAX_PANES}개라 더 나눌 수 없습니다` : DROP_TEXT[zone];
 }
 
 /** 항목을 고른다(화면에 없으면 지금 창 자리에 놓는다). `keepFocus`이면 초점을 옮기지 않는다(사이드바에서 방향키로 오갈 때). */
 function activate(s, { keepFocus = false } = {}) {
   if (!s || !sessions.has(s.key)) return; // 기다리는 사이 닫힌 항목(넘기기, 워크스페이스 틀 펼치기)은 화면에 올리지 않는다.
   if (!visible.includes(s)) {
-    placeInActive(s);
+    // SSH 탭은 그 묶음이 보이는 창 자리에서 탭만 바꾼다(묶음이 화면에 없으면 지금 창 자리에).
+    if (s.tabSet) placeTab(s); else placeInActive(s);
     layout();
   }
   // 찾기 줄이 열려 있었으면 보던 세션의 찾기 강조를 지운다(아래 closeSearch는 새로 고른 세션의 것을 지운다).
@@ -1076,12 +1269,12 @@ function activate(s, { keepFocus = false } = {}) {
   saveState();
 }
 
-/** 나란히 보기에 넣거나 뺀다(세션은 계속 살아 있다). */
+/**
+ * 화면에서 빼거나(세션은 계속 살아 있다) 화면에 올린다. 올릴 때는 화면을 나누지 않고 지금 창 자리에 놓는다
+ * (창 분할은 사용자가 끌어다 놓을 때만 한다).
+ */
 function toggleShown(s) {
   if (!visible.includes(s)) {
-    if (visible.length >= MAX_PANES) return setStatus(`한 화면에 볼 수 있는 창은 ${MAX_PANES}개까지입니다.`);
-    placeBeside(s);
-    layout();
     activate(s);
   } else {
     // 화면에서만 숨긴다. 마지막 창도 숨길 수 있고, 그때는 화면이 비고 세션은 사이드바에 남는다.
@@ -1136,15 +1329,18 @@ async function closeSession(s, { forget = false } = {}) {
   }
   s.pane.remove();
   s.shots.forEach((shot) => URL.revokeObjectURL(shot.url));
+  // 화면에 보이던 SSH 탭이면 그 창 자리에 옆 탭을 대신 보인다(브라우저의 탭처럼). 그다음 탭 묶음에서 뺀다.
+  const heir = s.tabSet ? handOffTab(s) : null;
+  if (s.tabSet) s.tabSet.list = s.tabSet.list.filter((x) => x !== s);
   sessions.delete(s.key);
   tree = without(tree, s);
   visible = leavesOf(tree);
   if (active === s) {
     active = null;
     // 화면에 남은 것이 없으면 다음에 볼 항목을 고른다. 쉬는 세션은 고르지 않는다(고르면 재개된다. 재개는 사용자가
-    // 누른 세션만 한다). 같은 워크스페이스의 것을 먼저 고른다.
+    // 누른 세션만 한다). 같은 워크스페이스의 것을 먼저 고른다. 닫은 탭의 자리를 받은 옆 탭이 있으면 그것을 고른다.
     const awake = [...sessions.values()].filter((other) => !other.dormant);
-    const next = visible[0] || awake.filter((other) => other.group === s.group).pop() || awake.pop();
+    const next = heir || visible[0] || awake.filter((other) => other.group === s.group).pop() || awake.pop();
     if (next) activate(next);
   }
   layout();
@@ -1166,6 +1362,8 @@ async function restartSession(s) {
   if (after && sessions.has(after.key)) placeInOrder(fresh, after, false);
   // 북마크는 한 숫자에 항목 하나라 새 세션에는 비어 있다. 옛 세션의 것을 넘겨준다.
   if (s.mark) { fresh.mark = s.mark; s.mark = ''; }
+  // SSH 탭 묶음에서도 원래 자리(바로 뒤)를 이어받는다. 옛 세션은 아래에서 닫으며 묶음에서 빠진다.
+  if (s.tabSet && fresh.tabSet) joinTabs(fresh, s);
   const leaf = findLeaf(s);
   if (leaf) leaf.s = fresh;
   const wasActive = active === s;
@@ -1292,7 +1490,7 @@ function paintSshButtons(s, targets = castTargets()) {
       ? `동시 입력 끄기 (지금 ${count}개 세션에 함께 입력됩니다)`
       : why || (loggingIn(s)
         ? '로그인을 마친 뒤에 쓸 수 있습니다'
-        : 'SSH 동시 입력 켜기: 여기에 치는 글쇠가 나란히 보이는 다른 SSH 세션에도 함께 들어갑니다\n같은 워크스페이스에서 접속 중인 SSH 세션이 화면에 없으면 나란히 띄웁니다');
+        : 'SSH 동시 입력 켜기: 여기에 치는 글쇠가 나란히 보이는 다른 SSH 창에도 함께 들어갑니다\n나란히 볼 SSH 창은 탭이나 사이드바의 세션을 화면 가장자리로 끌어다 놓아 띄웁니다');
   }
 }
 
@@ -1300,20 +1498,22 @@ function paintSshButtons(s, targets = castTargets()) {
 const sshServer = (s) => `${s.ssh.target}${s.ssh.port ? `:${s.ssh.port}` : ''}`;
 
 /**
- * SSH 창 위쪽의 탭을 지금 상태에 맞춘다: [별칭이나 서버에 붙인 이름] 사용자@서버 (로그인 중·끝남).
+ * SSH 탭 하나를 지금 상태에 맞춘다: [별칭이나 서버에 붙인 이름] 사용자@서버 (로그인 중·끝남) ×.
  * 사용자 이름은 셸이 열린 뒤에야 안다(접속할 때마다 세션 화면에서 묻고, 저장하지 않는다). 그전에는 서버만 보인다.
+ * 그 창에 보이고 있는 탭은 `current`(터미널과 이어진 모양)다.
  */
 function paintSshTab(s) {
   const tab = s.sshTab;
   if (!tab) return;
+  tab.classList.toggle('current', visible.includes(s));
   const server = sshServer(s);
   const nick = [s.name, s.ssh.name].find((text) => text && text !== server) || '';
   const state = s.exited ? '끝남' : s.dormant ? '쉬는 중' : loggingIn(s) ? '로그인 중' : '';
   // 다시 그릴 때마다 조각을 새로 만들지 않는다(바뀐 것이 없으면 그대로 둔다).
   const key = JSON.stringify([nick, s.sshUser, server, state, s.sshBuiltin]);
-  if (tab.dataset.key === key) return;
-  tab.dataset.key = key;
-  tab.replaceChildren(
+  if (tab.dataset.paint === key) return;
+  tab.dataset.paint = key;
+  s.sshTabText.replaceChildren(
     ...(nick ? [make('span', 'ssh-tab-name', nick)] : []),
     ...(s.sshUser ? [make('span', 'ssh-tab-user', s.sshUser), make('span', 'ssh-tab-at', '@')] : []),
     make('span', 'ssh-tab-host', server),
@@ -1327,47 +1527,37 @@ function paintSshTab(s) {
     `계정: ${account}`,
     `서버: ${s.ssh.target}${s.ssh.port ? ` · 포트 ${s.ssh.port}` : ''}`,
     ...(state ? [`상태: ${state}`] : []),
-    '오른쪽 클릭: 세션 복제',
+    '누르기: 이 탭 보기 · 끌기: 화면 가장자리에 놓으면 나눠 보기, 다른 SSH 창의 탭 줄에 놓으면 그 창으로 옮기기',
+    '오른쪽 클릭: 세션 복제·닫기 · ×: 닫기',
   ].join('\n');
 }
 
-/** SSH 창 위쪽 탭의 오른쪽 클릭 메뉴: 세션 복제(같은 서버에 세션을 하나 더 연다). */
+/** SSH 탭의 오른쪽 클릭 메뉴: 세션 복제(바로 옆 탭으로), 세션 닫기(묻고 닫는다). */
 function sshTabMenu(s, ev) {
   // 내장 SSH로 로그인을 마친 세션이면 그 연결에 채널만 더 연다. 아니면(끝남·쉬는 중·로그인 중·ssh.exe) 새로 접속한다.
   const reuse = s.id != null && !s.exited && !s.dormant && s.sshReady === true && s.sshBuiltin;
-  const how = reuse ? '같은 연결을 써서 다시 인증하지 않습니다' : '새로 접속해 다시 인증합니다';
-  const full = visible.length >= MAX_PANES;
+  const how = reuse ? '복제는 같은 연결을 써서 다시 인증하지 않습니다' : '복제는 새로 접속해 다시 인증합니다';
   showMenu(ev, [
     { caption: `${s.sshUser ? `${s.sshUser}@` : ''}${sshServer(s)} · ${how}` },
-    { label: full ? `세션 복제 — 옆에 나란히 (화면에 창이 ${MAX_PANES}개라 열 수 없음)` : '세션 복제 — 옆에 나란히', action: () => { activate(s); cloneSsh(s, 'split'); }, disabled: full },
-    { label: '세션 복제 — 이 창 자리에 (지금 세션은 사이드바에 남음)', action: () => { activate(s); cloneSsh(s, 'replace'); } },
+    { label: '세션 복제 (바로 옆 탭으로)', action: () => cloneSsh(s) },
+    { label: '세션 닫기…', action: () => askCloseTab(s) },
+    { caption: '나란히 보려면 탭을 화면 가장자리로 끌어다 놓으세요' },
   ]);
 }
 
 /**
- * SSH 창의 [동시 입력] 단추. 켜져 있으면 끈다. 나란히 보이는 접속 중인 SSH 세션이 둘 이상이면 그대로 켠다.
- * 아니면 같은 워크스페이스에서 접속 중인 SSH 세션들을 지금 보이는 창들 옆에 나란히 띄운 뒤 켠다. 그런 세션이 없으면 방법을 알린다.
+ * SSH 창의 [동시 입력] 단추. 켜져 있으면 끈다. 나란히 보이는 접속 중인 SSH 세션이 둘 이상이면 켠다.
+ * 화면을 스스로 나누지는 않는다(창 분할은 사용자가 끌어다 놓을 때만): 나란히 보이는 SSH 창이 없으면 끌어다 놓는 법을 알린다.
  */
 function toggleSshCast(s) {
   if (broadcast) return setBroadcast(false);
   if (!castableSsh(s)) return setStatus(loggingIn(s) ? '로그인을 마친 뒤에 동시 입력을 켤 수 있습니다.' : '접속 중인 SSH 세션에서만 동시 입력을 켤 수 있습니다.');
   if (visible.filter(castableSsh).length < 2) {
-    const others = [...sessions.values()].filter((v) => v !== s && castableSsh(v) && v.group === s.group && !visible.includes(v));
-    if (!others.length) {
-      // 화면에 있는 다른 SSH 세션이 로그인 중이면 그것을 알린다(로그인을 마치면 다시 누르면 된다).
-      if ([...sessions.values()].some((v) => v !== s && v.group === s.group && loggingIn(v) && !v.exited)) {
-        return setStatus('다른 SSH 세션이 아직 로그인 중입니다. 로그인을 마친 뒤 다시 누르세요(로그인 중인 세션은 동시 입력에 넣지 않습니다).');
-      }
-      return setStatus('동시 입력은 접속 중인 SSH 세션이 둘 이상일 때 씁니다. 오른쪽 클릭 → "이 연결 복제"나 "다른 서버에 접속…"으로 세션을 더 여세요.');
+    // 화면에 있는 다른 SSH 세션이 로그인 중이면 그것을 알린다(로그인을 마치면 다시 누르면 된다).
+    if (visible.some((v) => v !== s && v.ssh && loggingIn(v) && !v.exited)) {
+      return setStatus('다른 SSH 세션이 아직 로그인 중입니다. 로그인을 마친 뒤 다시 누르세요(로그인 중인 세션은 동시 입력에 넣지 않습니다).');
     }
-    // 지금 보이는 창은 그대로 두고 그 옆에 붙인다(한도를 넘으면 붙이지 못한 것을 알린다).
-    const room = Math.max(0, MAX_PANES - visible.length);
-    const added = others.slice(0, room);
-    if (!added.length) return setStatus(`화면에 창이 ${MAX_PANES}개라 더 띄우지 못했습니다. 창을 숨긴 뒤 다시 누르세요.`);
-    tree = balanced([...visible, ...added]);
-    layout();
-    activate(s);
-    if (added.length < others.length) setStatus(`화면에 창이 ${MAX_PANES}개까지라 SSH 세션 ${others.length - added.length}개는 띄우지 못했습니다.`);
+    return setStatus('동시 입력은 나란히 보이는 SSH 창끼리 씁니다. SSH 탭이나 사이드바의 SSH 세션을 화면 가장자리로 끌어다 놓아 나란히 띄운 뒤 누르세요.');
   }
   setBroadcast(SSH);
 }
@@ -1842,11 +2032,12 @@ function sessionItem(s) {
     s === active && 'active', visible.includes(s) && 'shown', s.waiting, tone && `tone-${tone}`,
     s.exited ? 'exited' : s.dormant ? 'dormant' : s.busy ? 'busy' : s.attention && 'attention',
   ].filter(Boolean).join(' '));
-  li.title = '끌기: 화면 분할·순서 바꾸기·워크스페이스 옮기기 · 두 번 누르기: 별칭 · 오른쪽 클릭: 메뉴';
+  li.title = '끌기: 화면 가장자리에 놓으면 나눠 보기·순서 바꾸기·워크스페이스 옮기기 · 두 번 누르기: 별칭 · 오른쪽 클릭: 메뉴';
   if (s.color) li.style.borderLeftColor = s.color;
   li.onclick = (ev) => {
     if (ev.target.closest('input')) return; // 별칭을 고치는 중
-    if (ev.ctrlKey) toggleShown(s); else activate(s);
+    // Ctrl+클릭: 화면에 보이는 것은 화면에서 뺀다(나란히 놓는 것은 끌어다 놓기로만 한다).
+    if (ev.ctrlKey && visible.includes(s)) toggleShown(s); else activate(s);
   };
   li.onmousedown = (ev) => {
     if (ev.button === 0 && !ev.ctrlKey && !ev.target.closest('button, input')) { cancelDrag(); drag = { s, x: ev.clientX, y: ev.clientY, active: false }; }
@@ -1876,7 +2067,7 @@ function sessionItem(s) {
   // 화면 표시 토글: 오른쪽 화면에 보이기/숨기기(세션은 계속 실행된다). 항상 보이는 작은 단추.
   const shown = visible.includes(s);
   const eye = make('button', `eye${shown ? ' on' : ''}`, shown ? '◉' : '○');
-  eye.title = shown ? '화면에서 숨기기' : '화면에 보이기';
+  eye.title = shown ? '화면에서 숨기기' : '화면에 보이기 (지금 창 자리에)';
   eye.onclick = (ev) => { ev.stopPropagation(); toggleShown(s); };
   const buttons = make('span', 'row-buttons');
   if (s.agents.size) buttons.append(agentPill(s.agents.size, agentSummary(s)));
@@ -2073,6 +2264,10 @@ async function newGroup() {
 function moveToGroup(list, name) {
   if (!name) return setStatus('항목은 워크스페이스 안에만 둘 수 있습니다. 옮길 워크스페이스의 이름을 적어 주세요.');
   ensureGroup(name);
+  // 탭 묶음은 한 워크스페이스 안에서만 묶는다. 묶음째 옮기면(워크스페이스 이름 바꾸기) 그대로 두고, 일부만 옮기면 그것을 뗀다.
+  const moving = new Set(list);
+  const leaving = list.filter((s) => s.group !== name && s.tabSet && !tabsOf(s).every((x) => moving.has(x)));
+  for (const s of leaving) leaveTabsShown(s);
   for (const s of list) s.group = name;
   render();
   return saveState();
@@ -2316,27 +2511,7 @@ function groupMenu(group, ev) {
   } else {
     items.push({ label: '이 묶음을 워크스페이스로 만들기…', action: () => askGroup(all) });
   }
-  // SSH 세션이 둘 이상이면: 모두 나란히 띄우고 SSH 동시 입력을 켠다(여러 서버에 같은 명령을 넣을 때).
-  const servers = all.filter((s) => s.ssh && !s.exited);
-  if (servers.length > 1) {
-    items.push({
-      label: `SSH 세션 ${Math.min(servers.length, MAX_PANES)}개 나란히 보고 동시 입력`,
-      action: () => {
-        tree = balanced(servers.slice(0, MAX_PANES));
-        layout();
-        if (visible[0]) activate(visible[0]);
-        setBroadcast(SSH);
-      },
-    });
-  }
-  items.push({
-    label: '이 워크스페이스만 나란히 보기',
-    action: () => {
-      tree = balanced(live.slice(0, MAX_PANES));
-      layout();
-      if (visible[0]) activate(visible[0]);
-    },
-  });
+  // 여러 항목을 나란히 띄우는 메뉴는 두지 않는다: 창 분할은 사용자가 사이드바나 탭에서 끌어다 놓을 때만 한다.
   items.push({
     label: '이 워크스페이스의 세션 모두 닫기',
     action: () => {
@@ -2372,8 +2547,8 @@ document.addEventListener('mousemove', (ev) => {
   // 다른 항목의 줄 위에서는 놓으면 끼어들 자리(그 줄의 위나 아래)를 선으로 보여 준다.
   const over = rowUnder(point, ev.clientY);
   if (over && over.target !== drag.s) over.row.classList.add(over.after ? 'after' : 'before');
-  // 터미널 화면 위에서는 놓으면 창이 어떻게 나뉘는지 미리 보여 준다.
-  showDropHint(paneZoneAt(ev.clientX, ev.clientY));
+  // 터미널 화면 위에서는 놓으면 창이 어떻게 나뉘는지(SSH 탭 줄이면 그 창의 탭으로 들어가는지) 미리 보여 준다.
+  showDropHint(dropZoneAt(ev.clientX, ev.clientY, drag.s));
 });
 
 document.addEventListener('mouseup', (ev) => {
@@ -2405,15 +2580,15 @@ document.addEventListener('mouseup', (ev) => {
   if (over) {
     if (over.target !== s) {
       if (over.target.group) ensureGroup(over.target.group);
-      if (over.target.group) s.group = over.target.group; // 워크스페이스 밖으로는 옮기지 않는다.
+      if (over.target.group && over.target.group !== s.group) { leaveTabsShown(s); s.group = over.target.group; } // 워크스페이스 밖으로는 옮기지 않는다.
       placeInOrder(s, over.target, over.after);
       saveState();
     }
     return render();
   }
-  // 터미널 화면에 놓음: 놓은 위치에 따라 그 창을 나누거나 그 자리에 연다.
-  const hit = paneZoneAt(ev.clientX, ev.clientY);
-  if (hit) dropOnPane(s, hit.target, hit.zone);
+  // 터미널 화면에 놓음: 놓은 위치에 따라 그 창을 나누거나 그 자리에 연다(SSH 탭 줄이면 그 창의 탭으로 넣는다).
+  const hit = dropZoneAt(ev.clientX, ev.clientY, s);
+  if (hit) dropOnPane(s, hit.target, hit.zone, hit.before);
   else if (point?.closest?.('#terms')) activate(s);
   render();
 });
@@ -2675,17 +2850,22 @@ function render() {
       if (s.ssh) {
         // SSH 세션은 한 창만 볼 때도 제목 줄을 보이고, 거기에 출력 기록·동시 입력 단추를 눈에 띄게 둔다.
         s.pane.classList.add('ssh');
-        // 맨 왼쪽의 탭: 계정(로그인한 사용자)과 서버. 오른쪽 클릭하면 세션 복제 메뉴.
-        // 다시 그릴 때 바꾸지 않는다(글만 고친다): 누르는 사이에 탭이 바뀌면 그 오른쪽 클릭이 먹히지 않는다.
-        s.sshTab = make('span', 'ssh-tab');
-        s.sshTab.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); sshTabMenu(s, ev); };
-        s.head.prepend(s.sshTab);
+        // 맨 왼쪽의 탭 줄: 이 창 자리의 SSH 탭들(계정@서버 ×). 탭이 넘치면 가로로 밀린다(휠로도 민다).
+        s.tabStrip = make('div', 'ssh-tabs');
+        s.tabStrip.addEventListener('wheel', (ev) => {
+          if (!ev.deltaY || s.tabStrip.scrollWidth <= s.tabStrip.clientWidth) return;
+          s.tabStrip.scrollLeft += ev.deltaY;
+          ev.preventDefault();
+        }, { passive: false });
+        s.head.prepend(s.tabStrip);
+        // 창이 좁아지거나 넓어져도 지금 탭이 탭 줄 밖으로 밀려나지 않게 한다.
+        new ResizeObserver(() => revealTab(s)).observe(s.tabStrip);
         // 탭과 단추 사이의 빈 곳(나눠 볼 때는 그 사이에 워크스페이스 이름이 온다)
         s.head.insertBefore(make('span', 'pane-fill'), only);
         // 출력 기록: 누르면 기록할 파일을 고르고 시작한다. 기록 중에 누르면 멈춘다.
         s.logButton = make('button', 'pane-tool rec');
         s.logButton.onclick = (ev) => { ev.stopPropagation(); toggleLog(s); };
-        // 동시 입력: 나란히 보이는 SSH 세션끼리 같은 글쇠를 넣는다. 한 창만 보고 있으면 같은 워크스페이스의 SSH 세션을 나란히 띄운다.
+        // 동시 입력: 나란히 보이는 SSH 창끼리 같은 글쇠를 넣는다(화면을 스스로 나누지는 않는다).
         s.castButton = make('button', 'pane-tool cast');
         s.castButton.onclick = (ev) => { ev.stopPropagation(); toggleSshCast(s); };
         s.head.insertBefore(s.logButton, only);
@@ -2693,16 +2873,16 @@ function render() {
         requestAnimationFrame(fitVisible); // 제목 줄이 생긴 만큼 터미널 크기를 다시 맞춘다.
       }
       // 단추를 빠르게 두 번 누른 것은 "이 창만 보기"로 치지 않는다.
-      s.head.ondblclick = (ev) => { if (!ev.target.closest('button')) showOnly(s); };
+      s.head.ondblclick = (ev) => { if (!ev.target.closest('button, .ssh-tabs')) showOnly(s); }; // 탭을 두 번 누른 것은 탭 고르기다.
     }
     paintSshButtons(s);
-    paintSshTab(s);
+    paintTabStrip(s);
     s.headInfo.replaceChildren(
       // 나란히 볼 때는 창마다 그 세션의 워크스페이스를 적는다(서로 다른 워크스페이스의 세션을 나란히 두고 헷갈리지 않게).
       ...(isTerm(s) && s.group ? [make('span', 'pane-group', `◆ ${s.group}`)] : []),
       ...(s.mark ? [markBadge(s.mark)] : []),
       // SSH 세션은 이름을 탭에 적는다.
-      ...(s.sshTab ? [] : [
+      ...(s.tabStrip ? [] : [
         make('span', 'title', label(s)),
         ...(s.agents.size ? [agentPill(s.agents.size, agentSummary(s))] : []),
         make('span', 'model', [s.model, s.effort].filter(Boolean).join(' · ')),
@@ -2857,7 +3037,7 @@ function paletteEntries() {
     command('자주 쓰는 지시', showSnippets, '명령 · Ctrl+Shift+P'),
     command(broadcast ? '동시 입력 끄기' : '동시 입력 켜기', () => setBroadcast(!broadcast), '명령 · Ctrl+Shift+B'),
     command(broadcast === SSH ? 'SSH 동시 입력 끄기' : 'SSH 동시 입력 켜기', () => setBroadcast(broadcast === SSH ? false : SSH), '명령 · 나란히 보이는 SSH 세션끼리만 함께 입력'),
-    ...(active?.ssh ? [command(`이 SSH 연결 복제 (${specLabel(active.ssh)})`, () => cloneSsh(active), '명령 · 같은 서버에 새 세션 · 다시 인증하지 않음')] : []),
+    ...(active?.ssh ? [command(`이 SSH 연결 복제 (${specLabel(active.ssh)})`, () => cloneSsh(active), '명령 · 바로 옆 탭으로 · 다시 인증하지 않음')] : []),
     ...(isTerm(active) && (active.logPath || (!runsClaude(active) && !active.exited && !active.dormant))
       ? [command(active.logPath ? '출력 기록 끄기' : '출력을 파일로 기록…', () => toggleLog(active), active.logPath ? `명령 · 기록 중: ${active.logPath}` : '명령 · 이 세션의 출력을 끌 때까지 파일에 적음')]
       : []),
@@ -2973,7 +3153,7 @@ async function showLog(s) {
   if (!path) return;
   const shown = [...sessions.values()].find((other) => other.kind === 'reader' && samePath(other.view.path(), path));
   if (shown) return activate(shown);
-  const doc = await newItem('reader', { ...besideOf(s), saved: { path }, show: visible.includes(s) && visible.length < MAX_PANES ? 'split' : 'replace' });
+  const doc = await newItem('reader', { ...besideOf(s), saved: { path }, show: 'replace' });
   if (doc) activate(doc);
 }
 
@@ -2997,9 +3177,8 @@ function sessionMenu(s, ev) {
     { icons: MARKS.map((digit) => ({ node: make('b', '', digit), title: markTitle(s, digit), on: s.mark === digit, action: () => setMark(s, digit) })) },
     { label: s.group ? `워크스페이스 바꾸기… (지금: ${s.group})` : '워크스페이스 지정…', action: () => askGroup([s], s.group) },
     ...(visible.length > 1 || !visible.includes(s) ? [{ label: '이것만 보기 (나머지는 화면에서 숨기기)', action: () => showOnly(s) }] : []),
-    visible.includes(s)
-      ? { label: '화면에서 숨기기', action: () => toggleShown(s) }
-      : { label: '화면에 나눠 보기', action: () => toggleShown(s) },
+    // 화면에 올리는 것은 누르기(지금 창 자리), 나란히 놓는 것은 끌어다 놓기로만 한다.
+    ...(visible.includes(s) ? [{ label: '화면에서 숨기기', action: () => toggleShown(s) }] : []),
     ...(term ? [
       ...(s.dormant ? [{ label: resumeOf(s) ? '재개 (대화 이어 가기)' : '재개', action: () => activate(s) }] : []),
       ...(s.exited ? [{
@@ -3007,8 +3186,8 @@ function sessionMenu(s, ev) {
         action: () => restartSession(s),
       }] : []),
       ...(s.ssh ? [
-        { label: `이 연결 복제 (같은 서버에 새 세션 · ${specLabel(s.ssh)})`, action: () => cloneSsh(s) },
-        { label: '다른 서버에 접속…', action: () => showSsh({ ...besideOf(s), cwd: s.startCwd, show: visible.includes(s) ? 'split' : 'replace' }) },
+        { label: `이 연결 복제 (바로 옆 탭으로 · ${specLabel(s.ssh)})`, action: () => cloneSsh(s) },
+        { label: '다른 서버에 접속… (지금 창의 탭으로)', action: () => { if (!visible.includes(s)) activate(s); showSsh({ ...besideOf(s), cwd: s.startCwd, show: 'replace' }); } },
         ...(savedHosts().some((host) => host.target === s.ssh.target && (host.port || 0) === (s.ssh.port || 0)) ? [] : [{
           label: '이 서버를 저장해 두기 (접속 창에서 한 번에 접속)',
           action: () => { if (saveHost({ ...s.ssh, name: s.ssh.name || s.name })) setStatus(`SSH 서버를 저장했습니다: ${specLabel(s.ssh)}`); },
@@ -3019,7 +3198,7 @@ function sessionMenu(s, ev) {
         }] : []),
       ] : [{
         label: `같은 폴더에 새 ${s.profile.label} 세션`,
-        action: () => newSession(s.profile.id, { ...besideOf(s), show: visible.includes(s) ? 'split' : 'replace' }),
+        action: () => newSession(s.profile.id, { ...besideOf(s), show: 'replace' }),
       }]),
       { label: '변경 내용 보기', action: () => { activate(s); toggleDiff(true); } },
       ...(s.exited || s.dormant ? [] : [{ label: '화면 다시 맞추기 (글자가 어긋나 보일 때)', action: () => realign(s) }]),
@@ -3069,7 +3248,7 @@ const canControl = (s, target) => !!s?.group && !!target && target !== s && targ
 function openMemo(path) {
   const open = [...sessions.values()].find((s) => s.kind === 'memo' && samePath(s.view?.file?.() || '', path));
   if (open) return activate(open);
-  return newItem('memo', { saved: { open: path }, show: 'split' });
+  return newItem('memo', { saved: { open: path }, show: 'replace' });
 }
 
 /** 그 항목을 넘겨받을 수 있는 Claude 세션들: 같은 이름 붙인 워크스페이스에서 돌고 있는 것. */
@@ -3104,7 +3283,7 @@ async function handoffSite(item, target) {
     return notice('브라우저', `"${label(target)}"은(는) 이 브라우저와 같은 워크스페이스의 Claude 세션이 아니라 넘길 수 없습니다.`);
   }
   if (!target) {
-    target = await newSession('claude', { ...besideOf(item), show: 'split' });
+    target = await newSession('claude', { ...besideOf(item), show: 'replace' });
     if (target) await untilReady(target);
     if (!target || target.exited || !sessions.has(target.key)) return notice('브라우저', '새 Claude 세션을 열지 못했습니다.');
   }
@@ -3113,11 +3292,7 @@ async function handoffSite(item, target) {
   // 한 브라우저는 한 세션이 맡는다(넘겨주면 앞서 맡던 세션에서는 떼어 낸다).
   for (const other of sessions.values()) if (other.browser === item.key) other.browser = null;
   target.browser = item.key;
-  // 세션이 화면에 없으면 브라우저 옆에 나란히 놓아 둘 다 보이게 한다.
-  if (!visible.includes(target) && visible.includes(item) && visible.length < MAX_PANES) {
-    splitAt(item, target, 'right');
-    layout();
-  }
+  // 화면은 나누지 않는다(창 분할은 사용자가 끌어다 놓을 때만): 세션을 지금 창 자리에 보인다. 브라우저는 사이드바에 있다.
   activate(target);
   const url = item.view.url();
   target.term.paste(`Cypher 브라우저 "${label(item)}"${url ? `(${url})` : ''}에서 이어서 작업해줘: `);
@@ -3142,11 +3317,7 @@ async function browserTarget(s, create) {
   if (!site) {
     if (!create) throw new Error('이 세션의 워크스페이스에 브라우저(사이트 항목)가 없습니다. browser_navigate로 주소를 열면 새 브라우저가 만들어집니다.');
     site = await newItem('site', { ...besideOf(s), saved: {}, show: 'hidden' });
-    // 세션이 화면에 보이면 그 옆에 나란히 놓아 Claude가 하는 일을 볼 수 있게 한다(초점은 세션에 그대로 둔다).
-    if (visible.includes(s) && visible.length < MAX_PANES) {
-      splitAt(s, site, 'right');
-      layout();
-    }
+    // 화면은 나누지 않는다(창 분할은 사용자가 끌어다 놓을 때만): 사이드바에 놓아 두고, 사용자가 끌어다 나란히 볼 수 있다.
     reveal([site]);
   }
   if (s.browser !== site.key) {
@@ -3738,7 +3909,7 @@ async function handoffChrome(fresh) {
   if (!url) return notice('브라우저', `워크스페이스 "${from.group}"의 Chrome이 열려 있지 않습니다. 먼저 [Chrome]을 눌러 여세요.`);
   let target = fresh ? null : (aliveClaude(from) ? from : [...sessions.values()].find((s) => aliveClaude(s) && s.group === from.group));
   if (!target) {
-    target = await newSession('claude', { ...besideOf(from), show: 'split' });
+    target = await newSession('claude', { ...besideOf(from), show: 'replace' });
     if (target) await untilReady(target);
     if (!target || target.exited || !sessions.has(target.key)) return notice('브라우저', '새 Claude 세션을 열지 못했습니다.');
   }
@@ -3825,7 +3996,7 @@ async function captureBrowser(full) {
 async function openSourcePage(item, url) {
   try {
     if (chromeEngine()) await invoke('browser_open', { url, profile: ensureProfile(item) });
-    else await newItem('site', { ...besideOf(item), saved: { url }, show: 'split' });
+    else await newItem('site', { ...besideOf(item), saved: { url }, show: 'replace' });
   } catch (err) {
     setStatus(String(err));
   }
@@ -4148,12 +4319,20 @@ function writeState() {
   // 쉬는 세션(아직 재개하지 않은 것)도 적어 둔다. 빠뜨리면 다음에 켰을 때 목록에서 사라진다.
   // 띄우는 중인 세션(번호를 아직 받지 못했다)도 적는다. 재개하는 짧은 사이에 적은 기록에서 빠지면 안 된다.
   const live = [...sessions.values()].filter((s) => (isTerm(s) ? s.dormant || !s.exited : !!s.view));
+  // SSH 탭 묶음: 둘 이상인 묶음에 번호를 붙여 세션마다 { set: 묶음 번호, at: 탭 순번 }으로 적는다.
+  const setIds = new Map();
+  const tabOf = (s) => {
+    const tabs = s.tabSet ? tabsOf(s) : [];
+    if (tabs.length < 2) return {};
+    if (!setIds.has(s.tabSet)) setIds.set(s.tabSet, setIds.size);
+    return { tab: { set: setIds.get(s.tabSet), at: tabs.indexOf(s) } };
+  };
   const state = {
     // 되살리지 못한 항목의 기록은 그대로 다시 적는다(순번이 배치와 어긋나지 않게 맨 뒤에 둔다).
     // 항목 하나의 화면이 상태를 내놓다 실패해도 저장 전체가 멈추지 않게, 그 항목은 지난번에 적은 내용을 그대로 쓴다.
     sessions: [...live.map((s) => {
       try { s.lastRecord = describe(s); } catch (err) { console.error('항목의 상태를 읽지 못했습니다', s.kind, err); }
-      return s.lastRecord ? { ...s.lastRecord, shown: visible.includes(s) } : null;
+      return s.lastRecord ? { ...s.lastRecord, shown: visible.includes(s), ...tabOf(s) } : null;
     }), ...unrestored],
     active: live.indexOf(active),
     // 화면 분할 모양. 잎은 세션의 순번({ i }), 가지는 { dir, a, b }.
@@ -4250,6 +4429,18 @@ async function restore({ docsOnly = false } = {}) {
     restoring = false;
   }
   if (docsOnly) { render(); saveState(); return; } // 메모·HTTP는 사이드바에만 되살린다.
+  // SSH 탭 묶음과 탭 순서를 되살린다(같은 묶음 번호끼리, 적어 둔 순번대로).
+  const tabSets = new Map();
+  saved.sessions.forEach((item, index) => {
+    const s = restored[index];
+    if (!s?.tabSet || !Number.isInteger(item?.tab?.set)) return;
+    if (!tabSets.has(item.tab.set)) tabSets.set(item.tab.set, []);
+    tabSets.get(item.tab.set).push({ at: Number(item.tab.at) || 0, s });
+  });
+  for (const members of tabSets.values()) {
+    const set = { list: members.sort((p, q) => p.at - q.at).map((m) => m.s) };
+    for (const s of set.list) s.tabSet = set;
+  }
   // 분할 모양을 되살린다. 저장된 모양이 없으면(예전 기록) 보이던 세션을 고르게 나눈다.
   // 되살리는 도중에 사용자가 닫은 항목은 배치에서 뺀다(순번은 저장 때와 맞아야 하므로 자리는 비워 둔다).
   // 쉬는 세션은 화면에 올리지 않는다(올리면 재개된다).
@@ -4945,8 +5136,8 @@ window.addEventListener('keydown', (ev) => {
   // 그 숫자의 북마크가 없으면 가로채지 않는다(Ctrl+0은 문서·ERD·마인드맵·메모에서 기본 크기·전체 맞춤이기도 하다).
   else if (digit && ev.ctrlKey && !ev.shiftKey && !ev.altKey && markedItem(digit)) jumpToMark(digit);
   // 마지막에 연 것이 SSH 세션이고 지금 SSH 세션을 보고 있으면 그 연결을 복제한다(아니면 접속 창이 뜬다).
-  else if (combo && key === 't') { if (lastProfile === SSH && active?.ssh) cloneSsh(active, 'replace'); else newSession(lastProfile); }
-  else if (combo && key === 'd') { if (lastProfile === SSH && active?.ssh) cloneSsh(active, 'split'); else newSession(lastProfile, { show: 'split' }); }
+  // Ctrl+Shift+T·D: 새 세션을 지금 창 자리에 연다(화면은 나누지 않는다). SSH 세션을 보고 있으면 그 연결을 옆 탭으로 복제한다.
+  else if (combo && (key === 't' || key === 'd')) { if (lastProfile === SSH && active?.ssh) cloneSsh(active); else newSession(lastProfile); }
   else if (combo && key === 'w') { if (active) closeSession(active); }
   else if (combo && key === 'x') { if (active) toggleShown(active); }
   else if (combo && key === 'f') openSearch();

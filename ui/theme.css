@@ -197,7 +197,7 @@
 :root[data-theme="matrix"] #sessions li.group .name,
 :root[data-theme="matrix"] #sessions li.active .name,
 :root[data-theme="matrix"] .pane.active .pane-head .title,
-:root[data-theme="matrix"] .pane.active .ssh-tab,
+:root[data-theme="matrix"] .pane.active .ssh-tab.current,
 :root[data-theme="matrix"] #where .where-name,
 :root[data-theme="matrix"] #popup-head { text-shadow: 0 0 6px rgba(0, 255, 102, 0.55); }
 :root[data-theme="matrix"] .pane.active .pane-head { border-bottom-color: var(--accent); box-shadow: 0 1px 8px rgba(0, 255, 102, 0.25); }
