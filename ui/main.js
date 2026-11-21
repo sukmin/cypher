@@ -4835,6 +4835,26 @@ function syncSize(s, again = false) {
   );
 }
 
+/**
+ * 앱이 직접 만드는 키 신호(Shift+Enter의 줄바꿈 등)를 보낸다. 조합 중이던 글자(한글의 마지막 글자)가 있으면 그 글자부터 보낸다.
+ *
+ * 한글을 조합하다가 다른 키를 누르면 입력기는 "글자 확정 → 그 키" 순서로 알려 주는데, xterm.js는 확정된 글자를 바로 보내지 않고
+ * 한 박자 뒤(setTimeout 0)에 보낸다. 그 사이에 여기서 신호를 먼저 보내면 순서가 뒤집혀, "안녕" 뒤에 Shift+Enter를 누를 때
+ * 줄바꿈이 먼저 가고 "녕"이 다음 줄에 찍힌다. xterm.js가 스스로 다루는 키(Enter 등)는 보내기 전에 조합을 마무리하므로,
+ * 여기서도 같은 일을 먼저 한다.
+ */
+function sendAfterComposition(s, data) {
+  // xterm.js에 조합을 지금 마무리하게 하는 공개 기능이 없어 안쪽 것을 직접 부른다(같이 넣어 둔 판에 맞춘 것).
+  const helper = s.term?._core?._compositionHelper;
+  if (typeof helper?._finalizeComposition !== 'function') {
+    // 안쪽 구조가 달라졌으면 한 박자 미뤄 보낸다(xterm.js가 먼저 걸어 둔 "확정 글자 보내기" 뒤에 나간다).
+    setTimeout(() => send(s, data), 0);
+    return;
+  }
+  if (helper._isComposing || helper._isSendingComposition) helper._finalizeComposition(false);
+  send(s, data);
+}
+
 function wireTerminal(s) {
   const { term } = s;
   term.onData((data) => send(s, data));
@@ -4873,7 +4893,7 @@ function wireTerminal(s) {
     const key = ev.key.toLowerCase();
     // Shift+Enter는 줄바꿈으로 전달한다(Claude Code 여러 줄 입력).
     if (key === 'enter' && ev.shiftKey && !ev.ctrlKey && !ev.altKey) {
-      if (ev.type === 'keydown') send(s, '\x1b\r');
+      if (ev.type === 'keydown') sendAfterComposition(s, '\x1b\r');
       ev.preventDefault();
       return false;
     }
