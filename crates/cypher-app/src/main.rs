@@ -239,6 +239,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
         .item(&item("look", "모양: 테마·글꼴·글자 크기…")?)
         .item(&item("home", "브라우저 시작 페이지…")?)
         .item(&item("claude-command", "Claude 실행 명령…")?)
+        .item(&item("copy-select", "끌어서 고른 글 바로 복사 켜기/끄기")?)
         .item(&item("settings", "Cypher 설정 파일 열기")?)
         .separator()
         .item(&item("claude-settings", "Claude 공통 설정 열기 (settings.json)")?)
@@ -376,6 +377,7 @@ fn main() {
             commands::session_write,
             commands::session_resize,
             commands::session_pause,
+            commands::session_scope,
             commands::session_close,
             commands::session_log_pick,
             commands::session_log_start,

@@ -397,6 +397,7 @@ function runMenu(id) {
     templates: showTemplates,
     snippets: showSnippets,
     broadcast: () => setBroadcast(!broadcast),
+    'copy-select': () => setCopyOnSelect(!copyOnSelect),
     memory: () => showMemory(),
     look: showLook,
     home: askHomePage,
@@ -459,28 +460,79 @@ function adoptGroup() {
   return ROOT_GROUP;
 }
 
-/** 워크스페이스 폴더를 정하거나(path) 푼다(빈 글). */
-function setGroupFolder(name, path) {
-  if (!name) return;
-  if (path) groupFolders[name] = path; else delete groupFolders[name];
+/** 두 경로가 같은 폴더를 가리키는 표기인지(대소문자, 슬래시 방향, 끝의 구분자만 다른 것은 같다고 본다). */
+const sameFolder = (a, b) => {
+  const plain = (path) => String(path).replace(/\//g, '\\').replace(/(?<=[^:\\])\\+$/, '').toLowerCase();
+  return plain(a) === plain(b);
+};
+
+/**
+ * 워크스페이스 폴더를 정한다. 한 번 정한 폴더는 바꾸거나 풀 수 없다(이미 정해져 있으면 그대로 두고 까닭을 알린다).
+ * 워크스페이스를 만들 때 정하고, 그때 정하지 않은 워크스페이스는 나중에 한 번 정할 수 있다.
+ * `replaceMissing`: 정해 둔 폴더가 없어진 것을 확인하고 다시 정하는 경우(repointGroupFolder)에만 준다.
+ * 정했으면(또는 이미 그 폴더면) true.
+ */
+function setGroupFolder(name, path, { replaceMissing = false } = {}) {
+  if (!name || !path) return false;
+  const own = groupFolderOf(name);
+  if (own && !replaceMissing) {
+    if (sameFolder(own, path)) return true;
+    setStatus(`워크스페이스 "${name}"의 폴더(${own})는 바꿀 수 없습니다. 다른 폴더에서 일하려면 그 폴더로 새 워크스페이스를 만드세요.`);
+    return false;
+  }
+  groupFolders[name] = path;
   localStorage.setItem('cypher.groupFolders', JSON.stringify(groupFolders));
   render(); // 묶음 머리의 폴더 줄과 풍선말을 맞춘다.
-  setStatus(path
-    ? `워크스페이스 "${name}"의 폴더: ${path} (이 워크스페이스에서 여는 세션은 여기서 시작합니다)`
-    : `워크스페이스 "${name}"의 폴더를 풀었습니다. 이 워크스페이스의 세션은 기본 폴더(${folder})에서 시작합니다.`);
+  setStatus(`워크스페이스 "${name}"의 폴더: ${path} (이 워크스페이스에서 여는 세션은 여기서 시작합니다. 이 폴더는 바꿀 수 없습니다)`);
+  return true;
 }
 
+/** 폴더를 정하지 않은 워크스페이스의 폴더를 고르게 한다(한 번 정하면 바꿀 수 없다). 이미 정해져 있으면 그 폴더를 탐색기에서 연다. */
 async function pickGroupFolder(name) {
-  const picked = await invoke('pick_folder', { start: groupFolderOf(name) || startFolderHint(), title: `워크스페이스 "${name}"의 세션을 시작할 폴더` });
+  if (groupFolderOf(name)) return openGroupFolder(name);
+  const picked = await invoke('pick_folder', { start: startFolderHint(), title: `워크스페이스 "${name}"의 세션을 시작할 폴더 (한 번 정하면 바꿀 수 없습니다)` }).catch(() => null);
   // 고르는 창이 떠 있는 동안에도 앱은 쓸 수 있다. 그사이 그 워크스페이스의 이름이 바뀌거나 지워졌으면 적지 않는다.
   if (picked && groupList.includes(name)) setGroupFolder(name, picked);
 }
 
-/** 워크스페이스의 폴더 줄의 ▾(또는 경로): 지금 보는 항목의 폴더와 최근에 세션을 시작한 폴더에서 골라 그 워크스페이스의 폴더로 정하거나 푼다. */
-function groupFolderMenu(ev, name) {
+/** 워크스페이스 폴더가 지금도 있는지. 네트워크 경로(\\서버\…)는 확인하지 않고 있다고 본다(확인하는 명령이 네트워크 경로를 보지 않는다). */
+async function groupFolderExists(path) {
+  if (/^[\\/]{2}/.test(path)) return true;
+  const [exists] = await invoke('dirs_exist', { paths: [path] }).catch(() => [true]);
+  return exists !== false;
+}
+
+/**
+ * 워크스페이스의 폴더를 탐색기에서 연다(폴더 줄의 [폴더] 단추·경로, 워크스페이스 메뉴, 빠른 이동).
+ * 폴더를 정하지 않은 워크스페이스면 고르게 하고, 정해 둔 폴더가 없어졌으면 다시 정할지 묻는다.
+ */
+async function openGroupFolder(name) {
   const own = groupFolderOf(name);
+  if (!own) return pickGroupFolder(name);
+  if (!(await groupFolderExists(own))) return repointGroupFolder(name);
+  invoke('link_open', { target: own, cwd: own, openFile: false, line: null, col: null })
+    .then(() => setStatus(`탐색기에서 열었습니다: ${own}`))
+    .catch((err) => setStatus(`워크스페이스 "${name}"의 폴더를 열지 못했습니다: ${err}`));
+}
+
+/**
+ * 정해 둔 폴더가 없어진(지워졌거나 옮겨진) 워크스페이스만 폴더를 다시 정할 수 있다. 그대로 두면 그 워크스페이스의 세션이
+ * 계속 기본 폴더에서 시작하기 때문이다. 묻고, 고르는 사이에 폴더가 되살아났으면 바꾸지 않는다.
+ */
+async function repointGroupFolder(name) {
+  const own = groupFolderOf(name);
+  if (!confirm(`워크스페이스 "${name}"의 폴더가 없습니다:\n${own}\n\n지워졌거나 옮겨진 것 같습니다. 폴더를 다시 정할까요?\n(폴더가 없어진 워크스페이스만 다시 정할 수 있습니다)`)) return;
+  const picked = await invoke('pick_folder', { start: startFolderHint(), title: `워크스페이스 "${name}"의 폴더 다시 정하기 (없어진 폴더: ${own})` }).catch(() => null);
+  if (!picked || !groupList.includes(name) || groupFolderOf(name) !== own) return;
+  if (await groupFolderExists(own)) return setStatus(`워크스페이스 "${name}"의 폴더가 다시 있어 바꾸지 않았습니다: ${own}`);
+  setGroupFolder(name, picked, { replaceMissing: true });
+}
+
+/** 폴더를 정하지 않은 워크스페이스의 폴더 줄의 ▾(또는 글): 지금 보는 항목의 폴더와 최근에 세션을 시작한 폴더에서 골라 그 워크스페이스의 폴더로 정한다. */
+function groupFolderMenu(ev, name) {
+  if (groupFolderOf(name)) return openGroupFolder(name);
   const here = active && sessions.has(active.key) ? (active.project || active.startCwd) : '';
-  const seen = new Set([own.toLowerCase()]);
+  const seen = new Set();
   const choices = [];
   for (const [path, note] of [[here, '  (지금 항목)'], ...recentFolders.map((path) => [path, ''])]) {
     if (!path || seen.has(path.toLowerCase())) continue;
@@ -488,10 +540,9 @@ function groupFolderMenu(ev, name) {
     choices.push({ label: `${baseName(path)}  —  ${path}${note}`, action: () => setGroupFolder(name, path) });
   }
   showMenu(ev, [
-    { caption: own ? `워크스페이스 "${name}"의 폴더: ${own}` : `워크스페이스 "${name}"의 폴더: 정하지 않음` },
+    { caption: `워크스페이스 "${name}"의 폴더 정하기 (한 번 정하면 바꿀 수 없습니다)` },
     ...choices,
     { label: '다른 폴더 고르기…', action: () => pickGroupFolder(name) },
-    ...(own ? [{ label: '워크스페이스 폴더 풀기 (기본 폴더에서 시작)', action: () => setGroupFolder(name, '') }] : []),
   ]);
 }
 
@@ -582,10 +633,8 @@ async function newSession(profileId, opts = {}) {
   let start = opts.cwd || folder;
   const own = opts.cwd ? '' : groupFolderOf(group);
   if (own) {
-    // 네트워크 경로(\\서버\…)는 있는지 확인하지 않고 그대로 쓴다(확인하는 명령이 네트워크 경로를 보지 않는다).
-    const [exists] = /^[\\/]{2}/.test(own) ? [true] : await invoke('dirs_exist', { paths: [own] }).catch(() => [true]);
-    if (exists === false) setStatus(`워크스페이스 "${group}"의 폴더가 없어 기본 폴더(${folder})에서 시작합니다: ${own}`);
-    else start = own;
+    if (await groupFolderExists(own)) start = own;
+    else setStatus(`워크스페이스 "${group}"의 폴더가 없어 기본 폴더(${folder})에서 시작합니다: ${own} (폴더 줄의 [폴더]를 누르면 다시 정할 수 있습니다)`);
   }
   $('empty').hidden = true;
   // 같은 폴더가 표기만 달라 다른 묶음으로 갈리지 않게 역슬래시로 통일한다.
@@ -599,7 +648,7 @@ async function newSession(profileId, opts = {}) {
 
   const look = currentLook();
   const term = new Terminal({
-    fontFamily: look.termFamily, fontSize: look.termPixels, theme: look.termTheme, minimumContrastRatio: look.contrast,
+    fontFamily: look.termFamily, fontSize: ssh ? sshPixels(look) : look.termPixels, theme: look.termTheme, minimumContrastRatio: look.contrast,
     cursorBlink: true, scrollback: config.session.scrollback, allowProposedApi: true, windowsPty: windowsPty(),
     // 매트릭스 테마에서는 터미널 뒤로 흐르는 글자가 비치게 한다. 터미널을 만들 때만 정할 수 있고(나중에 못 바꾼다)
     // 글자가 조금 덜 또렷해지므로, 그 테마로 흐르는 글자를 켜 둔 동안에 만드는 터미널에만 켠다.
@@ -697,12 +746,15 @@ async function startProcess(s, worktree = null) {
   // SSH 세션은 셸이 열렸다는 알림(session-ready)이 올 때까지 로그인 중으로 본다(동시 입력에서 뺀다).
   // 다시 접속하면 다른 사용자로 로그인할 수 있으니 탭의 사용자 이름도 셸이 열릴 때까지 비운다.
   if (s.ssh) Object.assign(s, { sshReady: false, sshUser: '', sshBuiltin: false });
+  // 연결은 같은 워크스페이스의 세션끼리만 같이 쓴다: 이 세션이 든 워크스페이스를 함께 넘긴다.
+  const scope = s.group || '';
   try {
     s.id = await invoke('session_create', {
       profile: s.profile.id, cwd: s.startCwd, cols: size.cols, rows: size.rows,
       resume: resumeOf(s) || null, worktree: worktree || null, onOutput: channel,
-      command, ssh: s.ssh || null, cloneOf: s.cloneOf ?? null,
+      command, ssh: s.ssh || null, cloneOf: s.cloneOf ?? null, group: scope,
     });
+    if (s.ssh) s.scopeSent = scope; // 앱이 알고 있는 이 세션의 워크스페이스(syncSshScopes)
     s.cloneOf = null; // 다시 시작할 때는 새로 접속한다.
     // 번호를 받기 전에 셸이 열렸다(나눠 쓰는 연결은 금방 열린다).
     const early = earlyReady.get(s.id);
@@ -1467,6 +1519,12 @@ function paintSshButtons(s, targets = castTargets()) {
     texts.forEach((text, i) => { if (button.children[i].textContent !== text) button.children[i].textContent = text; });
   };
   const why = s.exited ? '끝난 세션입니다' : s.dormant ? '쉬는 세션입니다(눌러 재개한 뒤에 쓸 수 있습니다)' : '';
+  if (s.fontLabel) {
+    const size = String(sshFontNow());
+    if (s.fontLabel.textContent !== size) s.fontLabel.textContent = size;
+    s.fontLabel.classList.toggle('own', !!sshFontSize);
+    s.fontLabel.title = `SSH 글자 크기 ${size}${sshFontSize ? '' : ' (앱의 터미널 글자 크기를 따름)'}\nSSH 세션에만 적용됩니다 · Ctrl+휠로도 바꿉니다\n누르면 기본 크기(설정 → 모양의 터미널 글자 크기)로 되돌립니다`;
+  }
   if (s.logButton) {
     const on = !!s.logPath;
     s.logButton.classList.toggle('on', on);
@@ -1492,6 +1550,49 @@ function paintSshButtons(s, targets = castTargets()) {
         ? '로그인을 마친 뒤에 쓸 수 있습니다'
         : 'SSH 동시 입력 켜기: 여기에 치는 글쇠가 나란히 보이는 다른 SSH 창에도 함께 들어갑니다\n나란히 볼 SSH 창은 탭이나 사이드바의 세션을 화면 가장자리로 끌어다 놓아 띄웁니다');
   }
+}
+
+// ───────────────────────── SSH 글자 크기 ─────────────────────────
+// SSH 창 위쪽의 [가−] 크기 [가+]로 SSH 세션의 글자 크기만 따로 바꾼다(Ctrl+휠로도 바꾼다). 모든 SSH 세션이 함께 쓰고
+// 이 컴퓨터에 기억한다. 정하지 않았으면 앱의 터미널 글자 크기(설정 → 모양)를 따른다. Claude·셸 세션에는 영향이 없다.
+
+const SSH_FONT_KEY = 'cypher.ssh.fontSize';
+const SSH_FONT_MIN = 6, SSH_FONT_MAX = 40;
+let sshFontSize = 0; // 0이면 앱의 터미널 글자 크기를 따른다
+try {
+  const stored = Math.round(Number(localStorage.getItem(SSH_FONT_KEY)));
+  if (stored >= SSH_FONT_MIN && stored <= SSH_FONT_MAX) sshFontSize = stored;
+} catch { /* 읽지 못하면 앱의 크기를 따른다 */ }
+
+/** SSH 세션의 지금 글자 크기(화면에 보이는 숫자). */
+const sshFontNow = (look = currentLook()) => sshFontSize || Math.round(look.termSize);
+/** 터미널에 줄 값: 화면 배율이 터미널 글자까지 키우지 않게 그만큼 나눈다(look.js의 termPixels와 같은 셈). */
+const sshPixels = (look) => (sshFontSize ? Math.round((sshFontSize / look.zoom) * 100) / 100 : look.termPixels);
+
+/** SSH 세션의 글자 크기를 정한다. `size`가 0이면 앱의 터미널 글자 크기를 따르게 되돌린다. */
+function setSshFont(size) {
+  const look = currentLook();
+  const next = size ? Math.min(SSH_FONT_MAX, Math.max(SSH_FONT_MIN, Math.round(size))) : 0;
+  const before = sshFontNow(look);
+  // 한도에 걸려 크기가 그대로면 아무것도 바꾸지 않는다(앱의 크기를 따르던 것을 "따로 정한 크기"로 적지 않는다).
+  if (next && next === before && next !== Math.round(size)) return setStatus(`SSH 글자 크기는 ${SSH_FONT_MIN}~${SSH_FONT_MAX} 사이로 정합니다 (지금 ${before}).`);
+  sshFontSize = next;
+  try {
+    if (next) localStorage.setItem(SSH_FONT_KEY, String(next)); else localStorage.removeItem(SSH_FONT_KEY);
+  } catch { /* 저장 공간 문제는 무시 */ }
+  for (const s of sessions.values()) {
+    if (!s.ssh || !s.term) continue;
+    s.term.options.fontSize = sshPixels(look);
+    paintSshButtons(s);
+  }
+  // 글자 크기가 바뀌면 줄·칸 수가 달라진다: 보이는 창을 다시 맞춰 서버에 새 크기를 알린다.
+  let done = false;
+  const refit = () => { if (!done) { done = true; fitVisible(); } };
+  requestAnimationFrame(refit);
+  setTimeout(refit, 120); // 창이 가려져 그리기 신호가 오지 않을 때를 대비한다.
+  const now = sshFontNow(look);
+  setStatus(!next ? `SSH 글자 크기: 기본(${now}) — 앱의 터미널 글자 크기(설정 → 모양)를 따릅니다.`
+    : `SSH 글자 크기: ${now} (SSH 세션에만 적용 · Ctrl+휠로도 바꿉니다)`);
 }
 
 /** SSH 세션의 서버: 주소(기본이 아닌 포트를 정했으면 함께). */
@@ -2090,6 +2191,13 @@ function sessionItem(s) {
     agents.title = agentSummary(s);
   }
   const sub = make('span', 'sub');
+  // 지금 화면(스테이지)에 보이는 항목은 아랫줄 맨 앞에 표를 단다: 입력이 가는 창은 "보는 중", 나란히 보이는 다른 창은 "화면".
+  // (이름 옆에 두면 좁은 사이드바에서 이름이 가려진다.)
+  if (visible.includes(s)) {
+    const chip = make('b', 'on-stage', s === active ? '보는 중' : '화면');
+    chip.title = s === active ? '지금 화면에서 보고 있는 항목 (입력이 여기로 갑니다)' : '화면에 나란히 보이는 항목';
+    sub.append(chip, ' ');
+  }
   if (s.logPath) {
     const rec = make('b', 'recording', '● 기록');
     rec.title = `출력을 파일로 기록하는 중: ${s.logPath}\n오른쪽 클릭 → 출력 기록 끄기`;
@@ -2234,7 +2342,8 @@ function ensureGroup(name) {
 }
 
 /**
- * 워크스페이스를 만든다(이미 있으면 그대로 둔다). `path`를 주면 그 워크스페이스의 폴더로 정한다. 만든(또는 있던) 워크스페이스의 이름을 돌려준다.
+ * 워크스페이스를 만든다(이미 있으면 그대로 둔다). `path`를 주면 그 워크스페이스의 폴더로 정한다(이미 폴더를 정해 둔 워크스페이스면 바꾸지 않는다).
+ * 만든(또는 있던) 워크스페이스의 이름을 돌려준다.
  * 세션과 항목은 워크스페이스 안에서만 만들 수 있으므로, 무엇을 하든 워크스페이스부터 만든다.
  */
 function createGroup(name, path = '') {
@@ -2247,16 +2356,19 @@ function createGroup(name, path = '') {
   return given;
 }
 
-/** "+ 워크스페이스" 단추: 이름을 묻고 워크스페이스를 만든 뒤, 그 워크스페이스의 세션이 시작될 폴더를 고르게 한다(취소하면 나중에 워크스페이스 오른쪽 클릭 메뉴에서 정한다). */
+/**
+ * "+ 워크스페이스" 단추: 이름을 묻고 워크스페이스를 만든 뒤, 그 워크스페이스의 세션이 시작될 폴더를 고르게 한다.
+ * 여기서 고른 폴더는 바꿀 수 없다. 취소하면 폴더 없이 만들어지고, 나중에 폴더 줄에서 한 번 정할 수 있다.
+ */
 async function newGroup() {
   const name = await ask('새 워크스페이스 이름 (세션과 항목은 워크스페이스 안에서만 만듭니다)', '예: 결제 개편');
   if (!name) return '';
   const fresh = !groupList.includes(name);
   createGroup(name);
   if (!fresh) { setStatus(`워크스페이스 "${name}"은(는) 이미 있습니다. 워크스페이스 머리의 +로 세션·항목을 더하세요.`); return name; }
-  const picked = await invoke('pick_folder', { start: startFolderHint(), title: `워크스페이스 "${name}"의 세션을 시작할 폴더 (취소: 나중에 정하기)` }).catch(() => null);
+  const picked = await invoke('pick_folder', { start: startFolderHint(), title: `워크스페이스 "${name}"의 세션을 시작할 폴더 (한 번 정하면 바꿀 수 없습니다 · 취소: 나중에 정하기)` }).catch(() => null);
   if (picked && groupList.includes(name)) setGroupFolder(name, picked);
-  setStatus(`워크스페이스 "${name}"을(를) 만들었습니다${picked ? ` (폴더: ${picked})` : ' (폴더는 워크스페이스 이름 아래의 폴더 줄에서 정합니다)'}. 워크스페이스 머리의 +로 세션·항목을 더하세요.`);
+  setStatus(`워크스페이스 "${name}"을(를) 만들었습니다${picked ? ` (폴더: ${picked} · 바꿀 수 없음)` : ' (폴더는 워크스페이스 이름 아래의 폴더 줄에서 한 번 정할 수 있습니다)'}. 워크스페이스 머리의 +로 세션·항목을 더하세요.`);
   return name;
 }
 
@@ -2499,9 +2611,11 @@ function groupMenu(group, ev) {
   if (resting) items.push({ label: `쉬는 세션 ${resting}개 모두 재개`, action: () => wakeGroup(whole) });
   if (all.length) items.push({ label: '이 워크스페이스를 틀로 저장… (같은 구성을 다시 펼칠 수 있게)', action: () => saveTemplate(whole) });
   if (group.logical) {
-    // 워크스페이스 폴더: 이 워크스페이스에서 여는 세션이 시작될 폴더. 정해 두지 않으면 기본 폴더(사용자 폴더)에서 시작한다.
+    // 워크스페이스 폴더: 이 워크스페이스에서 여는 세션이 시작될 폴더. 한 번 정하면 바꿀 수 없어, 정해 둔 워크스페이스에서는 탐색기로 열기만 한다.
     const own = groupFolderOf(group.name);
-    items.push({ label: own ? '워크스페이스 폴더 바꾸기…' : '워크스페이스 폴더 정하기… (이 워크스페이스의 세션이 시작될 폴더)', action: () => pickGroupFolder(group.name) });
+    items.push(own
+      ? { label: '워크스페이스 폴더 열기 (탐색기)', action: () => openGroupFolder(group.name) }
+      : { label: '워크스페이스 폴더 정하기… (세션이 시작될 폴더 · 한 번 정하면 바꿀 수 없음)', action: () => pickGroupFolder(group.name) });
     items.push({ label: '워크스페이스 이름 바꾸기', action: () => renameGroup(group) });
     // 순서는 머리를 끌어서도 바꾼다. 메뉴로는 한 칸씩 옮긴다.
     const at = groupList.indexOf(group.name);
@@ -2734,7 +2848,7 @@ function render() {
       'group', group.logical && 'logical', group.list.some((s) => s.attention || s.waiting) && 'attention',
     ].filter(Boolean).join(' '));
     const ownFolder = group.logical ? groupFolderOf(group.name) : '';
-    head.title = `${group.hint}\n${group.logical ? `워크스페이스 폴더: ${ownFolder || `정하지 않음 (기본 폴더 ${folder}에서 시작)`}\n` : ''}클릭: 접기·펼치기 · 오른쪽 클릭: 메뉴 · +: 세션·항목 더하기 · 항목을 끌어다 놓기: 이 워크스페이스에 넣기${group.logical ? ' · 이 머리를 끌기: 워크스페이스 순서 바꾸기' : ''}`;
+    head.title = `${group.hint}\n${group.logical ? `워크스페이스 폴더: ${ownFolder ? `${ownFolder} (바꿀 수 없음)` : `정하지 않음 (기본 폴더 ${folder}에서 시작)`}\n` : ''}클릭: 접기·펼치기 · 오른쪽 클릭: 메뉴 · +: 세션·항목 더하기 · 항목을 끌어다 놓기: 이 워크스페이스에 넣기${group.logical ? ' · 이 머리를 끌기: 워크스페이스 순서 바꾸기' : ''}`;
     head.dataset.drop = group.logical ? 'logical' : 'folder';
     head.dataset.name = group.name;
     // 밖에서 끌어다 놓은 것을 이 묶음의 항목으로 만들 때 쓴다(drop.js).
@@ -2769,22 +2883,30 @@ function render() {
     add.onclick = (ev) => { ev.stopPropagation(); showMenu(ev, addItems(group)); };
     head.append(add);
     head.append(make('span', 'count', String(group.list.length)));
-    // 워크스페이스의 폴더 줄: 이름 바로 아래에 워크스페이스 폴더를 그대로 보여 주고 거기서 바로 고른다(접어 두어도 보인다).
+    // 워크스페이스의 폴더 줄: 이름 바로 아래에 워크스페이스 폴더를 그대로 보여 준다(접어 두어도 보인다).
+    // 정해 둔 폴더는 바꿀 수 없어 [폴더] 단추(와 경로)는 그 폴더를 탐색기에서 열기만 한다. 정하지 않은 워크스페이스만 여기서 한 번 고른다.
     if (group.logical) {
       const row = make('div', ownFolder ? 'group-folder' : 'group-folder unset');
       // 오른쪽 정렬 말줄임에서 글자 순서가 뒤집히지 않도록 방향 표시 문자를 붙인다.
       const path = make('span', 'path', ownFolder ? '‎' + ownFolder : '폴더를 정하지 않음');
       path.title = ownFolder
-        ? `워크스페이스 "${group.name}"의 폴더: ${ownFolder}\n이 워크스페이스에서 여는 세션은 여기서 시작합니다.\n클릭·▾: 바꾸기·풀기`
-        : `워크스페이스 "${group.name}"의 폴더를 정하지 않았습니다. 이 워크스페이스의 세션은 이 워크스페이스에 있는 항목의 폴더나 기본 폴더(${folder})에서 시작합니다.\n클릭·▾: 정하기`;
-      const recent = make('button', '', '▾');
-      recent.title = '지금 항목의 폴더·최근 폴더에서 골라 이 워크스페이스의 폴더로 정하기';
-      const pick = make('button', '', '폴더…');
-      pick.title = ownFolder ? '이 워크스페이스의 폴더 바꾸기' : '이 워크스페이스의 폴더 정하기';
-      path.onclick = recent.onclick = (ev) => groupFolderMenu(ev, group.name);
-      pick.onclick = () => pickGroupFolder(group.name);
+        ? `워크스페이스 "${group.name}"의 폴더: ${ownFolder}\n이 워크스페이스에서 여는 세션은 여기서 시작합니다. 이 폴더는 바꿀 수 없습니다.\n클릭: 탐색기에서 열기`
+        : `워크스페이스 "${group.name}"의 폴더를 정하지 않았습니다. 이 워크스페이스의 세션은 이 워크스페이스에 있는 항목의 폴더나 기본 폴더(${folder})에서 시작합니다.\n클릭·▾: 정하기 (한 번 정하면 바꿀 수 없습니다)`;
       row.onclick = (ev) => ev.stopPropagation(); // 폴더 줄을 눌러도 묶음이 접히지 않게
-      row.append(path, recent, pick);
+      if (ownFolder) {
+        const open = make('button', '', '폴더');
+        open.title = `탐색기에서 이 폴더 열기: ${ownFolder}`;
+        path.onclick = open.onclick = () => openGroupFolder(group.name);
+        row.append(path, open);
+      } else {
+        const recent = make('button', '', '▾');
+        recent.title = '지금 항목의 폴더·최근 폴더에서 골라 이 워크스페이스의 폴더로 정하기 (한 번 정하면 바꿀 수 없습니다)';
+        const pick = make('button', '', '폴더…');
+        pick.title = '이 워크스페이스의 폴더 정하기 (한 번 정하면 바꿀 수 없습니다)';
+        path.onclick = recent.onclick = (ev) => groupFolderMenu(ev, group.name);
+        pick.onclick = () => pickGroupFolder(group.name);
+        row.append(path, recent, pick);
+      }
       head.append(row);
     }
     // 워크스페이스의 머리를 끌면 다른 워크스페이스의 위나 아래로 순서를 옮긴다(단추와 폴더 줄에서는 끌기를 시작하지 않는다).
@@ -2862,6 +2984,24 @@ function render() {
         new ResizeObserver(() => revealTab(s)).observe(s.tabStrip);
         // 탭과 단추 사이의 빈 곳(나눠 볼 때는 그 사이에 워크스페이스 이름이 온다)
         s.head.insertBefore(make('span', 'pane-fill'), only);
+        // 글자 크기: SSH 세션에만 적용된다(모든 SSH 세션이 함께 쓴다). [가−] 크기 [가+], 크기를 누르면 기본으로.
+        const fontBox = make('span', 'pane-font');
+        const fontButton = (text, tip, change) => {
+          const b = make('button', '', text);
+          b.title = tip;
+          b.onclick = (ev) => { ev.stopPropagation(); change(); focusItem(s); };
+          return b;
+        };
+        s.fontLabel = fontButton('', '', () => setSshFont(0));
+        s.fontLabel.className = 'pane-font-size';
+        fontBox.append(
+          fontButton('가−', 'SSH 글자 작게 (Ctrl+휠 아래로) · SSH 세션에만 적용', () => setSshFont(sshFontNow() - 1)),
+          s.fontLabel,
+          fontButton('가+', 'SSH 글자 크게 (Ctrl+휠 위로) · SSH 세션에만 적용', () => setSshFont(sshFontNow() + 1)),
+        );
+        // 단추를 눌러도 입력 초점이 터미널에서 떠나지 않게 한다(누른 뒤 바로 이어서 칠 수 있게).
+        fontBox.addEventListener('mousedown', (ev) => ev.preventDefault());
+        s.head.insertBefore(fontBox, only);
         // 출력 기록: 누르면 기록할 파일을 고르고 시작한다. 기록 중에 누르면 멈춘다.
         s.logButton = make('button', 'pane-tool rec');
         s.logButton.onclick = (ev) => { ev.stopPropagation(); toggleLog(s); };
@@ -2890,6 +3030,20 @@ function render() {
     );
   }
   syncComposer();
+  syncSshScopes();
+}
+
+/**
+ * SSH 세션이 든 워크스페이스가 바뀌었으면(다른 워크스페이스로 옮김, 워크스페이스 이름 바꿈) 앱에 알린다.
+ * SSH 연결은 같은 워크스페이스의 세션끼리만 같이 쓰므로, 옮겨 간 세션의 연결에 그 뒤로는 새 워크스페이스의 세션만 붙는다
+ * (이미 같이 쓰고 있던 세션은 끊지 않는다).
+ */
+function syncSshScopes() {
+  for (const s of sessions.values()) {
+    if (!s.ssh || s.id == null || s.exited || s.scopeSent === undefined || s.scopeSent === (s.group || '')) continue;
+    s.scopeSent = s.group || '';
+    invoke('session_scope', { id: s.id, group: s.scopeSent }).catch(() => {});
+  }
 }
 
 /**
@@ -2954,8 +3108,9 @@ function applyLook(look) {
   for (const s of sessions.values()) {
     if (!s.term) continue;
     Object.assign(s.term.options, {
-      theme: look.termTheme, fontFamily: look.termFamily, fontSize: look.termPixels, minimumContrastRatio: look.contrast,
+      theme: look.termTheme, fontFamily: look.termFamily, fontSize: s.ssh ? sshPixels(look) : look.termPixels, minimumContrastRatio: look.contrast,
     });
+    if (s.ssh) paintSshButtons(s); // 따로 정하지 않은 SSH 글자 크기는 앱의 크기를 따른다: 위쪽의 숫자도 맞춘다
   }
   window.dispatchEvent(new Event('cypher-look')); // 마인드맵 그림처럼 색을 직접 칠하는 화면이 다시 그린다.
   requestAnimationFrame(() => { fitVisible(); syncSites(); });
@@ -3045,6 +3200,12 @@ function paletteEntries() {
     ...(visible.length > 1 && active ? [command('분할 풀기 (지금 창만 보기)', () => showOnly(active))] : []),
     command('기억 내보내기·가져오기', () => showMemory()),
     command('모양: 테마·글꼴·글자 크기', showLook, '설정'),
+    command(`끌어서 고른 글 바로 복사 ${copyOnSelect ? '끄기' : '켜기'}`, () => setCopyOnSelect(!copyOnSelect), `설정 · 지금: ${copyOnSelect ? '켬' : '끔'} · 터미널(Claude·셸·SSH)`),
+    ...(active?.ssh ? [
+      command('SSH 글자 크게', () => setSshFont(sshFontNow() + 1), `명령 · 지금 ${sshFontNow()} · SSH 세션에만 적용 · Ctrl+휠`),
+      command('SSH 글자 작게', () => setSshFont(sshFontNow() - 1), `명령 · 지금 ${sshFontNow()} · SSH 세션에만 적용 · Ctrl+휠`),
+      command('SSH 글자 크기를 기본으로', () => setSshFont(0), '명령 · 앱의 터미널 글자 크기(설정 → 모양)를 따름'),
+    ] : []),
     command('브라우저 시작 페이지 정하기…', askHomePage, `설정 · 지금: ${homePage || '빈 화면'}`),
     command('Claude 실행 명령 정하기…', askClaudeCommand, `설정 · 지금: ${claudeCommand || '기본값(claude)'}`),
     command('Cypher 설정 파일 열기', () => runMenu('settings'), '설정'),
@@ -3053,7 +3214,9 @@ function paletteEntries() {
     command('단축키 보기', showHelp, '도움말 · F1'),
     command('Cypher 업데이트…', showUpdate, '도움말 · 단추를 눌렀을 때만 확인'),
     command('Cypher 정보', showAbout, '도움말 · 버전·GitHub 주소'),
-    ...(viewedGroup() ? [command(`워크스페이스 "${viewedGroup()}"의 폴더 정하기…`, () => pickGroupFolder(viewedGroup()), `폴더 · 지금: ${groupFolderOf(viewedGroup()) || '정하지 않음'}`)] : []),
+    ...(viewedGroup() ? [groupFolderOf(viewedGroup())
+      ? command(`워크스페이스 "${viewedGroup()}"의 폴더 열기 (탐색기)`, () => openGroupFolder(viewedGroup()), `폴더 · ${groupFolderOf(viewedGroup())}`)
+      : command(`워크스페이스 "${viewedGroup()}"의 폴더 정하기…`, () => pickGroupFolder(viewedGroup()), '폴더 · 지금: 정하지 않음 · 한 번 정하면 바꿀 수 없음')] : []),
   ];
   return [...items, ...commands];
 }
@@ -4075,9 +4238,10 @@ function initSidebarGrip() {
 
 /**
  * 프롬프트 편집기가 맡을 세션: 화면에 하나만 보이는 터미널 세션.
+ * SSH 세션에는 두지 않는다(원격 셸에는 긴 프롬프트를 써 넣을 일이 없고, 그만큼 터미널을 넓게 쓴다).
  * 세션이 종료돼도 편집기는 남긴다(쓰던 글을 복사해 갈 수 있게). 보내기만 막는다.
  */
-const composerTarget = () => (visible.length === 1 && isTerm(visible[0]) ? visible[0] : null);
+const composerTarget = () => (visible.length === 1 && isTerm(visible[0]) && !visible[0].ssh ? visible[0] : null);
 
 /** 프롬프트 편집기를 접거나 편다. 단추 글자와 저장값을 함께 맞춘다. */
 function setComposerFolded(folded) {
@@ -4224,7 +4388,11 @@ function syncComposer() {
 }
 
 function focusComposer() {
-  if (!composerTarget()) return setStatus('프롬프트 편집기는 화면에 세션 하나만 보일 때 쓸 수 있습니다.');
+  if (!composerTarget()) {
+    return setStatus(visible.length === 1 && visible[0].ssh
+      ? 'SSH 세션에는 프롬프트 편집기가 없습니다.'
+      : '프롬프트 편집기는 화면에 세션 하나만 보일 때 쓸 수 있습니다.');
+  }
   setComposerFolded(false);
   $('composer-text').focus();
 }
@@ -4916,13 +5084,44 @@ function wireTerminal(s) {
     return true;
   });
 
-  // 오른쪽 클릭: 선택 영역이 있으면 복사, 없으면 붙여넣기.
+  // 끌어서 고르면 바로 복사한다(설정 → "끌어서 고른 글 바로 복사"로 끈다). 마우스를 누른 뒤 고른 것이 바뀌었을 때만 복사한다:
+  // 스크롤 막대를 끌거나 창을 누르기만 한 것으로 예전에 고른 글이 다시 클립보드를 덮지 않게.
+  // Claude Code가 마우스를 받는 모드에서는 Claude Code가 스스로 고르고 복사한다(터미널의 고르기는 Shift+끌기).
+  term.onSelectionChange(() => { if (picking?.s === s) picking.changed = true; });
+  s.pane.addEventListener('mousedown', (ev) => {
+    if (ev.button === 0 && ev.target.closest('.term')) picking = { s, changed: false, before: term.getSelection() };
+    // Claude Code가 마우스를 받고 있으면(전체 화면 모드) 오른쪽 클릭을 넘겨주지 않는다. 넘겨주면 Claude Code도 클립보드를
+    // 붙여넣어(Windows에서 오른쪽 클릭 = 붙여넣기), 아래의 붙여넣기와 겹쳐 같은 글이 두 번 들어간다.
+    if (ev.button === 2 && swallowsRightClick(s, ev)) ev.stopPropagation();
+  }, true);
+  s.pane.addEventListener('mouseup', (ev) => { if (ev.button === 2 && swallowsRightClick(s, ev)) ev.stopPropagation(); }, true);
+  // 오른쪽 단추를 누른 채 움직이는 신호도 넘기지 않는다(모든 움직임을 받는 모드).
+  s.pane.addEventListener('mousemove', (ev) => { if (ev.buttons === 2 && swallowsRightClick(s, ev)) ev.stopPropagation(); }, true);
+
+  // SSH 세션: Ctrl+휠로 글자 크기를 바꾼다(SSH 세션에만 적용).
+  if (s.ssh) {
+    s.pane.addEventListener('wheel', (ev) => {
+      if (!ev.ctrlKey || !ev.deltaY || !ev.target.closest('.term')) return;
+      ev.preventDefault();
+      ev.stopPropagation();
+      setSshFont(sshFontNow() + (ev.deltaY < 0 ? 1 : -1));
+    }, { capture: true, passive: false });
+  }
+
+  // 오른쪽 클릭: 선택 영역이 있으면 복사, 없으면 붙여넣기. xterm.js에 닿기 전에 받아 그쪽의 처리를 건너뛴다(아래 설명).
   s.pane.addEventListener('contextmenu', (ev) => {
     ev.preventDefault();
-    // 터미널 영역에서만 한다. 나란히 보기의 창 제목 줄을 오른쪽 클릭했다고 클립보드를 붙여넣으면 안 된다.
-    if (ev.target.closest('.pane-head')) return;
+    // 터미널 영역에서만 한다. 나란히 보기의 창 제목 줄을 오른쪽 클릭했다고 클립보드를 붙여넣으면 안 된다(SSH 탭의 메뉴는 그대로 뜬다).
+    if (!ev.target.closest('.term')) return;
+    ev.stopPropagation();
+    term.focus();
     if (term.hasSelection()) copy(s); else paste(s, false);
-  });
+    // xterm.js는 오른쪽 클릭 때 숨은 입력칸에 고른 글을 채우고 통째로 골라 둔다(브라우저 메뉴의 "복사"용인데, 그 메뉴는 쓰지 않는다).
+    // 그대로 두면 바로 뒤에 치는 한글이 그 글을 덮어쓰면서 조합 자리가 어긋나, 첫 글자가 사라지고 다음 글자의 첫 자음이 먼저 나간다
+    // ("좋습니다" → "ㅅ습니다"). 다른 창에 다녀오면(입력칸이 비워진다) 풀리던 문제다. 그래서 이 신호를 xterm.js에 넘기지 않고
+    // (글자를 조합하는 중에 오른쪽 클릭해도 입력칸을 건드리지 않는다), 혹시 남아 있는 글도 여기서 비운다.
+    clearHiddenInput(term);
+  }, true);
 
   // 프로그램이 직접 심은 링크(OSC 8).
   term.options.linkHandler = {
@@ -4939,6 +5138,54 @@ function copy(s) {
   if (text) invoke('clipboard_write', { text });
   s.term.clearSelection();
 }
+
+/** 터미널의 숨은 입력칸(xterm.js가 키 입력을 받는 textarea)을 비운다. 글자를 조합하는 중에는 건드리지 않는다. */
+function clearHiddenInput(term) {
+  const input = term.textarea;
+  const helper = term._core?._compositionHelper;
+  if (!input || !input.value || helper?._isComposing || helper?._isSendingComposition) return;
+  input.value = '';
+}
+
+/**
+ * 이 세션에서 오른쪽 클릭을 세션 안의 프로그램에 넘기지 않을지: 이 컴퓨터에서 도는 Claude Code가 마우스를 받고 있을 때.
+ * (Shift를 누른 클릭은 원래 프로그램에 가지 않는다. 다른 프로그램 — vim·tmux의 마우스 모드 등 — 에는 지금까지처럼 넘긴다.)
+ */
+const swallowsRightClick = (s, ev) => !ev.shiftKey && !!ev.target.closest?.('.term') && runsClaude(s) && !s.ssh
+  && s.term.modes.mouseTrackingMode !== 'none';
+
+// 끌어서 고른 글 바로 복사: 기본으로 켜 둔다. 사용자가 끈 것('0')만 끈 채로 둔다.
+let copyOnSelect = localStorage.getItem('cypher.copyOnSelect') !== '0';
+/** 터미널에서 마우스 왼쪽 단추를 누르고 있는 동안: { s, changed(그사이 고른 것이 바뀌었는지), before(누르기 전에 고른 글) } */
+let picking = null;
+
+function setCopyOnSelect(on) {
+  copyOnSelect = !!on;
+  try { localStorage.setItem('cypher.copyOnSelect', copyOnSelect ? '1' : '0'); } catch { /* 저장 공간 문제는 무시 */ }
+  setStatus(copyOnSelect
+    ? '끌어서 고른 글 바로 복사: 켬 — 터미널(Claude·셸·SSH)에서 끌어 고르면 바로 클립보드에 복사합니다.'
+    : '끌어서 고른 글 바로 복사: 끔 — 고른 뒤 Ctrl+C나 오른쪽 클릭으로 복사합니다.');
+}
+
+/** 마우스를 놓았다: 터미널에서 끌어(또는 두 번·세 번 눌러) 고른 글이 있으면 클립보드에 복사한다. 고른 표시는 그대로 둔다. */
+function copyPicked() {
+  const held = picking;
+  if (!held) return;
+  // xterm.js가 놓는 신호를 받아 고른 범위를 마무리한 뒤에(고른 것이 바뀌었다는 알림도 그때 온다) 읽는다.
+  setTimeout(() => {
+    if (picking === held) picking = null;
+    if (!copyOnSelect || !sessions.has(held.s.key)) return;
+    const text = held.s.term.getSelection();
+    // 누르기 전과 고른 것이 그대로면(스크롤 막대를 끌었다 등) 복사하지 않는다.
+    if (!text || (!held.changed && text === held.before)) return;
+    invoke('clipboard_write', { text })
+      .then(() => setStatus(`복사했습니다 (${text.length.toLocaleString('ko-KR')}자) · 붙여넣기: Ctrl+V나 오른쪽 클릭`))
+      .catch((err) => setStatus(`복사 실패: ${err}`));
+  }, 0);
+}
+window.addEventListener('mousedown', () => { picking = null; }, true); // 놓는 신호를 받지 못한 앞의 누름은 잊는다(터미널을 누른 것이면 바로 뒤에 다시 적는다)
+window.addEventListener('mouseup', (ev) => { if (ev.button === 0) copyPicked(); }, true);
+window.addEventListener('blur', () => { picking = null; });
 
 /**
  * 붙여넣기. 클립보드에 이미지가 있으면
@@ -5192,8 +5439,9 @@ window.cypher = {
   onHook, onStatus, nextWaiting, writeState, rename, sendPrompt, text: sessionText, addImages, onCaptured, captureBrowser,
   setLook, currentLook, mcpAction, handoffSite, onMcpRequest, setMark, jumpToMark, markedItem, textToClaude, runFinished,
   showPalette, paletteEntries, showClosed, reopenLast, restartSession, placeInOrder, inSidebarOrder, cycle, find, recallPrompt, createGroup, newGroup, adoptGroup, groupFor,
-  showTimers, addTimer, removeTimer, timers, nextTimer, onCreatedFile, placeHeld, cloneSsh, showSsh, castTargets, saveHost, savedHosts, onEditedFile, onTool, realign, settleResize, settleResizeSoon, moveGroup, nudgeGroup, closeGap, gapBelow, wake, wakeGroup, restore, runsClaude, askClaudeCommand, setClaudeCommand, setGroupFolder, groupFolderOf, groupContext, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
-  startLog, stopLog, showLog,
+  showTimers, addTimer, removeTimer, timers, nextTimer, onCreatedFile, placeHeld, cloneSsh, showSsh, castTargets, saveHost, savedHosts, onEditedFile, onTool, realign, settleResize, settleResizeSoon, moveGroup, nudgeGroup, closeGap, gapBelow, wake, wakeGroup, restore, runsClaude, askClaudeCommand, setClaudeCommand, setGroupFolder, groupFolderOf, openGroupFolder, groupContext, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
+  startLog, stopLog, showLog, setSshFont, sshFontNow, setCopyOnSelect, syncSshScopes, clearHiddenInput,
+  get copyOnSelect() { return copyOnSelect; },
   get visible() { return visible; },
   get broadcast() { return broadcast; },
   get active() { return active; },

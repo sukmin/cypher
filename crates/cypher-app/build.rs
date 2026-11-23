@@ -9,7 +9,7 @@ use std::path::Path;
 /// 본창(세션 화면)이 쓰는 명령.
 const MAIN: &[&str] = &[
     "app_close", "app_config", "open_config", "open_claude_file", "home_dir", "autostart", "notify", "pick_folder",
-    "session_create", "session_write", "session_resize", "session_pause", "session_close",
+    "session_create", "session_write", "session_resize", "session_pause", "session_close", "session_scope",
     "session_log_pick", "session_log_start", "session_log_stop",
     "hex_pick", "hex_save_pick", "hex_stat", "hex_read", "hex_analyze", "hex_find", "hex_save",
     "link_detect", "link_open",

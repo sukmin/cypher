@@ -326,10 +326,16 @@ export function createRun(item, host, saved = {}, onChange = () => {}) {
     if (key === 'enter') return false; // Ctrl+Enter는 이 화면의 "실행"이다(아래에서 받는다).
     return true;
   });
+  // 오른쪽 클릭: xterm.js에 닿기 전에 받는다. xterm.js는 오른쪽 클릭 때 숨은 입력칸에 고른 글을 채우고 통째로 골라 두는데,
+  // 그대로 한글을 치면 조합 자리가 어긋나 첫 글자가 사라진다(세션의 터미널과 같은 문제. main.js의 wireTerminal 참고).
   $term.addEventListener('contextmenu', (ev) => {
     ev.preventDefault();
+    ev.stopPropagation();
+    term.focus();
     if (term.hasSelection()) copy(); else if (phase === 'running') paste();
-  });
+    const helper = term._core?._compositionHelper;
+    if (term.textarea?.value && !helper?._isComposing && !helper?._isSendingComposition) term.textarea.value = '';
+  }, true);
   $command.addEventListener('keydown', (ev) => {
     if (ev.key !== 'Enter') return;
     ev.preventDefault();

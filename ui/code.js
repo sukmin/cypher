@@ -2,6 +2,8 @@
 //
 // Claude 세션이 작업한 내용을 편집기를 따로 띄우지 않고 그 자리에서 살펴보려는 것이다:
 // - 문법 강조(code-lex.js), 줄 번호, 바뀐 줄 표시(git 기준: 더한 줄·고친 줄·지운 자리)
+// - 바뀐 파일 모아 보기: 고친 파일·추가한 파일·삭제한 파일로 나눠 보이고, 파일을 열면 한 화면에서 차이(diff)로 보인다
+//   (지운 줄은 빨강, 더한 줄은 초록. [차이] 단추·F8로 코드 그대로 보기와 오간다)
 // - 정의로 가기(Ctrl+클릭, F12), 구현으로 가기(Ctrl+Alt+B), 쓰는 곳 찾기(Alt+F7), 뒤로·앞으로(Alt+←/→, 마우스의 뒤로·앞으로 단추)
 // - 파일 찾기(Ctrl+P), 기호 찾기(Ctrl+T), 이 파일의 구조(Ctrl+F12), 줄로 가기(Ctrl+G)
 // - 이 파일에서 찾기(Ctrl+F), 프로젝트 전체에서 찾기(Ctrl+Shift+F)
@@ -29,6 +31,13 @@ const MAX_PICK = 80;            // 고르기 창에 보이는 줄 수
 const MAX_FIND = 5000;          // 이 파일에서 찾기가 세는 자리 수
 const MAX_MARK_LINE = 5000;     // 이보다 긴 줄에는 찾은 곳·같은 이름 표시를 걸지 않는다(지금 자리 하나만 표시)
 const MAX_FILE_HUNKS = 12;      // 바뀐 곳 목록에서 파일 하나에 처음 보이는 수(더 있으면 "더 보기")
+const DIFF_CONTEXT = 3;         // 차이 보기에서 바뀐 곳의 앞뒤로 보이는 바뀌지 않은 줄 수(나머지는 접는다)
+const DIFF_FOLD_MIN = 4;        // 바뀌지 않은 줄이 이만큼 이어져야 접는다
+const MAX_DIFF_ROWS = 20000;    // 차이 보기에 그리는 줄 수(넘으면 앞부분만)
+const MAX_DIFF_DRESSED = 4000;  // 차이 보기에서 문법 강조까지 하는 줄 수(넘는 줄은 글자만)
+/** 바뀐 파일의 종류: 고친 파일(mod), 추가한 파일(new), 삭제한 파일(gone). 목록의 차례이기도 하다. */
+const CHANGE_KINDS = ['mod', 'new', 'gone'];
+const CHANGE_NAMES = { mod: '고친 파일', new: '추가한 파일', gone: '삭제한 파일' };
 const WATCH_MS = 2000;          // 보고 있는 파일이 바뀌었는지 살피는 간격
 const INDEX_MS = 30000;         // 색인을 파일들과 다시 맞춰 보는 가장 짧은 간격(바뀐 것이 보이면 바로 맞춘다)
 const GIT_MS = 6000;            // 바뀐 파일(git)과 나무를 다시 읽는 간격
@@ -130,6 +139,9 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   const allHunks = new Set();     // 바뀐 곳 목록에서 "더 보기"를 누른 파일(소문자 경로)
   const touched = new Map();      // Claude 세션이 이번에 쓴 파일: 소문자 전체 경로 → 쓴 때
   let changedOnly = !!saved.changedOnly;
+  /** 바뀐 파일을 차이(diff)로 볼지. [바뀐 파일] 보기를 켜면 함께 켜지고, [차이] 단추·F8로 따로 켜고 끈다. */
+  let diffOn = typeof saved.diff === 'boolean' ? saved.diff : changedOnly;
+  let diffModel = null;           // 지금 그려 둔 차이의 줄들(접힌 곳을 펼 때 쓴다)
   let back = [], forward = [];
   let fileList = null;            // 프로젝트의 파일 목록(파일 찾기용). 필요할 때 읽는다.
   let filesStale = false;         // 파일이 생기거나 없어졌을 수 있다(목록을 다음에 쓸 때 다시 읽는다)
@@ -164,7 +176,8 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
 
   // ── 틀 ──
   const $title = make('span', 'doc-title');
-  const $changed = button('바뀐 파일', '바뀐 파일과 바뀐 곳만 모아 보기 (git 기준) ↔ 프로젝트 전체 · F7 / Shift+F7: 다음·이전 바뀐 곳', () => { changedOnly = !changedOnly; renderTree(); changedState(); if (!changedOnly && current) revealInTree(current.path); });
+  const $changed = button('바뀐 파일', '바뀐 파일과 바뀐 곳만 모아 보기 (git 기준) ↔ 프로젝트 전체 · F7 / Shift+F7: 다음·이전 바뀐 곳', () => { changedOnly = !changedOnly; diffOn = changedOnly; renderTree(); changedState(); syncView(); if (!changedOnly && current) revealInTree(current.path); });
+  const $diffBtn = button('차이', '바뀐 파일을 한 화면에서 차이(diff)로 보기: 지운 줄은 빨강, 더한 줄은 초록 ↔ 지금 코드 그대로 보기 (F8)', () => setDiff(!diffOn));
   const $back = button('←', '뒤로 (Alt+←)', () => travel(-1));
   const $forward = button('→', '앞으로 (Alt+→)', () => travel(1));
   // 글꼴: 이름(비우면 앱의 고정폭 글꼴)과 크기. 여기서 바꾼 것은 코드 보기에만 적용된다.
@@ -198,7 +211,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     fontBox,
     button('폴더…', '볼 프로젝트 폴더 바꾸기', () => pickRoot()),
     button('재색인', '이 폴더의 색인을 지우고 처음부터 다시 만들기 (정의로 가기·쓰는 곳 찾기가 어긋난 것 같을 때)', () => rebuildIndex()),
-    $changed, $back, $forward,
+    $changed, $diffBtn, $back, $forward,
     button('파일 찾기', '이름으로 파일 찾기 (Ctrl+P)', () => pickFile()),
     button('기호 찾기', '함수·클래스 이름으로 찾기 (Ctrl+T)', () => pickSymbol()),
     button('전체에서 찾기', '프로젝트 전체에서 글 찾기 (Ctrl+Shift+F)', () => openSearch()),
@@ -233,7 +246,12 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   // 이전 내용 창: 바뀐 곳의 지운 줄을 그 자리 아래에 띄운다. 줄 목록($code)의 자식이 아니다(줄 번호 셈을 흩뜨리지 않게).
   const $peek = make('div', 'code-peek');
   $peek.hidden = true;
-  $scroll.append($empty, $code, $peek);
+  // 차이 보기: 바뀐 파일을 한 화면에서 차이(diff)로 보인다. 줄 목록($code)과 같은 스크롤 칸을 쓰고, 둘 중 하나만 보인다.
+  const $diff = make('div', 'code-diff');
+  $diff.hidden = true;
+  const $diffHead = make('div', 'code-diff-head');
+  $diffHead.hidden = true;
+  $scroll.append($empty, $code, $diff, $peek);
   const $panelHead = make('div', 'code-panel-head');
   const $panelBody = make('div', 'code-panel-body');
   $panelBody.tabIndex = 0;
@@ -243,7 +261,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   const $pick = make('div', 'code-pick');
   $pick.hidden = true;
   const main = make('div', 'code-main');
-  main.append($tabs, $crumbs, $find, $scroll, $panel, $pick);
+  main.append($tabs, $crumbs, $find, $diffHead, $scroll, $panel, $pick);
   const body = make('div', 'code-body');
   body.append(side, grip, main);
   const rootEl = make('div', 'doc code');
@@ -280,6 +298,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     $title.title = `프로젝트 폴더: ${root}${git.branch ? `\n브랜치: ${git.branch}` : ''}${git.files.size ? `\n바뀐 파일 ${git.files.size}개` : ''}${indexInfo ? `\n색인: 파일 ${indexInfo.files.toLocaleString('ko-KR')}개 · 정의 ${indexInfo.defs.toLocaleString('ko-KR')}개 · 디스크 ${megabytes(indexInfo.bytes)}` : ''}`;
     $changed.textContent = git.files.size ? `바뀐 파일 ${git.files.size}` : '바뀐 파일';
     $changed.classList.toggle('on', changedOnly);
+    $diffBtn.classList.toggle('on', diffOn);
     $back.disabled = !back.length;
     $forward.disabled = !forward.length;
   }
@@ -421,11 +440,21 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     }
   }
 
-  /** 파일의 git 상태에 따른 표시(줄의 클래스). */
+  /** 바뀐 파일의 종류: 추가한 파일(new), 삭제한 파일(gone), 그 밖(수정·이름 변경·복사·충돌)은 고친 파일(mod). */
+  const changeKind = (change) => (change.untracked || change.status === '추가' ? 'new' : change.status === '삭제' ? 'gone' : 'mod');
+  /** 파일의 git 상태에 따른 표시(줄의 클래스). 바뀌지 않았으면 빈 글. */
   function statusClass(path) {
     const change = git.files.get(lower(path));
-    if (!change) return '';
-    return change.untracked || change.status === '추가' ? 'new' : change.status === '삭제' ? 'gone' : 'mod';
+    return change ? changeKind(change) : '';
+  }
+  /** 바뀐 파일의 이름 옆에 붙는 표: 수정·추가·삭제(이름 변경·복사·충돌은 그대로). */
+  function changeBadge(path) {
+    const change = git.files.get(lower(path));
+    if (!change) return null;
+    const kind = changeKind(change);
+    const badge = make('span', `code-badge ${kind}`, kind === 'new' ? '추가' : kind === 'gone' ? '삭제' : change.status || '수정');
+    badge.title = CHANGE_NAMES[kind];
+    return badge;
   }
   /** 그 폴더 안에 바뀐 파일이 있는지. */
   const dirChanged = (dir) => { const prefix = `${lower(dir)}\\`; for (const path of git.files.keys()) if (path.startsWith(prefix)) return true; return false; };
@@ -440,10 +469,11 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   const rowKey = (row) => `${lower(row.dataset.path)}${row.dataset.line ? `#${row.dataset.line}` : row.dataset.more ? '#more' : ''}`;
   const samePath = (a, b) => lower(a) === lower(b);
 
-  /** 바뀐 파일들(바뀐 곳 목록의 차례): Claude 세션이 방금 쓴 것이 앞, 그 뒤로 이름순. */
+  /** 바뀐 파일들(바뀐 곳 목록의 차례): 고친 파일 → 추가한 파일 → 삭제한 파일. 그 안에서는 Claude 세션이 방금 쓴 것이 앞, 그 뒤로 이름순. */
   function changedFiles() {
     const files = [...git.files.entries()].filter(([path]) => path.startsWith(rootPrefix()) || path === lower(root));
-    files.sort((a, b) => (touched.get(b[0]) || 0) - (touched.get(a[0]) || 0) || a[1].rel.localeCompare(b[1].rel));
+    const order = (change) => CHANGE_KINDS.indexOf(changeKind(change));
+    files.sort((a, b) => order(a[1]) - order(b[1]) || (touched.get(b[0]) || 0) - (touched.get(a[0]) || 0) || a[1].rel.localeCompare(b[1].rel));
     return files.map(([, change]) => change);
   }
 
@@ -476,7 +506,8 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     const head = make('div', 'code-changes-head');
     keepFocus(head, $tree);
     const text = make('span', '', `바뀐 곳 ${places}`);
-    text.title = `바뀐 파일 ${files.length}개 · 바뀐 곳 ${places}곳 · 더한 줄 ${plus} · 지운 줄 ${minus}\n(새 파일은 파일 전체를 한 곳으로 세고, 더한 줄 수에는 넣지 않습니다)`;
+    const counts = CHANGE_KINDS.map((kind) => `${CHANGE_NAMES[kind]} ${files.filter((change) => changeKind(change) === kind).length}개`).join(' · ');
+    text.title = `바뀐 파일 ${files.length}개 (${counts}) · 바뀐 곳 ${places}곳 · 더한 줄 ${plus} · 지운 줄 ${minus}\n(새 파일은 파일 전체를 한 곳으로 세고, 더한 줄 수에는 넣지 않습니다)`;
     head.append(text, make('span', 'code-hunk-add', `+${plus}`), make('span', 'code-hunk-del', `−${minus}`),
       button('↑', '이전 바뀐 곳 (Shift+F7)', () => stepChange(-1)), button('↓', '다음 바뀐 곳 (F7)', () => stepChange(1)));
     return head;
@@ -510,7 +541,10 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     // 폴더는 펼침 표시, 파일은 종류의 표식(확장자마다 색이 다르다).
     row.append(dir ? make('span', 'code-twist', open ? '▾' : '▸') : fileIcon(path), make('span', 'code-name', name));
     if (note) row.append(make('span', 'code-note', note));
-    row.title = `${path}${status === 'mod' ? '\n고친 파일' : status === 'new' ? '\n새 파일' : status === 'gone' ? '\n지운 파일' : ''}${touched.has(lower(path)) ? '\nClaude 세션이 방금 쓴 파일' : ''}`;
+    // 바뀐 파일은 이름의 색에 더해 오른쪽에 표(수정·추가·삭제)를 단다.
+    const badge = dir ? null : changeBadge(path);
+    if (badge) row.append(badge);
+    row.title = `${path}${status === 'mod' ? '\n고친 파일' : status === 'new' ? '\n추가한 파일' : status === 'gone' ? '\n삭제한 파일' : ''}${touched.has(lower(path)) ? '\nClaude 세션이 방금 쓴 파일' : ''}`;
     return row;
   }
 
@@ -520,9 +554,18 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       // 바뀐 파일과 그 안의 바뀐 곳: Claude 세션이 방금 쓴 것이 앞, 그 뒤로 이름순.
       const files = changedFiles();
       if (files.length) rows.push(changesHead(files));
+      let section = '';
       for (const change of files) {
         const path = change.path;
-        rows.push(treeRow(path, nameOf(path), 0, { note: `${slash(dirOf(relative(path)))}${change.status ? `  ${change.status}` : ''}` }));
+        // 고친 파일·추가한 파일·삭제한 파일을 묶음으로 나눠 보인다(묶음의 머리에 그 종류의 파일 수).
+        const kind = changeKind(change);
+        if (kind !== section) {
+          section = kind;
+          const head = make('div', `code-section ${kind}`);
+          head.append(make('b', '', CHANGE_NAMES[kind]), make('span', '', String(files.filter((each) => changeKind(each) === kind).length)));
+          rows.push(head);
+        }
+        rows.push(treeRow(path, nameOf(path), 0, { note: slash(dirOf(relative(path))) }));
         const hunks = hunksOf(path).filter((hunk) => !hunk.whole);
         const every = allHunks.has(lower(path));
         for (const hunk of every ? hunks : hunks.slice(0, MAX_FILE_HUNKS)) rows.push(hunkRow(path, hunk));
@@ -688,7 +731,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     refreshBar();
     renderTree();
     renderTabs();
-    drawPeek();
+    syncView(); // 차이 보기면 새 차이로 다시 그리고, 더는 바뀐 파일이 아니면 코드로 돌아간다(이전 내용 창도 맞춘다)
     if (current) loadMarks(current).then(() => { if (current) applyMarks(current); });
   }
 
@@ -703,6 +746,13 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     if (current.lines) caret = { line: Math.max(1, Math.min(hunk.line, current.lines.length)), col: 0 };
     if (visibleNow()) $scroll.scrollLeft = 0; // 이전 내용 창은 왼쪽에 뜬다
     showPeek(path, hunk);
+    // 차이 보기: 지운 줄부터 보이게 그 바뀐 곳으로 간다. 차이가 아주 길어 그곳까지 그리지 못했으면 코드 그대로 보기로 보여 준다.
+    if (diffShown() && !diffGoHunk(hunk.line)) {
+      setDiff(false);
+      scrollToLine(hunk.line, true);
+      showPeek(path, hunk);
+      setStatus('차이가 아주 길어 이 바뀐 곳까지는 그리지 못했습니다. 코드 그대로 보기로 보여 줍니다 (F8: 차이 보기).');
+    }
   }
 
   function showPeek(path, hunk) {
@@ -739,7 +789,8 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   /** 이전 내용 창을 그린다(보고 있는 바뀐 곳에 지운 줄이 있을 때만 보인다). 지워진 파일은 화면 전체가 이전 내용이라 띄우지 않는다. */
   function drawPeek() {
     const hunk = peek && current?.lines && samePath(current.path, peek.path) ? hunkAt(peek.path, peek.line) : null;
-    if (!hunk || !hunk.old.length || current.deleted) {
+    // 차이 보기에서는 지운 줄이 그 자리에 함께 보이므로 따로 띄우지 않는다.
+    if (!hunk || !hunk.old.length || current.deleted || diffShown()) {
       $peek.hidden = true;
       $peek.replaceChildren();
       return;
@@ -854,6 +905,274 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     for (const el of $code.querySelectorAll('.cl.add, .cl.mod, .cl.del')) el.classList.remove('add', 'mod', 'del');
     for (const [line, kind] of tab.marks || []) lineEl(line)?.classList.add(kind);
   }
+
+  // ── 차이 보기: 한 화면에서 지운 줄(빨강)과 더한 줄(초록)을 함께 본다 ──
+  // 지금 파일의 줄들 사이에 지운 줄을 제자리에 끼워 넣어 보인다(바뀐 곳의 앞뒤 몇 줄만 보이고 나머지는 접는다. 누르면 펴진다).
+  // 줄 번호 칸에는 예전 줄 번호·지금 줄 번호·표(−, +)가 함께 적힌다. 코드를 살피는 기능(정의로 가기, 이 파일에서 찾기)은
+  // 코드 그대로 보기에서 한다: [코드로 보기]·F8, 또는 Ctrl+클릭으로 그 줄을 코드에서 본다.
+
+  /** 그 탭을 차이로 볼 수 있는지: 내용을 읽은 바뀐 파일(고침·추가·삭제). */
+  const diffable = (tab) => !!tab?.lines && (!!tab.deleted || !!statusClass(tab.path));
+  /** 지금 화면이 차이 보기인지(그려 둔 것 기준). */
+  const diffShown = () => !$diff.hidden;
+
+  /**
+   * 그 탭의 차이를 줄들로 만든다: { rows: [{ kind: 'ctx'(그대로) | 'add'(더한 줄) | 'del'(지운 줄) | 'note', n(지금 줄 번호), o(예전 줄 번호),
+   * text, tok(강조 조각), h(바뀐 곳의 줄) }], plus, minus, places, kind }
+   */
+  function diffRows(tab) {
+    const lines = tab.lines;
+    const rows = [];
+    const change = git.files.get(lower(tab.path));
+    const kind = tab.deleted ? 'gone' : change ? changeKind(change) : 'mod';
+    const tokensOf = (list) => (tab.lang && tab.lang !== 'plain' && list.length <= MAX_DIFF_DRESSED ? tokenize(tab.lang, list) : null);
+    if (tab.deleted) {
+      // 삭제한 파일: 지우기 전의 내용 전체가 지운 줄이다.
+      lines.forEach((text, i) => rows.push({ kind: 'del', o: i + 1, text, tok: tab.tokens?.[i], h: 1 }));
+      return { rows, plus: 0, minus: lines.length, places: lines.length ? 1 : 0, kind };
+    }
+    const hunks = (diffs.files.get(lower(tab.path))?.hunks || []).slice().sort((a, b) => a.line - b.line);
+    if (!hunks.length && kind === 'new') {
+      // 추가한 파일(git이 아직 모르는 새 파일): 파일 전체가 더한 줄이다.
+      const empty = lines.length === 1 && lines[0] === ''; // 빈 파일(읽으면 빈 줄 하나로 온다)
+      if (!empty) lines.forEach((text, i) => rows.push({ kind: 'add', n: i + 1, text, tok: tab.tokens?.[i], h: 1 }));
+      return { rows, plus: rows.length, minus: 0, places: rows.length ? 1 : 0, kind, empty };
+    }
+    let n = 1, delta = 0, plus = 0, minus = 0; // delta: 여기까지 지금 줄 번호가 예전 줄 번호보다 얼마나 큰지
+    const same = () => { rows.push({ kind: 'ctx', n, o: n - delta, text: lines[n - 1], tok: tab.tokens?.[n - 1] }); n += 1; };
+    for (const hunk of hunks) {
+      const start = Math.min(Math.max(hunk.line, n), lines.length + 1);
+      while (n < start) same();
+      const oldTokens = tokensOf(hunk.old);
+      hunk.old.forEach((text, i) => rows.push({ kind: 'del', o: start - delta + i, text, tok: oldTokens?.[i], h: hunk.line }));
+      if (hunk.old_cut) rows.push({ kind: 'note', text: ' … 지운 줄이 많아 앞의 ' + hunk.old.length + '줄만 보입니다 (모두 ' + hunk.removed + '줄)', h: hunk.line });
+      for (let i = 0; i < hunk.added && n <= lines.length; i += 1, n += 1) rows.push({ kind: 'add', n, text: lines[n - 1], tok: tab.tokens?.[n - 1], h: hunk.line });
+      delta += hunk.added - hunk.removed;
+      plus += hunk.added;
+      minus += hunk.removed;
+    }
+    while (n <= lines.length) same();
+    return { rows, plus, minus, places: hunks.length, kind };
+  }
+
+  /** 차이의 줄 하나를 그린다. 줄 번호 칸(예전·지금 줄 번호와 표)은 화면에만 보이고 고른 글에는 들지 않는다. */
+  function diffRowEl(row, digits, dressed) {
+    const el = document.createElement('div');
+    el.className = 'dl ' + row.kind;
+    if (row.n) el.dataset.n = row.n;
+    if (row.h) el.dataset.h = row.h;
+    const pad = (value) => String(value ?? '').padStart(digits, ' ');
+    el.dataset.g = row.kind === 'note' ? pad('') + ' ' + pad('') + '  ' : pad(row.o) + ' ' + pad(row.n) + ' ' + (row.kind === 'add' ? '+' : row.kind === 'del' ? '−' : ' ');
+    fillLine(el, row.text, dressed ? row.tok : null);
+    return el;
+  }
+
+  /** 접어 둔 바뀌지 않은 줄들(rows[from..to))을 대신하는 한 줄. 누르면 펴진다. */
+  function diffFoldEl(from, to) {
+    const rows = diffModel.rows;
+    const el = make('div', 'dl-fold', '⋯ 바뀌지 않은 ' + (to - from) + '줄 (' + rows[from].n + '–' + rows[to - 1].n + ') · 누르면 펼칩니다');
+    el.dataset.from = from;
+    el.dataset.to = to;
+    el.dataset.first = rows[from].n;
+    el.dataset.last = rows[to - 1].n;
+    el.title = '바뀌지 않아 접어 둔 줄입니다. 누르면 이 자리에 펼칩니다.';
+    return el;
+  }
+
+  /** 접힌 곳을 편다: 그 자리에 줄들을 그려 넣는다. 다시 그려도 펴 둔 채로 남게 적어 둔다. */
+  function openFold(fold) {
+    if (!diffModel || !fold?.isConnected) return;
+    const from = Number(fold.dataset.from), to = Number(fold.dataset.to);
+    (current.diffOpen ||= new Set()).add(diffModel.rows[from].n);
+    fold.replaceWith(...diffModel.rows.slice(from, to).map((row) => diffRowEl(row, diffModel.digits, true)));
+  }
+
+  /** 차이의 위쪽 줄: 파일의 종류(고친·추가한·삭제한 파일), 더한·지운 줄 수, 이전·다음 바뀐 곳, 모두 펼치기, 코드로 보기. */
+  function renderDiffHead(tab, model) {
+    const change = git.files.get(lower(tab.path));
+    const label = CHANGE_NAMES[model.kind] + (model.kind === 'mod' && change?.status && change.status !== '수정' ? ' (' + change.status + ')' : '');
+    const kind = make('b', 'code-diff-kind ' + model.kind, label);
+    const note = make('span', 'code-diff-note', '바뀐 곳 ' + model.places + '곳 · 빨강: 지운 줄 · 초록: 더한 줄');
+    note.title = relative(tab.path) + '\n지운 줄은 빨강(−), 더한 줄은 초록(+)으로 보입니다. 바뀌지 않은 줄은 바뀐 곳의 앞뒤 ' + DIFF_CONTEXT + '줄만 보이고 나머지는 접힙니다.\nCtrl+클릭: 그 줄을 코드에서 보기';
+    $diffHead.replaceChildren(
+      kind,
+      make('span', 'code-hunk-add', '+' + model.plus),
+      make('span', 'code-hunk-del', '−' + model.minus),
+      note,
+      button('↑', '이전 바뀐 곳 (Shift+F7)', () => stepChange(-1)),
+      button('↓', '다음 바뀐 곳 (F7)', () => stepChange(1)),
+      button(tab.diffAll ? '바뀐 곳만' : '모두 펼치기', tab.diffAll ? '바뀐 곳의 앞뒤만 보이고 나머지 줄은 접기' : '접어 둔 바뀌지 않은 줄을 모두 펼쳐 파일 전체를 차이로 보기', () => {
+        const top = topLine();
+        tab.diffAll = !tab.diffAll;
+        tab.diffOpen = new Set();
+        renderDiff();
+        scrollToLine(top, false);
+      }),
+      button('코드로 보기', '이 파일을 지금 코드 그대로 보기 (F8) · 정의로 가기·이 파일에서 찾기는 코드 보기에서 합니다', () => setDiff(false)),
+    );
+  }
+  keepFocus($diffHead, $scroll);
+
+  /** 지금 탭의 차이를 그린다. */
+  function renderDiff() {
+    const tab = current;
+    if (!tab?.lines) { $diff.replaceChildren(); diffModel = null; return; }
+    const model = diffRows(tab);
+    const rows = model.rows;
+    model.digits = Math.max(3, String(tab.lines.length + model.minus).length); // 예전 줄 번호는 지금 줄 수 + 지운 줄 수를 넘지 않는다
+    diffModel = model;
+    // 바뀐 곳에서 가까운 줄만 남기고, 멀리 있는 바뀌지 않은 줄은 접는다.
+    const near = new Uint8Array(rows.length);
+    rows.forEach((row, i) => {
+      if (row.kind === 'ctx') return;
+      for (let k = Math.max(0, i - DIFF_CONTEXT); k <= Math.min(rows.length - 1, i + DIFF_CONTEXT); k += 1) near[k] = 1;
+    });
+    const out = [];
+    const notes = [];
+    if (!model.places && model.kind === 'mod') {
+      notes.push(diffs.cut
+        ? '줄 단위로 바뀐 곳을 찾지 못했습니다(이름·권한만 바뀌었거나, 저장소에 바뀐 곳이 아주 많아 이 파일의 차이까지 읽지 못했을 수 있습니다).'
+        : '줄 단위로 바뀐 곳이 없습니다(이름·권한만 바뀌었거나, 차이를 아직 읽는 중입니다).');
+    }
+    if (model.empty) notes.push('빈 파일입니다(추가한 파일).');
+    let drawn = 0;
+    for (let i = 0; i < rows.length;) {
+      if (drawn >= MAX_DIFF_ROWS) { notes.push('차이가 길어 앞의 ' + MAX_DIFF_ROWS.toLocaleString('ko-KR') + '줄만 보입니다. [코드로 보기]로 파일 전체를 볼 수 있습니다.'); break; }
+      if (rows[i].kind === 'ctx' && !near[i]) {
+        let j = i;
+        while (j < rows.length && rows[j].kind === 'ctx' && !near[j]) j += 1;
+        if (j - i >= DIFF_FOLD_MIN && !tab.diffAll && !tab.diffOpen?.has(rows[i].n)) {
+          out.push(diffFoldEl(i, j));
+          drawn += 1;
+          i = j;
+          continue;
+        }
+        for (; i < j && drawn < MAX_DIFF_ROWS; i += 1, drawn += 1) out.push(diffRowEl(rows[i], model.digits, drawn < MAX_DIFF_DRESSED));
+        continue;
+      }
+      out.push(diffRowEl(rows[i], model.digits, drawn < MAX_DIFF_DRESSED));
+      drawn += 1;
+      i += 1;
+    }
+    $diff.replaceChildren(...notes.map((text) => make('div', 'dl-note', text)), ...out);
+    $diff.dataset.notes = notes.length;
+    renderDiffHead(tab, model);
+  }
+
+  /** 지금 줄 번호가 그 값인 차이의 줄(접힌 곳 안에 있으면 그곳을 편 뒤에). 없으면 null. */
+  function diffRowOf(line) {
+    const find = () => $diff.querySelector('.dl[data-n="' + line + '"]');
+    let el = find();
+    if (el) return el;
+    for (const fold of $diff.querySelectorAll('.dl-fold')) {
+      if (Number(fold.dataset.first) <= line && line <= Number(fold.dataset.last)) { openFold(fold); el = find(); break; }
+    }
+    return el;
+  }
+  /**
+   * 그 줄이 차이 화면에서 몇 번째 줄 자리에 놓였는지(스크롤 자리를 셈한다. 모든 줄의 높이가 같다). 그리지 못한 줄이면 -1.
+   * `open`이면 접힌 곳 안의 줄일 때 그곳을 편다(그 줄로 건너갈 때). 아니면 펴지 않고 접힌 곳의 자리를 준다:
+   * 보던 자리를 되찾는 것(탭을 오갈 때, 보는 방식을 바꿀 때)만으로 접어 둔 곳이 펴지지 않게 한다.
+   */
+  function diffRowIndex(line, open) {
+    let el = open ? diffRowOf(line) : $diff.querySelector('.dl[data-n="' + line + '"]');
+    if (!el && !open) {
+      el = [...$diff.querySelectorAll('.dl-fold')].find((fold) => Number(fold.dataset.first) <= line && line <= Number(fold.dataset.last)) || null;
+    }
+    return el ? Array.prototype.indexOf.call($diff.children, el) : -1;
+  }
+  /** 차이 화면의 맨 윗줄에 보이는 지금 줄 번호(지운 줄·접힌 곳이면 그 아래의 첫 줄). */
+  function diffTopLine() {
+    const kids = $diff.children;
+    for (let i = Math.min(topRow(), Math.max(0, kids.length - 1)); i < kids.length; i += 1) {
+      const el = kids[i];
+      if (el.dataset.n) return Number(el.dataset.n);
+      if (el.dataset.first) return Number(el.dataset.first);
+    }
+    return current?.lines?.length || 1;
+  }
+  /** 그 바뀐 곳(hunk.line)의 줄들로 가서 잠깐 표시한다. 지운 줄부터 보이게 한다. */
+  function diffGoHunk(line) {
+    const els = [...$diff.querySelectorAll('.dl[data-h="' + line + '"]')];
+    if (!els.length) return false; // 차이에 다 그리지 못한 곳
+    const top = Array.prototype.indexOf.call($diff.children, els[0]) * lineHeight();
+    const live = visibleNow();
+    const now = live ? $scroll.scrollTop : heldScroll ?? lastScroll;
+    const view = live ? $scroll.clientHeight : 600;
+    if (!(top >= now + lineHeight() * 2 && top <= now + view - lineHeight() * 6)) {
+      const target = Math.max(0, top - view / 4);
+      heldScroll = null;
+      lastScroll = target;
+      if (live) $scroll.scrollTop = target;
+    }
+    for (const el of els) {
+      el.classList.remove('flash');
+      void el.offsetWidth;
+      el.classList.add('flash');
+      setTimeout(() => el.classList.remove('flash'), 1400);
+    }
+    return true;
+  }
+
+  /**
+   * 지금 탭을 차이로 보일지 코드 그대로 보일지 정해 화면을 맞춘다: 차이 보기가 켜져 있고 바뀐 파일이면 차이로, 아니면 코드로.
+   * 보는 방식이 바뀌면 보던 줄을 지킨다.
+   */
+  function syncView() {
+    const want = diffOn && diffable(current);
+    const was = diffShown();
+    const line = current?.lines ? topLine() : 1;
+    $code.hidden = !current?.lines || want;
+    $diff.hidden = !want;
+    $diffHead.hidden = !want;
+    $diffBtn.classList.toggle('on', diffOn);
+    if (want) renderDiff(); else { $diff.replaceChildren(); diffModel = null; }
+    if (was !== want && current?.lines) scrollToLine(line, false);
+    drawPeek();
+  }
+
+  /** 차이 보기를 켜거나 끈다([차이] 단추, F8, [코드로 보기]). */
+  function setDiff(on) {
+    diffOn = !!on;
+    syncView();
+    onChange();
+    if (!current) setStatus(diffOn ? '차이 보기: 바뀐 파일을 열면 차이(diff)로 보입니다.' : '차이 보기를 껐습니다.');
+    else if (diffOn && !diffable(current)) setStatus('차이 보기를 켰습니다. 이 파일은 바뀐 곳이 없어 코드 그대로 보입니다(바뀐 파일을 열면 차이로 보입니다).');
+    else setStatus(diffOn ? '차이 보기: 지운 줄은 빨강, 더한 줄은 초록으로 보입니다 (F7: 다음 바뀐 곳 · F8: 코드 그대로 보기)' : '코드 그대로 보기 (F8: 차이 보기)');
+  }
+
+  $diff.addEventListener('click', (ev) => {
+    const fold = ev.target.closest?.('.dl-fold');
+    if (fold) { openFold(fold); return; }
+    const row = ev.target.closest?.('.dl');
+    const line = Number(row?.dataset.n) || 0;
+    if (!line) return;
+    // Ctrl+클릭: 그 줄을 코드 그대로 보기에서 본다(거기서 정의로 가기 등을 쓴다).
+    if (ev.ctrlKey) { ev.preventDefault(); remember(); setDiff(false); jump({ line }); return; }
+    if (!selected()) { caret = { line, col: 0 }; renderCrumbs(); } // F7·Shift+F7이 여기서부터 이어진다
+  });
+  $diff.addEventListener('contextmenu', (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    if (!current) return;
+    const row = ev.target.closest?.('.dl');
+    const line = Number(row?.dataset.n) || 0;
+    const hunk = row?.dataset.h ? hunkAt(current.path, Number(row.dataset.h)) : null;
+    const picked = selected();
+    const path = current.path;
+    showMenu(ev, [
+      ...(picked ? [{ label: '고른 글 복사  (Ctrl+C)', action: () => copyText(picked) }] : []),
+      ...(line ? [{ label: line + '번째 줄을 코드에서 보기  (Ctrl+클릭)', action: () => { remember(); setDiff(false); jump({ line }); } }] : []),
+      ...(hunk ? [
+        ...(hunk.old.length ? [{ label: '이전 내용 복사 (지운 줄 ' + hunk.removed + ')', action: () => copyText(hunk.old.join('\n')) }] : []),
+        { label: 'Claude에 넣기: 이 바뀐 곳', action: () => changeText(path, hunk).then((text) => api.toClaude?.(item, text, ev)) },
+      ] : []),
+      { label: 'Claude에 넣기 (경로)', action: () => api.toClaude?.(item, relative(path) + ' ', ev) },
+      { label: '코드 그대로 보기  (F8)', action: () => setDiff(false) },
+      { label: '경로 복사', action: () => copyText(path) },
+      { label: '탐색기에서 보기', action: () => outside(path) },
+    ]);
+  });
 
   // ── 파일 열기와 그리기 ──
 
@@ -1032,6 +1351,9 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       $code.replaceChildren();
     } else {
       renderCode(tab);
+    }
+    syncView(); // 바뀐 파일이고 차이 보기가 켜져 있으면 차이로, 아니면 코드로
+    if (tab.lines) {
       scrollToLine(at?.line || tab.top, !!at);
       if (at) flash(at);
     }
@@ -1069,6 +1391,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       clearMarks();
       $code.replaceChildren();
       $code.hidden = true;
+      syncView();
       $empty.hidden = false;
       welcome();
       renderCrumbs();
@@ -1196,13 +1519,18 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   const lineHeight = () => parseFloat(getComputedStyle($code).lineHeight) || 19;
   /** 지금 정말 보이는지(숨겨진 직후에는 `shown`이 아직 참일 수 있다). */
   const visibleNow = () => shown && heldScroll == null && $scroll.clientHeight > 0;
-  const topLine = () => (current?.lines ? Math.max(1, Math.floor((visibleNow() ? $scroll.scrollTop : heldScroll ?? lastScroll) / lineHeight()) + 1) : 1);
+  const topRow = () => Math.max(0, Math.floor((visibleNow() ? $scroll.scrollTop : heldScroll ?? lastScroll) / lineHeight()));
+  const topLine = () => (!current?.lines ? 1 : diffShown() ? diffTopLine() : topRow() + 1);
 
   /** 그 줄이 보이게 한다. `center`이면 화면 가운데쯤에 오게 한다(멀리서 건너올 때). */
   function scrollToLine(line, center) {
     if (!current?.lines) return;
     const height = lineHeight();
-    const top = (Math.max(1, Math.min(current.lines.length, line)) - 1) * height;
+    line = Math.max(1, Math.min(current.lines.length, line));
+    // 차이 보기에서는 그 줄이 놓인 자리(지운 줄·접힌 곳이 끼어 있다)로 간다. 그 줄로 건너가는 것이면(center) 접힌 곳을 먼저 편다.
+    const row = diffShown() ? diffRowIndex(line, center) : line - 1;
+    if (row < 0) return; // 차이에 다 그리지 못한 줄(아주 긴 차이의 뒤쪽): 자리를 옮기지 않는다
+    const top = row * height;
     // 숨겨져 있는 동안에는 화면의 스크롤 자리를 읽고 쓸 수 없다. 기억해 둔 자리(lastScroll)로 셈하고, 보일 때 그 자리로 간다.
     const live = shown && $scroll.clientHeight > 0;
     const view = live ? $scroll.clientHeight : 0;
@@ -1329,7 +1657,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
   /** 건너온 자리를 잠깐 표시한다. */
   const flashing = new WeakMap(); // 표시 중인 줄 → 표시를 거둘 타이머
   function flash({ line, col = 0, len = 0 }) {
-    const el = lineEl(line);
+    const el = diffShown() ? diffRowOf(line) : lineEl(line);
     if (!el) return;
     // 같은 줄을 잇달아 표시하면(같은 줄로 다시 건너옴) 앞의 표시가 끝나며 새 표시를 지우지 않게, 앞의 것을 거두고 새로 시작한다.
     clearTimeout(flashing.get(el));
@@ -1343,7 +1671,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       sameWord = text.slice(col, col + len);
       repaint();
     }
-    if (col || len) {
+    if ((col || len) && !diffShown()) {
       revealAcross(line, col, len);
       // 방금 그린 화면은 한두 틀 뒤에야 줄의 너비가 잡힌다(화면 밖 덩이는 그리기를 미룬다). 그때 한 번 더 맞춘다.
       const tab = current;
@@ -1865,6 +2193,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     closePanel();
     $code.replaceChildren();
     $code.hidden = true;
+    syncView();
     $empty.hidden = false;
     welcome();
     renderTabs();
@@ -1882,6 +2211,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
 
   function openFind() {
     if (!current?.lines) return;
+    if (diffShown()) { setDiff(false); setStatus('이 파일에서 찾기는 코드 그대로 보기에서 합니다(차이 보기를 껐습니다 · F8로 다시 켭니다).'); }
     findOpen = true;
     $find.hidden = false;
     const picked = String(getSelection() || '');
@@ -1949,7 +2279,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
 
   const copyText = (text) => invoke('clipboard_write', { text }).then(() => setStatus('복사했습니다.')).catch((err) => setStatus(String(err)));
   const outside = (path) => invoke('link_open', { target: path, cwd: dirOf(path) || root, openFile: false, line: null, col: null }).catch((err) => setStatus(String(err)));
-  const selected = () => { const sel = getSelection(); return sel && !sel.isCollapsed && $code.contains(sel.anchorNode) ? String(sel) : ''; };
+  const selected = () => { const sel = getSelection(); return sel && !sel.isCollapsed && ($code.contains(sel.anchorNode) || $diff.contains(sel.anchorNode)) ? String(sel) : ''; };
 
   /** 고른 글의 줄 범위(없으면 마지막으로 누른 줄). */
   function pickedLines() {
@@ -2070,6 +2400,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     else if ((key === 'f12' && plain) || (ctrl && key === 'b')) goToDefinition();
     else if ((key === 'f7' && ev.altKey) || (key === 'f12' && ev.shiftKey)) findUsages();
     else if (key === 'f7' && !ev.ctrlKey) stepChange(ev.shiftKey ? -1 : 1);
+    else if (key === 'f8' && plain) setDiff(!diffOn);
     else if (ctrl && key === 'f') openFind();
     else if (ctrl && key === 'p') pickFile();
     else if (ctrl && key === 't') pickSymbol();
@@ -2114,6 +2445,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       $empty.hidden = true;
       $code.hidden = false;
       renderCode(tab);
+      syncView(); // 차이 보기면 새 내용으로 다시 그린다
       lastScroll = top;
       if (shown) $scroll.scrollTop = top;
       caret = keepCaret;
@@ -2177,6 +2509,7 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
       expanded: [...expanded],
       side: sideWidth,
       changedOnly,
+      diff: diffOn,
     }),
     close: () => Promise.resolve(true),
     dispose() {
@@ -2228,7 +2561,9 @@ export function createCode(item, host, saved = {}, onChange = () => {}) {
     rebuildIndex,
     touched: () => touching,
     peek: () => (peek ? { ...peek, shown: !$peek.hidden } : null),
-    setChangedOnly: (on) => { changedOnly = !!on; renderTree(); changedState(); },
+    setChangedOnly: (on) => { changedOnly = !!on; diffOn = changedOnly; renderTree(); changedState(); syncView(); },
+    setDiff, changedFiles,
+    diff: () => ({ on: diffOn, shown: diffShown(), rows: $diff.childElementCount, plus: diffModel?.plus ?? 0, minus: diffModel?.minus ?? 0 }),
   };
 
   welcome();

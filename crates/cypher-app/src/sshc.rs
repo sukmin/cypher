@@ -127,9 +127,69 @@ pub struct Conn {
     host: String,
     port: u16,
     user: String,
+    /// 이 연결의 주인 워크스페이스와, 쓰고 있는 세션들의 워크스페이스. 연결은 한 워크스페이스 안에서만 같이 쓴다:
+    /// 다른 워크스페이스의 세션은 같은 서버·같은 사용자라도 새로 접속한다.
+    scopes: Mutex<Scopes>,
+}
+
+/// 연결을 쓰는 워크스페이스들.
+struct Scopes {
+    /// 주인 워크스페이스: 이 연결을 인증한 세션의 워크스페이스. 이 워크스페이스의 세션만 새로 붙는다.
+    owner: String,
+    /// 이 연결을 쓰고 있는 세션들의 워크스페이스(세션마다 하나씩).
+    users: Vec<String>,
+}
+
+impl Scopes {
+    fn remove(&mut self, scope: &str) {
+        if let Some(at) = self.users.iter().position(|each| each == scope) {
+            self.users.swap_remove(at);
+        }
+    }
+
+    /// 주인 워크스페이스의 세션이 모두 떠났고 남은 세션이 모두 한 워크스페이스의 것이면, 그 워크스페이스가 주인이 된다
+    /// (혼자 쓰던 세션을 다른 워크스페이스로 옮겼거나, 워크스페이스의 이름을 바꿨을 때).
+    fn settle(&mut self) {
+        if self.users.contains(&self.owner) {
+            return;
+        }
+        if let Some(first) = self.users.first() {
+            if self.users.iter().all(|each| each == first) {
+                self.owner = first.clone();
+            }
+        }
+    }
 }
 
 impl Conn {
+    /// 그 워크스페이스의 세션 하나가 이 연결을 쓰기 시작했다.
+    fn enter(&self, scope: &str) {
+        self.scopes.lock().unwrap().users.push(scope.to_string());
+    }
+
+    /// 그 워크스페이스의 세션 하나가 이 연결을 그만 쓴다.
+    fn leave(&self, scope: &str) {
+        let mut scopes = self.scopes.lock().unwrap();
+        scopes.remove(scope);
+        scopes.settle();
+    }
+
+    /// 이 연결을 쓰는 세션 하나가 다른 워크스페이스로 옮겨 갔다(또는 워크스페이스의 이름이 바뀌었다).
+    fn moved(&self, from: &str, to: &str) {
+        let mut scopes = self.scopes.lock().unwrap();
+        scopes.remove(from);
+        scopes.users.push(to.to_string());
+        scopes.settle();
+    }
+
+    /// 그 워크스페이스의 새 세션이 이 연결을 같이 쓸 수 있는지: 이 연결의 주인 워크스페이스이고, 그 워크스페이스의 세션이
+    /// 지금도 쓰고 있을 때. 세션을 다른 워크스페이스로 옮겨도 쓰던 연결은 끊지 않으므로 옮겨 간 세션은 계속 이 연결을 쓰지만,
+    /// 옮겨 간 워크스페이스의 새 세션(그 세션의 복제 포함)은 붙지 않는다. 원래 워크스페이스의 세션은 전처럼 같이 쓴다.
+    pub fn shares_with(&self, scope: &str) -> bool {
+        let scopes = self.scopes.lock().unwrap();
+        scopes.owner == scope && scopes.users.iter().any(|each| each == scope)
+    }
+
     /// 세션 하나가 이 연결을 쓰기 시작한다. 이미 닫았거나 닫는 중이면 거짓.
     fn acquire(&self) -> bool {
         if self.handle.is_closed() {
@@ -162,9 +222,10 @@ impl Conn {
     }
 }
 
-/// 인증을 마친 연결들. 같은 서버에 같은 사용자로 새로 여는 세션(다시 시작한 뒤 쉬던 세션을 차례로 누를 때, 같은 서버에
-/// 세션을 새로 열 때)은 사용자 이름을 받은 뒤 이것을 같이 써서 비밀번호를 거듭 묻지 않는다. 사용자 이름은 묻기 전에는
-/// 모르므로, 주소만으로 맞추지 않는다(다른 사용자로 인증한 연결에 붙지 않게).
+/// 인증을 마친 연결들. 같은 워크스페이스에서 같은 서버에 같은 사용자로 새로 여는 세션(다시 시작한 뒤 쉬던 세션을 차례로
+/// 누를 때, 같은 서버에 세션을 새로 열 때)은 사용자 이름을 받은 뒤 이것을 같이 써서 비밀번호를 거듭 묻지 않는다.
+/// 사용자 이름은 묻기 전에는 모르므로, 주소만으로 맞추지 않는다(다른 사용자로 인증한 연결에 붙지 않게).
+/// 다른 워크스페이스의 연결은 같이 쓰지 않는다(업무마다 접속을 따로 둔다).
 static LIVE: Mutex<Vec<Weak<Conn>>> = Mutex::new(Vec::new());
 
 /// 끝난 연결을 목록에서 치운다.
@@ -178,11 +239,26 @@ fn remember(conn: &Arc<Conn>) {
     live.push(Arc::downgrade(conn));
 }
 
-/// 그 서버·포트에 그 사용자로 인증을 마친 살아 있는 연결.
-fn live_conn(host: &str, port: u16, user: &str) -> Option<Arc<Conn>> {
+/// 같이 쓸 연결을 찾은 결과.
+enum Live {
+    /// 그 워크스페이스의 연결: 같이 쓴다.
+    Shared(Arc<Conn>),
+    /// 같은 서버·사용자의 연결이 있지만 다른 워크스페이스의 것이다: 같이 쓰지 않는다.
+    Elsewhere,
+    None,
+}
+
+/// 그 서버·포트에 그 사용자로 인증을 마친 살아 있는 연결 가운데, 그 워크스페이스(`scope`)의 것.
+fn live_conn(host: &str, port: u16, user: &str, scope: &str) -> Live {
     let mut live = LIVE.lock().unwrap();
     prune(&mut live);
-    live.iter().filter_map(Weak::upgrade).find(|conn| conn.host.eq_ignore_ascii_case(host) && conn.port == port && conn.user == user)
+    let same: Vec<Arc<Conn>> =
+        live.iter().filter_map(Weak::upgrade).filter(|conn| conn.host.eq_ignore_ascii_case(host) && conn.port == port && conn.user == user).collect();
+    match same.iter().find(|conn| conn.shares_with(scope)) {
+        Some(conn) => Live::Shared(conn.clone()),
+        None if same.is_empty() => Live::None,
+        None => Live::Elsewhere,
+    }
 }
 
 // ───────────────────────── 세션 하나 ─────────────────────────
@@ -199,6 +275,8 @@ pub struct SshTerm {
     paused: watch::Sender<bool>,
     killed: watch::Sender<bool>,
     conn: Arc<Mutex<Option<Arc<Conn>>>>,
+    /// 이 세션이 든 워크스페이스. 사용자가 세션을 다른 워크스페이스로 옮기면 바뀐다(`set_scope`).
+    scope: Arc<Mutex<String>>,
 }
 
 type Output = Arc<dyn Fn(&[u8]) + Send + Sync>;
@@ -207,10 +285,13 @@ impl SshTerm {
     /// 세션을 시작한다. 접속은 뒤에서 이어지고, 그동안의 안내와 물음은 `on_output`으로 화면에 나간다.
     /// `share`가 살아 있는 연결이면 그 연결에 채널만 연다(다시 인증하지 않는다). 로그인을 마치고 셸이 열리면 `on_ready`가
     /// 로그인한 사용자 이름을 받아, 끝나면 `on_exit`가 한 번 불린다.
+    /// `scope`는 이 세션이 든 워크스페이스다: 연결은 같은 워크스페이스의 세션끼리만 같이 쓴다.
+    #[allow(clippy::too_many_arguments)]
     pub fn start(
         spec: SshTarget,
         env: SshEnv,
         share: Option<Arc<Conn>>,
+        scope: String,
         size: (u16, u16),
         on_output: impl Fn(&[u8]) + Send + Sync + 'static,
         on_ready: impl FnOnce(&str) + Send + 'static,
@@ -221,13 +302,31 @@ impl SshTerm {
         let (killed, killed_rx) = watch::channel(false);
         let conn = Arc::new(Mutex::new(None));
         let slot = conn.clone();
+        let scope = Arc::new(Mutex::new(scope));
+        let held = scope.clone();
         let output: Output = Arc::new(on_output);
         tauri::async_runtime::spawn(async move {
             let mut io = Io { input: input_rx, output, killed: killed_rx, size, ready: Some(Box::new(on_ready)) };
-            let code = run(&mut io, spec, env, share, paused_rx, slot).await;
+            let code = run(&mut io, spec, env, share, held, paused_rx, slot).await;
             on_exit(code);
         });
-        SshTerm { input, paused, killed, conn }
+        SshTerm { input, paused, killed, conn, scope }
+    }
+
+    /// 이 세션이 다른 워크스페이스로 옮겨졌다(또는 워크스페이스의 이름이 바뀌었다). 쓰고 있는 연결에도 알린다:
+    /// 연결은 끊지 않고 그대로 쓰되, 옮겨 간 워크스페이스의 새 세션은 이 연결에 붙지 않는다(이 세션이 혼자 쓰던 연결이면
+    /// 연결도 옮겨 간 워크스페이스의 것이 된다).
+    pub fn set_scope(&self, scope: &str) {
+        // 잠그는 차례는 늘 연결 칸 → 워크스페이스다(run과 같다).
+        let held = self.conn.lock().unwrap();
+        let mut now = self.scope.lock().unwrap();
+        if *now == scope {
+            return;
+        }
+        if let Some(conn) = held.as_ref() {
+            conn.moved(&now, scope);
+        }
+        *now = scope.to_string();
     }
 
     pub fn write(&self, data: &[u8]) {
@@ -392,25 +491,54 @@ enum Step {
 }
 
 /// 접속하고(또는 나눠 쓸 연결에 붙고) 셸을 열어 끝날 때까지 잇는다. 종료 코드를 돌려준다.
-async fn run(io: &mut Io, spec: SshTarget, env: SshEnv, share: Option<Arc<Conn>>, paused: watch::Receiver<bool>, slot: Arc<Mutex<Option<Arc<Conn>>>>) -> Option<u32> {
-    // 연결 복제: 그 연결에 붙는다(사용자 이름도 묻지 않는다). 연결이 답하지 않으면 새로 접속한다.
+async fn run(
+    io: &mut Io,
+    spec: SshTarget,
+    env: SshEnv,
+    share: Option<Arc<Conn>>,
+    scope: Arc<Mutex<String>>,
+    paused: watch::Receiver<bool>,
+    slot: Arc<Mutex<Option<Arc<Conn>>>>,
+) -> Option<u32> {
+    // 연결에 들 때 적은 워크스페이스. 접속하는 사이에 세션이 옮겨졌으면 끝에서 지금 것으로 바꾼다.
+    let mut entered = scope.lock().unwrap().clone();
+    // 연결 복제: 그 연결에 붙는다(사용자 이름도 묻지 않는다). 연결이 답하지 않거나 다른 워크스페이스의 연결이면 새로 접속한다.
     let mut shared = None;
     if let Some(conn) = share {
-        match join(io, conn).await {
-            Ok(found) => shared = found,
-            Err(Closed) => return None,
+        if conn.shares_with(&entered) {
+            match join(io, conn, &entered).await {
+                Ok(found) => shared = found,
+                Err(Closed) => return None,
+            }
+        } else {
+            io.note(&format!("[{} 연결은 다른 워크스페이스의 것이라 같이 쓰지 않습니다 · 새로 접속합니다]", conn.label));
         }
     }
     let conn = match shared {
         Some(conn) => conn,
-        None => match login(io, &spec, &env).await {
-            Some(conn) => conn,
+        None => match login(io, &spec, &env, &scope).await {
+            Some((conn, with)) => {
+                entered = with;
+                conn
+            }
             None => return Some(255),
         },
     };
-    *slot.lock().unwrap() = Some(conn.clone());
+    {
+        // 접속하는 사이에(비밀번호를 묻는 동안 등) 세션이 다른 워크스페이스로 옮겨졌으면 연결에 적어 둔 이름을 지금 것으로 바꾼다.
+        let mut held = slot.lock().unwrap();
+        let now = scope.lock().unwrap();
+        if *now != entered {
+            conn.moved(&entered, &now);
+        }
+        *held = Some(conn.clone());
+    }
     let code = shell(io, &conn, paused).await;
-    *slot.lock().unwrap() = None;
+    {
+        let mut held = slot.lock().unwrap();
+        conn.leave(&scope.lock().unwrap());
+        *held = None;
+    }
     conn.release();
     code
 }
@@ -420,14 +548,17 @@ struct Closed;
 
 /// 나눠 쓸 연결에 붙는다. 정말 살아 있는지 먼저 묻는다: 컴퓨터가 잠들었다 깨어 서버 쪽에서는 끊긴 연결(반쯤 열린 것)을
 /// 고르면 채널 열기가 keepalive 시간 초과까지 멈춘다. 답이 없거나 이미 닫혔으면 Ok(None)(새로 접속한다).
-async fn join(io: &mut Io, conn: Arc<Conn>) -> Result<Option<Arc<Conn>>, Closed> {
+/// 붙는 동안에도 이 세션의 워크스페이스(`scope`)를 연결에 적어 둔다(그사이 다른 워크스페이스의 세션이 붙지 않게).
+async fn join(io: &mut Io, conn: Arc<Conn>, scope: &str) -> Result<Option<Arc<Conn>>, Closed> {
     if !conn.acquire() {
         return Ok(None);
     }
+    conn.enter(scope);
     let ping = tokio::time::timeout(SHARE_CHECK, conn.handle.send_ping());
     let alive = tokio::select! {
         result = ping => matches!(result, Ok(Ok(()))) && !conn.handle.is_closed(),
         _ = io.killed.changed() => {
+            conn.leave(scope);
             conn.release();
             return Err(Closed);
         }
@@ -437,16 +568,20 @@ async fn join(io: &mut Io, conn: Arc<Conn>) -> Result<Option<Arc<Conn>>, Closed>
         Ok(Some(conn))
     } else {
         io.note(&format!("[{} 연결이 답하지 않아 새로 접속합니다]", conn.label));
+        conn.leave(scope);
         conn.release();
         Ok(None)
     }
 }
 
 /// 사용자 이름을 정하고 로그인한다. 사용자 이름을 모르면(화면은 주소와 포트만 넘긴다) 세션 화면에서 묻는다.
-/// 같은 서버에 같은 사용자로 인증을 마친 연결이 있으면 그것을 같이 쓴다.
+/// 같은 워크스페이스에서 같은 서버에 같은 사용자로 인증을 마친 연결이 있으면 그것을 같이 쓴다
+/// (다른 워크스페이스의 연결은 같이 쓰지 않고 새로 접속한다). 워크스페이스는 사용자 이름을 받은 뒤에 읽는다:
+/// 사용자 이름을 묻는 동안 세션을 다른 워크스페이스로 옮겼으면 옮겨 간 워크스페이스의 연결을 찾아야 한다.
+/// 연결과, 그 연결에 들 때 적은 워크스페이스를 돌려준다.
 /// 물어서 정한 사용자로 로그인하지 못했으면(비밀번호가 틀림, 비밀번호를 묻는 중에 Ctrl+C) 사용자 이름부터 다시 묻는다.
 /// 사용자 이름을 묻는 데서 Ctrl+C·Ctrl+D를 치거나 접속 자체가 안 되면(주소, 서버 키) 그만둔다.
-async fn login(io: &mut Io, spec: &SshTarget, env: &SshEnv) -> Option<Arc<Conn>> {
+async fn login(io: &mut Io, spec: &SshTarget, env: &SshEnv, scope: &Mutex<String>) -> Option<(Arc<Conn>, String)> {
     let (given, alias) = rules::split_target(&spec.target);
     let settings = env.settings(alias);
     let known = known_user(given, &settings);
@@ -460,17 +595,21 @@ async fn login(io: &mut Io, spec: &SshTarget, env: &SshEnv) -> Option<Arc<Conn>>
             None => ask_user(io).await?,
         };
         let plan = plan(spec, env, &user);
-        if let Some(conn) = live_conn(&plan.host, plan.port, &plan.user) {
-            match join(io, conn).await {
-                Ok(Some(conn)) => return Some(conn),
+        let scope = scope.lock().unwrap().clone();
+        let scope = scope.as_str();
+        match live_conn(&plan.host, plan.port, &plan.user, scope) {
+            Live::Shared(conn) => match join(io, conn, scope).await {
+                Ok(Some(conn)) => return Some((conn, scope.to_string())),
                 Ok(None) => {}
                 Err(Closed) => return None,
-            }
+            },
+            Live::Elsewhere => io.note("[다른 워크스페이스에서 이 서버에 접속해 있지만, 연결은 워크스페이스끼리 같이 쓰지 않습니다 · 새로 접속합니다]"),
+            Live::None => {}
         }
-        match connect(io, &plan, env).await {
+        match connect(io, &plan, env, scope).await {
             Login::Done(conn) => {
                 remember(&conn);
-                return Some(conn);
+                return Some((conn, scope.to_string()));
             }
             Login::Retry if known.is_none() && !io.is_killed() => io.note("[사용자 이름부터 다시 묻습니다 · 그만두려면 Ctrl+C]"),
             Login::Retry | Login::Stop => return None,
@@ -763,7 +902,7 @@ enum Login {
 }
 
 /// 접속하고 인증한다. 실패하면 까닭을 화면에 적는다.
-async fn connect(io: &mut Io, plan: &Plan, env: &SshEnv) -> Login {
+async fn connect(io: &mut Io, plan: &Plan, env: &SshEnv, scope: &str) -> Login {
     let label = format!("{}@{}", plan.user, host_port(&plan.host, plan.port));
     io.note(&format!("[내장 SSH로 {label}에 접속하는 중…]"));
 
@@ -859,7 +998,15 @@ async fn connect(io: &mut Io, plan: &Plan, env: &SshEnv) -> Login {
         let _ = handle.disconnect(Disconnect::ByApplication, "", "").await;
         return Login::Retry;
     }
-    Login::Done(Arc::new(Conn { handle, users: AtomicUsize::new(1), label, host: plan.host.clone(), port: plan.port, user: plan.user.clone() }))
+    Login::Done(Arc::new(Conn {
+        handle,
+        users: AtomicUsize::new(1),
+        label,
+        host: plan.host.clone(),
+        port: plan.port,
+        user: plan.user.clone(),
+        scopes: Mutex::new(Scopes { owner: scope.to_string(), users: vec![scope.to_string()] }),
+    }))
 }
 
 // ───────────────────────── 인증 ─────────────────────────
@@ -1413,6 +1560,11 @@ mod tests {
         }
 
         fn open(target: &str, port: u16, env: &SshEnv, share: Option<Arc<Conn>>) -> Probe {
+            Probe::open_in("일", target, port, env, share)
+        }
+
+        /// 그 워크스페이스(`scope`)의 세션으로 연다.
+        fn open_in(scope: &str, target: &str, port: u16, env: &SshEnv, share: Option<Arc<Conn>>) -> Probe {
             let seen = Arc::new(Mutex::new(String::new()));
             let exit = Arc::new(Mutex::new(None));
             let (out, done) = (seen.clone(), exit.clone());
@@ -1423,6 +1575,7 @@ mod tests {
                 spec,
                 env.clone(),
                 share,
+                scope.to_string(),
                 (80, 24),
                 move |bytes| out.lock().unwrap().push_str(&String::from_utf8_lossy(bytes)),
                 move |user: &str| *opened.lock().unwrap() = Some(user.to_string()),
@@ -1612,7 +1765,72 @@ mod tests {
             clone.wait_for("welcome").await;
             assert!(!clone.saw("사용자 이름"));
             assert_eq!(clone.user().as_deref(), Some("tester"), "복제한 세션도 그 연결의 사용자 이름을 알린다");
-            for p in [&probe, &second, &other, &clone] {
+
+            // 다른 워크스페이스의 세션은 같은 서버·같은 사용자라도 그 연결을 같이 쓰지 않고 새로 접속한다(비밀번호를 다시 묻는다).
+            let apart = Probe::open_in("다른 일", "127.0.0.1", port, &env, None);
+            apart.wait_for("사용자 이름: ").await;
+            apart.term.write(b"tester\r");
+            apart.wait_for("워크스페이스끼리 같이 쓰지 않습니다").await;
+            apart.wait_for("tester@127.0.0.1의 비밀번호: ").await;
+            assert!(!apart.saw("연결을 같이 씁니다"));
+            apart.term.write(b"secret\r");
+            apart.wait_for("welcome").await;
+            assert_eq!(auths.load(Ordering::SeqCst), 2, "다른 워크스페이스는 따로 인증한다");
+            // 다른 워크스페이스에서는 연결 복제도 그 연결을 쓰지 않는다(사용자 이름부터 묻는다).
+            let stray = Probe::open_in("다른 일", "127.0.0.1", port, &env, probe.term.connection());
+            stray.wait_for("다른 워크스페이스의 것이라 같이 쓰지 않습니다").await;
+            stray.wait_for("사용자 이름: ").await;
+            stray.term.write(b"tester\r");
+            // 그 워크스페이스("다른 일")가 따로 맺은 연결은 같이 쓴다.
+            stray.wait_for("연결을 같이 씁니다").await;
+            stray.wait_for("welcome").await;
+            assert_eq!(auths.load(Ordering::SeqCst), 2);
+
+            // 남과 같이 쓰던 세션을 다른 워크스페이스로 옮기면: 연결은 끊지 않고 원래 워크스페이스의 것으로 남는다.
+            // 원래 워크스페이스의 세션은 전처럼 같이 쓰고(복제도 다시 인증하지 않는다), 옮겨 간 워크스페이스의 새 세션은 붙지 않는다.
+            let conn = probe.term.connection().unwrap();
+            assert!(conn.shares_with("일"));
+            clone.term.set_scope("셋째 일");
+            assert!(conn.shares_with("일") && !conn.shares_with("셋째 일"));
+            let home = Probe::open("127.0.0.1", port, &env, probe.term.connection());
+            home.wait_for("연결을 같이 씁니다").await;
+            home.wait_for("welcome").await;
+            let moved = Probe::open_in("셋째 일", "127.0.0.1", port, &env, clone.term.connection());
+            moved.wait_for("다른 워크스페이스의 것이라 같이 쓰지 않습니다").await;
+            moved.wait_for("사용자 이름: ").await;
+            moved.term.write(b"\x03");
+            assert_eq!(moved.wait_exit().await, Some(255));
+            assert_eq!(auths.load(Ordering::SeqCst), 2);
+            for p in [&clone, &home] {
+                p.term.kill();
+                p.wait_exit().await;
+            }
+            assert!(conn.shares_with("일"));
+            // 혼자 쓰던 세션을 옮기면 연결도 새 워크스페이스의 것이 된다.
+            let solo = apart.term.connection().unwrap();
+            stray.term.kill();
+            stray.wait_exit().await;
+            apart.term.set_scope("넷째 일");
+            assert!(solo.shares_with("넷째 일") && !solo.shares_with("다른 일"));
+            // 워크스페이스의 세션이 차례로 새 이름으로 옮겨 가면(이름 바꾸기) 마지막 세션이 옮겨 갈 때 연결도 새 이름의 것이 된다.
+            second.term.set_scope("일 (새 이름)");
+            assert!(conn.shares_with("일") && !conn.shares_with("일 (새 이름)"));
+            probe.term.set_scope("일 (새 이름)");
+            other.term.set_scope("일 (새 이름)");
+            assert!(conn.shares_with("일 (새 이름)") && !conn.shares_with("일"));
+            // 사용자 이름을 묻는 동안 다른 워크스페이스로 옮긴 세션은 옮겨 간 워크스페이스의 연결을 찾는다(원래 워크스페이스의 것에 붙지 않는다).
+            let late = Probe::open_in("일 (새 이름)", "127.0.0.1", port, &env, None);
+            late.wait_for("사용자 이름: ").await;
+            late.term.set_scope("넷째 일");
+            late.term.write(b"tester\r");
+            late.wait_for("연결을 같이 씁니다").await;
+            late.wait_for("welcome").await;
+            assert!(Arc::ptr_eq(&late.term.connection().unwrap(), &solo), "옮겨 간 워크스페이스의 연결에 붙는다");
+            assert_eq!(auths.load(Ordering::SeqCst), 2);
+            late.term.kill();
+            late.wait_exit().await;
+            drop((conn, solo));
+            for p in [&probe, &second, &other, &apart] {
                 p.term.kill();
                 p.wait_exit().await;
             }

@@ -88,8 +88,29 @@ input:focus { border-color: var(--accent); }
   cursor: pointer;
 }
 #sessions li:hover { background: var(--hover); }
-#sessions li.shown { border-left-color: var(--idle); }
-#sessions li.active { background: var(--select); border-left-color: var(--accent); }
+/* 지금 화면(스테이지)에 보이는 항목: 굵은 왼쪽 띠와 옅은 바탕, 이름 옆의 표("보는 중"·"화면")로 한눈에 가려낸다.
+   입력이 가는 창의 항목(.active)은 강조색 띠와 테두리, 굵은 이름으로 가장 또렷하게 보인다. */
+#sessions li.shown { padding-left: 6px; border-left: 4px solid var(--idle); background: color-mix(in srgb, var(--accent) 9%, transparent); }
+#sessions li.active {
+  background: color-mix(in srgb, var(--accent) 20%, var(--select));
+  border-left-color: var(--accent);
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--accent) 65%, transparent);
+}
+#sessions li.shown .alias { font-weight: 600; }
+#sessions li.active .alias { font-weight: 700; }
+.on-stage {
+  display: inline-block;
+  margin-right: 2px;
+  padding: 0 6px;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 14px;
+  color: var(--accent);
+  border: 1px solid var(--accent);
+  border-radius: 8px;
+  vertical-align: 1px;
+}
+li.active .on-stage { color: var(--on-accent); background: var(--accent); }
 
 .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--idle); }
 li.busy .dot { background: var(--busy); }
@@ -332,6 +353,20 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
   .pane-tool .short { display: none; }
   .pane-tool .tiny { display: inline; }
   .pane-head .pane-button.split-only { display: none; } /* 제목 줄을 두 번 누르거나 오른쪽 클릭 메뉴로 한다 */
+}
+/* SSH 창 위쪽의 글자 크기: [가−] 크기 [가+] — SSH 세션에만 적용된다. 크기를 누르면 기본 크기로. */
+.pane-font { flex: none; display: flex; align-items: center; }
+.pane-font button { height: 20px; min-width: 28px; padding: 0 6px; font-size: 12px; line-height: 18px; color: var(--text); background: var(--control); border: 1px solid var(--line); border-radius: 0; }
+.pane-font button:first-child { border-radius: 5px 0 0 5px; }
+.pane-font button:last-child { border-radius: 0 5px 5px 0; }
+.pane-font button + button { border-left: 0; }
+.pane-font-size { min-width: 32px; color: var(--dim); font-variant-numeric: tabular-nums; }
+.pane-font-size.own { color: var(--accent); font-weight: 700; }
+.pane-font button:hover { color: var(--on-accent); background: var(--accent); }
+#terms:not(.multi) .pane-font button { height: 24px; line-height: 22px; }
+@container pane (max-width: 400px) {
+  .pane-font-size { display: none; }
+  .pane-font button { min-width: 24px; padding: 0 3px; }
 }
 .pane-tool span { pointer-events: none; } /* 누른 대상이 늘 단추가 되게(글 조각이 바뀌어도 클릭이 먹히게) */
 .pane-tool:hover { color: var(--on-accent); background: var(--accent); }

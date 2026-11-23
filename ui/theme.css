@@ -194,6 +194,9 @@
 :root[data-theme="matrix"] .divider { background: rgba(0, 60, 20, 0.35); }
 :root[data-theme="matrix"] #empty { background: rgba(0, 5, 2, 0.3); color: var(--text); text-shadow: 0 0 8px rgba(0, 255, 102, 0.6); }
 /* 이름·제목에는 화면에 번지는 빛을 살짝 준다. */
+/* 화면에 보이는 줄: 밝은 강조색을 섞은 바탕 위에서는 아랫줄의 흐린 글자가 읽히지 않아 고른 줄의 바탕을 그대로 쓴다. */
+:root[data-theme="matrix"] #sessions li.shown { background: rgba(0, 70, 25, 0.35); }
+:root[data-theme="matrix"] #sessions li.active { background: var(--select); }
 :root[data-theme="matrix"] #sessions li.group .name,
 :root[data-theme="matrix"] #sessions li.active .name,
 :root[data-theme="matrix"] .pane.active .pane-head .title,

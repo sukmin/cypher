@@ -83,6 +83,13 @@ impl Term {
             Kind::Pty(_) => None,
         }
     }
+
+    /// 내장 SSH 세션이 든 워크스페이스가 바뀌었다(세션을 옮김, 워크스페이스 이름 바꿈). 연결은 같은 워크스페이스의 세션끼리만 같이 쓴다.
+    pub fn set_scope(&self, scope: &str) {
+        if let Kind::Ssh(session) = &self.kind {
+            session.set_scope(scope);
+        }
+    }
 }
 
 // ───────────────────────── 출력 기록 ─────────────────────────

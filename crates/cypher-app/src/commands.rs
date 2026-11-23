@@ -243,6 +243,7 @@ pub fn session_create(
     command: Option<String>,
     ssh: Option<cypher_core::ssh::SshTarget>,
     clone_of: Option<u32>,
+    group: Option<String>,
     on_output: Channel<InvokeResponseBody>,
 ) -> Result<u32, String> {
     let profile = state.config.profile(&profile).ok_or("알 수 없는 프로필입니다")?;
@@ -264,6 +265,8 @@ pub fn session_create(
         cypher_core::ssh::ssh_args(target)?; // 접속할 곳이 올바른지(빈칸·옵션이 끼어들지 않았는지)
         let why = crate::sshc::unsupported(target, &env);
         if state.config.ssh.builtin() && why.is_none() {
+            // 이 세션이 든 워크스페이스: 연결은 같은 워크스페이스의 세션끼리만 같이 쓴다(다른 워크스페이스면 새로 접속한다).
+            let scope = group.unwrap_or_default();
             // 연결 복제: 그 세션의 연결이 살아 있으면 채널만 하나 더 연다(다시 인증하지 않는다).
             let share = clone_of.and_then(|other| session(&state, other).ok()).and_then(|term| term.connection());
             let id = state.next_id.fetch_add(1, Ordering::Relaxed);
@@ -274,6 +277,7 @@ pub fn session_create(
                 target.clone(),
                 env,
                 share,
+                scope,
                 (cols, rows),
                 move |bytes| {
                     tee.feed(bytes);
@@ -555,6 +559,15 @@ pub fn session_resize(state: State<'_, AppState>, id: u32, cols: u16, rows: u16)
 pub fn session_pause(state: State<'_, AppState>, id: u32, paused: bool) {
     if let Ok(s) = session(&state, id) {
         s.set_paused(paused);
+    }
+}
+
+/// SSH 세션이 든 워크스페이스가 바뀌었다(세션을 다른 워크스페이스로 옮김, 워크스페이스 이름 바꿈).
+/// 연결은 같은 워크스페이스의 세션끼리만 같이 쓰므로, 그 세션이 쓰는 연결에 새 워크스페이스를 알린다.
+#[tauri::command]
+pub fn session_scope(state: State<'_, AppState>, id: u32, group: String) {
+    if let Ok(s) = session(&state, id) {
+        s.set_scope(&group);
     }
 }
 

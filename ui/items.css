@@ -613,7 +613,8 @@ li.approval .sub .tool { color: inherit; }
 :root[data-theme="win32"] #sessions li.active .sub .tool { color: inherit; }
 
 
-/* 워크스페이스의 폴더 줄: 워크스페이스 이름 바로 아래 한 줄을 통째로 써서 워크스페이스 폴더와 고르는 단추(▾, 폴더…)를 둔다. */
+/* 워크스페이스의 폴더 줄: 워크스페이스 이름 바로 아래 한 줄을 통째로 써서 워크스페이스 폴더와 단추를 둔다
+   (정해 둔 폴더는 탐색기에서 여는 [폴더], 정하지 않았으면 고르는 ▾·[폴더…]). */
 #sessions li.group .group-folder {
   flex: 0 0 100%; /* 머리의 다른 것들 아래로 내려가 한 줄을 다 쓴다 */
   display: flex;
@@ -712,6 +713,7 @@ li.dormant .name, li.dormant .sub { opacity: 0.65; }
 #where .mark { margin-right: -2px; }
 :root[data-theme="win32"] .mark { color: #ffffff; background: #c00000; border-radius: 0; box-shadow: none; }
 :root[data-theme="win32"] #sessions li.active .mark { color: #000080; background: #ffffff; }
+:root[data-theme="win32"] #sessions li.active .on-stage { color: #000080; background: #ffffff; border-color: #ffffff; }
 #menu .menu-icons b { font: bold 12px var(--mono-font); }
 
 /* ───────── 터미널이 아닌 항목이 내놓는 상태: 명령의 실행 중·성공·실패, 다 끝낸 할 일 ───────── */
@@ -900,6 +902,17 @@ li.tone-fail .dot.kind, li.tone-fail .sub { color: var(--dead); }
 .code-row.has > .code-name::after { content: " ●"; color: var(--c-mod); font-size: 9px; }
 .code-row.touched > .code-name::after { content: " ◆"; color: var(--accent); font-size: 9px; }
 .code-note { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--idle); font-size: 11px; }
+/* 바뀐 파일의 종류 표(수정·추가·삭제): 이름의 색에 더해 오른쪽에 붙는다. */
+.code-badge { flex: none; margin-left: auto; padding: 0 5px; font-size: 10px; font-weight: 700; line-height: 14px; border: 1px solid currentColor; border-radius: 7px; }
+.code-note + .code-badge { margin-left: 0; }
+.code-badge.mod, .code-section.mod > b { color: var(--c-mod); }
+.code-badge.new, .code-section.new > b { color: var(--c-add); }
+.code-badge.gone, .code-section.gone > b { color: var(--c-del); }
+/* 바뀐 파일 목록의 묶음 머리: 고친 파일 · 추가한 파일 · 삭제한 파일 */
+.code-section { display: flex; align-items: center; gap: 6px; margin-top: 6px; padding: 3px 8px 3px 10px; font-size: 11px; background: var(--group); border-top: 1px solid var(--line); border-bottom: 1px solid var(--line); white-space: nowrap; }
+.code-changes-head + .code-section { margin-top: 0; border-top: 0; }
+.code-section > b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.code-section > span { flex: none; min-width: 18px; padding: 0 5px; text-align: center; color: var(--dim); background: var(--bg); border-radius: 8px; font-variant-numeric: tabular-nums; }
 /* 바뀐 곳 목록([바뀐 파일] 보기): 머리(모두 몇 곳, 이전·다음)와 파일마다의 바뀐 곳 줄 */
 .code-changes-head { display: flex; align-items: center; gap: 6px; margin-bottom: 3px; padding: 2px 6px 5px 10px; font-size: 11px; color: var(--dim); border-bottom: 1px solid var(--line); white-space: nowrap; }
 .code-changes-head > span:first-child { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
@@ -937,7 +950,7 @@ li.tone-fail .dot.kind, li.tone-fail .sub { color: var(--dead); }
 .crumb.info { margin-left: auto; padding-left: 12px; color: var(--idle); }
 .crumb.info::before { content: none; }
 .code-find { flex: none; display: flex; align-items: center; gap: 6px; padding: 4px 8px; background: var(--panel); border-bottom: 1px solid var(--line); }
-.code-find[hidden], .code-panel[hidden], .code-pick[hidden], .code-lines[hidden], .code-empty[hidden] { display: none; }
+.code-find[hidden], .code-panel[hidden], .code-pick[hidden], .code-lines[hidden], .code-empty[hidden], .code-diff[hidden], .code-diff-head[hidden] { display: none; }
 .code-find input, .code-search-input, .code-pick input { flex: 1; min-width: 0; padding: 4px 8px; font: 12px var(--mono-font); color: var(--text); background: var(--field); border: 1px solid var(--line); border-radius: 4px; outline: none; }
 .code-find input:focus, .code-search-input:focus, .code-pick input:focus { border-color: var(--accent); }
 .code-find button, .code-search button { flex: none; padding: 2px 8px; font-size: 12px; }
@@ -979,6 +992,39 @@ li.tone-fail .dot.kind, li.tone-fail .sub { color: var(--dead); }
 .cl-old { height: var(--code-lh); padding: 0 14px 0 8px; white-space: pre; }
 .cl-old::before { content: "−"; display: inline-block; width: 1.8ch; color: var(--c-del); user-select: none; }
 .code-lines.linking { cursor: pointer; }
+/* 차이 보기: 한 화면에서 지운 줄(빨강)과 더한 줄(초록)을 함께 본다. 모든 줄의 높이는 코드의 줄 높이와 같다(스크롤 자리 셈). */
+.code-diff-head { flex: none; display: flex; align-items: center; gap: 8px; padding: 3px 8px 3px 12px; font-size: 12px; background: var(--panel); border-bottom: 1px solid var(--line); white-space: nowrap; overflow: hidden; }
+.code-diff-head button { flex: none; height: 20px; padding: 0 8px; font-size: 11px; }
+.code-diff-kind { flex: none; padding: 0 8px; line-height: 17px; border: 1px solid currentColor; border-radius: 9px; }
+.code-diff-kind.mod { color: var(--c-mod); }
+.code-diff-kind.new { color: var(--c-add); }
+.code-diff-kind.gone { color: var(--c-del); }
+.code-diff-head .code-hunk-add, .code-diff-head .code-hunk-del { font-weight: 700; }
+.code-diff-note { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; color: var(--dim); font-size: 11px; }
+.code-diff { min-width: max-content; padding: 4px 0 40px; font: var(--code-size, 13px)/var(--code-lh) var(--code-font, var(--mono-font)); tab-size: 4; cursor: text; user-select: text; }
+.dl { height: var(--code-lh); white-space: pre; padding-right: 24px; }
+.dl::before {
+  content: attr(data-g);
+  display: inline-block;
+  position: sticky;
+  left: 0;
+  margin-right: 10px;
+  padding: 0 8px 0 10px;
+  color: var(--idle);
+  background: var(--bg);
+  border-left: 3px solid transparent;
+  white-space: pre;
+  user-select: none;
+}
+.dl.add { background: color-mix(in srgb, var(--c-add) 24%, transparent); }
+.dl.add::before { color: var(--text); background: color-mix(in srgb, var(--c-add) 40%, var(--bg)); border-left-color: var(--c-add); }
+.dl.del { background: color-mix(in srgb, var(--c-del) 24%, transparent); }
+.dl.del::before { color: var(--text); background: color-mix(in srgb, var(--c-del) 40%, var(--bg)); border-left-color: var(--c-del); }
+.dl.note { color: var(--c-del); font-style: italic; background: color-mix(in srgb, var(--c-del) 10%, transparent); }
+.dl.flash { box-shadow: inset 0 0 0 999px color-mix(in srgb, var(--accent) 22%, transparent); }
+.dl-fold { position: sticky; left: 0; width: max-content; max-width: 100%; height: var(--code-lh); padding: 0 12px; overflow: hidden; color: var(--accent); font: 11px/var(--code-lh) var(--ui-font); white-space: nowrap; text-overflow: ellipsis; cursor: pointer; user-select: none; }
+.dl-fold:hover { text-decoration: underline; }
+.dl-note { position: sticky; left: 0; width: max-content; max-width: 100%; height: var(--code-lh); padding: 0 12px; overflow: hidden; color: var(--idle); font: 12px/var(--code-lh) var(--ui-font); white-space: nowrap; text-overflow: ellipsis; user-select: none; }
 .t-kw { color: var(--c-kw); } .t-ty { color: var(--c-ty); } .t-def { color: var(--c-def); } .t-call { color: var(--c-call); } .t-cn { color: var(--c-cn); }
 .t-num { color: var(--c-num); } .t-str { color: var(--c-str); } .t-com { color: var(--c-com); font-style: italic; } .t-doc { color: var(--c-doc); font-style: italic; }
 .t-ann { color: var(--c-ann); } .t-mac { color: var(--c-mac); } .t-lt { color: var(--c-mac); font-style: italic; } .t-tag { color: var(--c-tag); } .t-attr { color: var(--c-attr); }
