@@ -26,7 +26,7 @@ const MAIN: &[&str] = &[
     "mcp_reply", "mindmap_read", "mindmap_write", "mindmap_remove", "mindmap_export", "mindmap_pdf",
     "erd_read", "erd_write", "erd_remove",
     "todo_read", "todo_write", "todo_remove", "run_start", "run_pick", "table_pick",
-    "store_dirs", "ui_zoom", "closed_restore",
+    "store_dirs", "ui_zoom", "closed_restore", "history_save", "history_list", "history_read", "history_remove",
     "update_current", "update_check", "update_install", "update_restart", "app_ready",
     "http_files", "http_read", "http_save", "http_run_at",
     "created_final", "ssh_hosts", "wake_after",

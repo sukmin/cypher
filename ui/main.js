@@ -24,6 +24,7 @@ import { initSsh, showSsh, cleanSpec, specLabel, saveHost, savedHosts } from './
 import { initTimer, showTimers, nextTimer, addTimer, removeTimer, timers } from './timer.js';
 import { initCode, createCode } from './code.js';
 import { initHex, createHex } from './hex.js';
+import { initHistory, keepHistory, dropHistory, showHistory } from './history.js';
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -210,7 +211,7 @@ async function init() {
   initDrop({
     invoke, listen, setStatus, quote, newItem, addImages, pasteInto, reveal,
     itemOfPane: (pane) => (pane ? [...sessions.values()].find((s) => s.pane === pane) : null),
-    itemOfRow: (row) => sessions.get(Number(row.dataset.key)),
+    itemOfRow: (row) => rowItem(row),
     contextOfHead: (head) => ({ group: head.dataset.group || '', cwd: head.dataset.cwd || folder }),
     screenEmpty: () => !visible.length,
     // 놓은 자리(묶음 머리, 항목의 줄이나 창)의 워크스페이스. 빈 곳에 놓았으면 지금 보는 항목의 워크스페이스로 정한다.
@@ -222,6 +223,13 @@ async function init() {
     revive: (record) => revive(record),
     icon: (record) => (KINDS[record.kind]?.icon || '›'),
     kindLabel: (record) => (KINDS[record.kind]?.label || config.profiles.find((p) => p.id === record.profile)?.label || '세션'),
+  });
+  initHistory({
+    invoke, make, openPopup, ask, setStatus, notice,
+    icon: (item) => (KINDS[item.kind]?.icon || '›'),
+    kindLabel: (item) => (typeof item.kindLabel === 'string' && item.kindLabel) || KINDS[item.kind]?.label || config.profiles.find((p) => p.id === item.profile)?.label || '세션',
+    taken: (name) => groupList.includes(name),
+    restore: restoreHistory,
   });
   initReader({
     invoke, make, setStatus, showMenu, baseName, toClaude: imageToClaude,
@@ -392,6 +400,7 @@ function runMenu(id) {
   const actions = {
     palette: showPalette,
     reopen: showClosed,
+    history: showHistory,
     notices: showNotices,
     timers: showTimers,
     templates: showTemplates,
@@ -684,14 +693,20 @@ async function newSession(profileId, opts = {}) {
     // 쉬는 세션: 다시 시작한 뒤 사이드바에만 되살려 둔 것. 프로세스를 띄우지 않고 있다가 사용자가 누르면 재개한다(wake).
     dormant: !!opts.dormant,
   };
+  // SSH는 워크스페이스마다 하나(SSH 방)다: 새 SSH 세션은 그 방의 탭으로 들어간다. 복제(tabOf)는 원래 세션 바로 옆 탭으로,
+  // 그 방의 탭을 보고 있었으면 그 옆 탭으로, 아니면 방에서 마지막으로 쓴 창의 맨 끝 탭으로 넣는다(방이 없으면 이 세션으로 방이 생긴다).
+  // 되살리는 중에는 넣지 않는다(탭 묶음과 방 안의 배치는 restore가 저장해 둔 대로 되돌린다).
+  let tabAnchor = null, tabBeside = false;
+  if (ssh && !opts.restoring) {
+    const beside = opts.tabOf && sessions.has(opts.tabOf.key) && opts.tabOf.group === group ? opts.tabOf
+      : active?.ssh && sessions.has(active.key) && active.group === group ? active : null;
+    tabAnchor = beside || roomFront(group);
+    tabBeside = !!beside;
+  }
   sessions.set(s.key, s);
   if (ssh) {
-    // SSH 탭 묶음: 복제(tabOf)는 원래 세션 바로 옆 탭으로 넣는다. 지금 창 자리에 여는 SSH 세션도, 그 자리에 같은 워크스페이스의
-    // SSH 탭이 보이고 있으면 그 옆 탭으로 넣는다(화면을 나누지 않고 탭으로 쌓는다).
     s.tabSet = { list: [s] };
-    const anchor = opts.tabOf && sessions.has(opts.tabOf.key) ? opts.tabOf
-      : !opts.restoring && opts.show !== 'hidden' && active?.tabSet && visible.includes(active) && active.group === group ? active : null;
-    if (anchor) joinTabs(s, anchor);
+    if (tabAnchor) joinTabs(s, tabAnchor, tabBeside ? undefined : null);
   }
   ensureGroup(s.group);
   if (!opts.restoring) rememberFolder(cwd);
@@ -705,7 +720,8 @@ async function newSession(profileId, opts = {}) {
   // 쉬는 세션은 화면에 올리지 않는다. 화면이 비어 있었으면 위에서 숨긴 빈 화면 안내를 되돌린다(배치를 다시 지으면 돌아온다).
   if (s.dormant) { if (!opts.restoring && !visible.length) layout(); render(); return s; }
 
-  // 화면은 나누지 않는다(창 분할은 사용자가 끌어다 놓을 때만): 지금 창 자리에 놓는다. SSH 탭은 그 묶음이 보이는 자리에서 탭을 바꾼다.
+  // 화면은 나누지 않는다(창 분할은 사용자가 끌어다 놓을 때만): 지금 창 자리에 놓는다. SSH 탭은 SSH 방 안에서 그 묶음의 창에 보이고,
+  // 방이 화면에 없으면 방이 지금 창 자리에 놓인다.
   if (opts.show !== 'hidden') { if (s.tabSet) placeTab(s); else placeInActive(s); }
   layout();
   if (opts.show !== 'hidden') activate(s);
@@ -871,7 +887,7 @@ const SSH = 'ssh';
 const isSshProfile = (profile) => profile?.id === SSH && !(profile.args || []).length;
 
 /**
- * 같은 서버에 세션을 하나 더 연다(연결 복제). 새 세션은 원래 세션 바로 옆 탭으로 들어가고(사이드바에도 놓인다) 그 탭이 보인다.
+ * 같은 서버에 세션을 하나 더 연다(연결 복제). 새 세션은 원래 세션 바로 옆 탭으로 들어가고(사이드바의 SSH 줄은 늘지 않는다) 그 탭이 보인다.
  * 화면은 나누지 않는다(창 분할은 사용자가 탭이나 사이드바의 항목을 끌어다 놓을 때만 한다).
  * 내장 SSH로 접속해 있으면 그 연결에 채널만 하나 더 열어 다시 인증하지 않는다(연결이 끊겼거나 아직 접속 중이면 새로 접속한다).
  */
@@ -881,29 +897,186 @@ function cloneSsh(s) {
   return newSession(SSH, { ...besideOf(s), cwd: s.startCwd, ssh: s.ssh, color: s.color, show: 'replace', tabOf: s, cloneOf: live ? s.id : null });
 }
 
-// ───────────────────────── SSH 탭 ─────────────────────────
-// SSH 세션은 탭 묶음에 든다(s.tabSet = { list: [세션…] }, 탭 순서대로. 처음에는 저 혼자). 한 묶음은 화면의 창 자리 하나에
-// 그중 하나만 보이고, 그 창의 위쪽에 묶음의 탭이 늘어선다. 복제한 세션과 같은 워크스페이스의 SSH 창 자리에 여는 세션은
-// 그 옆 탭으로 들어간다. 탭을 화면 가장자리로 끌어다 놓으면 묶음에서 떼어 나눠 열고, 다른 SSH 창의 탭 줄(또는 가운데)에 놓으면
-// 그 묶음으로 옮긴다. 묶음과 탭 순서는 저장해 두었다가 다시 시작하면 되살린다.
+// ───────────────────────── SSH 방과 탭 ─────────────────────────
+// SSH는 워크스페이스마다 하나다. 사이드바에는 워크스페이스마다 SSH 줄이 하나만 놓이고, 그 워크스페이스의 SSH 세션은 모두 그 안
+// (SSH 방)의 탭이 된다. 서버에 더 접속하거나 연결을 복제해도 사이드바에 줄이 늘지 않고 방 안의 탭이 는다.
+//
+// 방 안은 제 배치를 가진다(rooms: 워크스페이스 이름 → 잎 { s }·가지 { dir, ratio, a, b }). 잎 하나가 창 하나이고, 창마다 탭 묶음 하나가
+// 놓인다(s.tabSet = { list: [세션…] }, 탭 순서대로. 잎의 s가 그 창에 지금 보이는 탭). 창 위쪽에는 그 묶음의 탭이 늘어선다.
+// 탭을 방 안의 창 가장자리로 끌어다 놓으면 방 안에서 나눠 열고, 다른 창의 탭 줄(또는 가운데)에 놓으면 그 창으로 옮긴다.
+// 탭은 방 밖으로 나가지 않는다(창을 옮기는 것은 SSH 안에서만 한다).
+//
+// 큰 배치(tree)에서는 방 전체가 한 자리다({ room: 워크스페이스 이름 }). 사이드바의 SSH 줄을 누르면 방이 지금 창 자리에 놓이고,
+// 그 줄을 화면 가장자리로 끌어다 놓으면 방이 통째로 그쪽에 나뉘어 열린다. 다른 항목을 방의 자리에 열면 방은 통째로 화면에서 빠진다
+// (방 안의 배치는 남아 있어, 다시 열면 그대로 돌아온다). 방 안의 배치와 탭 순서는 저장해 두었다가 다시 시작하면 되살린다.
+
+/** SSH 방 안의 배치: 워크스페이스 이름 → 잎 { s }·가지 { dir, ratio, a, b }. 방이 화면에 없어도 남아 있다. */
+const rooms = new Map();
+/** 지금 화면에 그려진 방의 상자(워크스페이스 이름 → 요소). 다른 항목을 SSH 창 위로 끌 때 방 전체를 한 자리로 보여 주는 데 쓴다. */
+const roomBoxes = new Map();
+
+/** 그 워크스페이스의 SSH 세션들(사이드바에 놓인 순서). */
+const sshOf = (group) => [...sessions.values()].filter((s) => s.ssh && s.group === group);
+
+/** 그 워크스페이스의 SSH 방이 지금 화면에 있는지. */
+const roomShown = (group) => !!findSlot({ room: group });
 
 /** 그 SSH 세션과 같은 탭 묶음에 있는 세션들(탭 순서). 닫은 것, 다른 워크스페이스에 있는 것은 뺀다. */
 function tabsOf(s) {
   if (!s?.tabSet) return s ? [s] : [];
-  return s.tabSet.list.filter((x) => sessions.has(x.key) && x.group === s.group);
+  return s.tabSet.list.filter((x) => sessions.has(x.key) && x.group === s.group && x.tabSet === s.tabSet);
+}
+
+/** 그 SSH 세션이 지금 보이는 탭으로 놓인 방 안의 잎(방이 화면에 없어도 찾는다). 다른 탭에 가려져 있으면 null. */
+const roomLeaf = (s) => (s?.ssh ? findLeaf(s, rooms.get(s.group) || null) : null);
+
+/** 그 SSH 세션의 탭 묶음이 놓인 방 안의 잎(그 묶음에서 지금 보이는 탭의 잎). */
+function setLeaf(s) {
+  for (const x of tabsOf(s)) {
+    const leaf = roomLeaf(x);
+    if (leaf) return leaf;
+  }
+  return null;
 }
 
 /**
- * s를 탭 묶음에서 뗀다. 화면에 보이던 탭이면 그 창 자리는 옆 탭이 받는다(남은 탭들이 화면에서 사라지지 않게).
- * 다른 워크스페이스로 옮길 때 쓴다. 고른 것이 s였으면 자리를 받은 탭을 고른다.
+ * 그 워크스페이스의 SSH 방을 지금 세션에 맞춘다: 방 안의 창은 살아 있는 그 워크스페이스의 SSH 세션만 보이고, 한 탭 묶음은
+ * 한 창에만 놓이며, 창이 없는 묶음의 탭은 방의 첫 창 탭 줄 끝에 붙는다(방이 비어 있으면 첫 세션의 창을 만든다).
+ * SSH 세션이 없는 워크스페이스의 방은 없앤다. 되살리는 중에는 건드리지 않는다(restore가 저장해 둔 대로 되돌린다).
  */
-function leaveTabsShown(s) {
-  if (!s?.tabSet || tabsOf(s).length < 2) return leaveTabs(s);
-  const heir = visible.includes(s) ? handOffTab(s) : null;
-  leaveTabs(s);
-  if (!heir) return;
+function settleRoom(group) {
+  if (restoring) return;
+  const all = sshOf(group);
+  if (!all.length) { rooms.delete(group); return; }
+  const placed = new Set(); // 창을 가진 탭 묶음
+  let inner = (function keep(node) {
+    if (!node) return null;
+    if (node.s) {
+      const s = node.s;
+      if (!sessions.has(s.key) || !s.ssh || s.group !== group) return null;
+      if (placed.has(s.tabSet)) leaveTabs(s); // 한 묶음에서 둘이 보이면 뒤의 것을 떼어 제 창을 준다.
+      placed.add(s.tabSet);
+      return node;
+    }
+    const a = keep(node.a), b = keep(node.b);
+    return a && b ? Object.assign(node, { a, b }) : (a || b);
+  })(rooms.get(group) || null);
+  let home = leavesOf(inner)[0] || null;
+  for (const s of all) {
+    if (placed.has(s.tabSet)) continue;
+    if (!home) {
+      inner = { s };
+      home = s;
+      placed.add(s.tabSet);
+    } else joinTabs(s, home, null);
+  }
+  rooms.set(group, inner);
+}
+
+/**
+ * 모든 SSH 방과 큰 배치를 맞춘다(layout이 부른다). 큰 배치에 그냥 놓인 SSH 세션(예전 판이 저장해 둔 배치)은 그 워크스페이스의
+ * 방으로 넣고(첫 자리가 방이 되고, 나머지는 방 안의 창이 된다), 없어진 방과 겹친 방의 자리는 뺀다.
+ */
+function settleRooms() {
+  if (restoring) return;
+  const mend = (node, fix) => {
+    if (!node) return null;
+    if (node.room || node.s) return fix(node);
+    const a = mend(node.a, fix), b = mend(node.b, fix);
+    return a && b ? Object.assign(node, { a, b }) : (a || b);
+  };
+  const seen = new Set();
+  tree = mend(tree, (node) => {
+    const group = node.room || (node.s.ssh ? node.s.group : '');
+    if (!group) return node;
+    if (node.s) {
+      const inner = rooms.get(group) || null;
+      if (!findLeaf(node.s, inner)) rooms.set(group, inner ? { dir: 'row', a: inner, b: { s: node.s } } : { s: node.s });
+    }
+    if (seen.has(group)) return null;
+    seen.add(group);
+    return node.room ? node : { room: group };
+  });
+  for (const group of new Set([...rooms.keys(), ...[...sessions.values()].filter((s) => s.ssh).map((s) => s.group)])) settleRoom(group);
+  tree = mend(tree, (node) => (node.room && !rooms.has(node.room) ? null : node));
+}
+
+/** 그 방에서 지금 고를 탭: 방 안에서 가장 최근에 쓴 창에 보이는 탭. SSH 세션이 없으면 null. */
+function roomFront(group) {
+  settleRoom(group);
+  const shown = leavesOf(rooms.get(group) || null);
+  return shown.reduce((best, s) => (!best || (s.usedAt || 0) > (best.usedAt || 0) ? s : best), null) || sshOf(group)[0] || null;
+}
+
+/** 그 워크스페이스의 SSH 탭들을 방 안의 창과 탭 줄에 놓인 순서대로. */
+function roomTabs(group) {
+  settleRoom(group);
+  const ordered = leavesOf(rooms.get(group) || null).flatMap((s) => tabsOf(s));
+  return [...new Set([...ordered, ...sshOf(group)])];
+}
+
+/** 사이드바의 SSH 줄을 눌렀을 때: 그 워크스페이스의 SSH 방을 화면에 올리고(이미 있으면 그대로) 방에서 쓰던 탭을 고른다. */
+function openRoom(group) {
+  const here = active?.ssh && active.group === group && sessions.has(active.key) && visible.includes(active);
+  const s = here ? active : roomFront(group);
+  if (s) activate(s);
+}
+
+/** SSH 방을 화면에서 빼거나(세션은 계속 살아 있고 방 안의 배치도 남는다) 화면에 올린다. */
+function toggleRoom(group) {
+  if (!roomShown(group)) return openRoom(group);
+  const mine = active?.ssh && active.group === group;
+  tree = withoutSlot(tree, { room: group });
   layout();
-  if (active === s) activate(heir);
+  if (mine && visible[0]) activate(visible[0]); else { render(); saveState(); }
+}
+
+/** 분할을 풀고 그 워크스페이스의 SSH 방만 화면에 남긴다(방 안의 배치는 그대로 둔다). */
+function showRoomOnly(group) {
+  const s = roomFront(group);
+  if (!s) return;
+  tree = { room: group };
+  layout();
+  activate(active?.ssh && active.group === group && visible.includes(active) ? active : s);
+}
+
+/** 방 안의 창을 s의 창 하나로 모은다: 다른 창의 탭들은 s의 탭 줄 끝에 차례로 붙는다. */
+function mergeRoom(s) {
+  settleRoom(s.group);
+  for (const other of leavesOf(rooms.get(s.group) || null)) {
+    if (other.tabSet === s.tabSet) continue;
+    for (const tab of tabsOf(other)) joinTabs(tab, s, null);
+  }
+  rooms.set(s.group, { s });
+}
+
+/**
+ * 방 안의 창 하나(s가 보이는 창)를 접는다: 그 창의 탭들은 옆 창(앞 창, 없으면 뒤 창)의 탭 줄 끝에 붙는다.
+ * 방에 창이 하나뿐이면 접을 곳이 없다(null). 탭을 받은 창에 보이는 세션을 돌려준다.
+ */
+function foldPane(s) {
+  const panes = leavesOf(rooms.get(s.group) || null);
+  const at = panes.findIndex((x) => x.tabSet === s.tabSet);
+  const next = at < 0 ? null : panes[at - 1] || panes[at + 1] || null;
+  if (!next) return null;
+  const moving = tabsOf(s);
+  const leaf = setLeaf(s);
+  const inner = leaf ? without(rooms.get(s.group), leaf.s) : rooms.get(s.group);
+  if (inner) rooms.set(s.group, inner);
+  for (const tab of moving) joinTabs(tab, next, null);
+  return next;
+}
+
+/**
+ * s를 방에서 뗀다(다른 워크스페이스로 옮기기 직전에 부른다): 보이던 탭이면 그 창을 옆 탭에 넘기고, 혼자 쓰던 창이면 창을 없앤다.
+ * 그 창을 넘겨받은 탭을 돌려준다(없으면 null).
+ */
+function leaveRoom(s) {
+  if (!s?.tabSet) return null;
+  const heir = handOffTab(s);
+  leaveTabs(s);
+  if (!heir) takeOut(s);
+  return heir;
 }
 
 /** s를 탭 묶음에서 떼어 혼자인 묶음으로 둔다(화면의 자리는 건드리지 않는다). */
@@ -929,32 +1102,32 @@ function joinTabs(s, anchor, before) {
   s.tabSet = set;
 }
 
-/** 화면에 보이던 탭 s 대신 그 창 자리에 옆 탭(오른쪽, 없으면 왼쪽)을 놓는다. 대신 놓은 세션, 옆 탭이 없으면 null. */
+/**
+ * 창에 보이던 탭 s 대신 그 창에 옆 탭(오른쪽, 없으면 왼쪽, 그다음 가까운 탭)을 놓는다(방이 화면에 없어도 한다).
+ * 방이 화면에 있을 때는 쉬는 탭에게 넘기지 않는다: 쉬는 탭이 화면에 올라가면 그 자리에서 접속을 시작하는데, 재개는 사용자가 누른 것만 한다.
+ * 대신 놓은 세션을 돌려준다. 넘겨받을 탭이 없거나 s가 보이던 탭이 아니면 null(부른 쪽이 그 창을 없앤다. 남은 탭은 방의 다른 창으로 간다).
+ */
 function handOffTab(s) {
-  const leaf = findLeaf(s);
+  const leaf = roomLeaf(s);
   if (!leaf) return null;
   const tabs = tabsOf(s);
   const at = tabs.indexOf(s);
-  const heir = tabs[at + 1] || tabs[at - 1] || null;
+  const onStage = roomShown(s.group);
+  const fit = (x) => !!x && (!onStage || !x.dormant);
+  const heir = [tabs[at + 1], tabs[at - 1]].find(fit) || tabs.slice(at + 1).find(fit) || tabs.slice(0, at).reverse().find(fit) || null;
   if (heir) leaf.s = heir;
   return heir;
 }
 
-/** 탭 s를 화면에 올린다: 같은 묶음의 탭이 보이는 창 자리가 있으면 그 자리에서 탭만 바꾸고, 없으면 지금 창 자리에 놓는다. */
+/**
+ * 탭 s를 화면에 올린다: 방 안에서 그 탭의 묶음이 놓인 창에 s를 보이고, 방이 화면에 없으면 방을 지금 창 자리에 놓는다.
+ * 방을 놓으면 화면의 창이 한도를 넘을 때는 놓지 않고 거짓을 돌려준다(방 안에서 보일 탭만 바꿔 둔다).
+ */
 function placeTab(s) {
-  const shown = tabsOf(s).find((x) => x !== s && visible.includes(x));
-  const leaf = shown && findLeaf(shown);
-  if (leaf) leaf.s = s; else placeInActive(s);
-}
-
-/** 한 묶음에서 둘 이상이 화면에 보이면(되살린 배치, 끌어다 놓기) 뒤의 것을 묶음에서 떼어 낸다. 탭 하나는 한 창에만 보인다. */
-function untangleTabs() {
-  const seen = new Set();
-  for (const v of visible) {
-    if (!v.tabSet) continue;
-    if (seen.has(v.tabSet)) leaveTabs(v);
-    seen.add(v.tabSet);
-  }
+  settleRoom(s.group);
+  const leaf = setLeaf(s);
+  if (leaf) leaf.s = s;
+  return placeInActive(s);
 }
 
 /** 탭의 ×와 탭 메뉴로 SSH 세션을 닫는다. 정말 닫을지 먼저 묻는다. */
@@ -981,13 +1154,13 @@ function sshTabFor(s) {
   tab.onmousedown = (ev) => {
     if (ev.button !== 0 || ev.target.closest('button')) return;
     cancelDrag();
-    drag = { s, x: ev.clientX, y: ev.clientY, active: false };
+    drag = { s, tab: true, x: ev.clientX, y: ev.clientY, active: false }; // 탭을 끈다: SSH 방 안에서만 옮긴다.
   };
   tab.onclick = (ev) => {
     if (ev.target.closest('button') || performance.now() - draggedAt < 300) return; // 끌다가 제자리에 놓은 것
     activate(s);
   };
-  tab.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); sshTabMenu(s, ev); };
+  tab.oncontextmenu = (ev) => { ev.preventDefault(); ev.stopPropagation(); sessionMenu(s, ev); };
   s.sshTab = tab;
   s.sshTabText = text;
   return tab;
@@ -1031,25 +1204,76 @@ function setPaused(s, paused) {
 }
 
 // ───────────────────────── 화면 분할 ─────────────────────────
-// 화면 배치는 나무 구조다. 잎은 세션 하나({ s }), 가지는 좌우(row)나 상하(col)로 나눈 둘({ dir, a, b }).
-// `visible`은 이 나무의 잎을 화면 순서대로 늘어놓은 목록이고, layout()이 나무에서 다시 만든다.
+// 화면 배치는 나무 구조다. 잎은 세션 하나({ s })나 SSH 방 하나({ room: 워크스페이스 이름 }), 가지는 좌우(row)나 상하(col)로 나눈 둘
+// ({ dir, a, b }). SSH 방은 그 안에 제 나무(rooms)를 가진다: 큰 배치에서는 한 자리지만 화면에는 방 안의 창이 모두 보인다.
+// `visible`은 이 나무의 잎(방은 방 안의 잎)을 화면 순서대로 늘어놓은 목록이고, layout()이 나무에서 다시 만든다.
 
 let tree = null;
 
-const leavesOf = (node) => (!node ? [] : node.s ? [node.s] : [...leavesOf(node.a), ...leavesOf(node.b)]);
+const leavesOf = (node) => (!node ? [] : node.room ? leavesOf(rooms.get(node.room) || null) : node.s ? [node.s] : [...leavesOf(node.a), ...leavesOf(node.b)]);
 
+/** 그 세션이 보이는 잎. 큰 배치에서 찾으면 SSH 세션은 방 안의 잎이 나온다(방이 화면에 있을 때). */
 function findLeaf(s, node = tree) {
   if (!node) return null;
+  if (node.room) return findLeaf(s, rooms.get(node.room) || null);
   if (node.s) return node.s === s ? node : null;
   return findLeaf(s, node.a) || findLeaf(s, node.b);
 }
 
-/** 그 세션을 뺀 나무. 짝이던 쪽이 빈자리를 다 차지한다. */
+/** 그 세션의 잎을 뺀 나무. 짝이던 쪽이 빈자리를 다 차지한다. 방 안은 들여다보지 않는다(방 안의 창은 takeOut이 뺀다). */
 function without(node, s) {
   if (!node) return null;
+  if (node.room) return node;
   if (node.s) return node.s === s ? null : node;
   const a = without(node.a, s), b = without(node.b, s);
   return a && b ? { dir: node.dir, ratio: node.ratio, a, b } : (a || b);
+}
+
+/** 큰 배치의 한 자리에 놓이는 것: 세션 하나({ s }), SSH 세션이면 그 워크스페이스의 SSH 방({ room }). */
+const slotFor = (s) => (s.ssh ? { room: s.group } : { s });
+const holds = (node, content) => (content.room ? node.room === content.room : !!content.s && node.s === content.s);
+
+/** 큰 배치에서 그 내용이 놓인 마디(화면에 없으면 null). */
+function findSlot(content, node = tree) {
+  if (!node) return null;
+  if (node.room || node.s) return holds(node, content) ? node : null;
+  return findSlot(content, node.a) || findSlot(content, node.b);
+}
+
+/** 그 내용의 자리를 뺀 큰 배치. */
+function withoutSlot(node, content) {
+  if (!node) return null;
+  if (node.room || node.s) return holds(node, content) ? null : node;
+  const a = withoutSlot(node.a, content), b = withoutSlot(node.b, content);
+  return a && b ? { dir: node.dir, ratio: node.ratio, a, b } : (a || b);
+}
+
+/** 나무의 마디 하나를 다른 내용으로 바꾼다(그 마디를 가리키는 가지는 그대로 둔다). */
+function become(node, content) {
+  for (const key of Object.keys(node)) delete node[key];
+  Object.assign(node, content);
+}
+
+/** 마디 하나(세션 잎이나 SSH 방)의 자리를 둘로 나눠 한쪽(side: left | right | top | bottom)에 내용을 놓는다. */
+function splitNode(node, content, side) {
+  if (!node) { tree = tree ? { dir: 'row', a: tree, b: content } : content; return; }
+  const old = { ...node };
+  const first = side === 'left' || side === 'top';
+  become(node, { dir: side === 'left' || side === 'right' ? 'row' : 'col', a: first ? content : old, b: first ? old : content });
+}
+
+/**
+ * s가 놓인 창 자리를 없앤다(세션은 그대로 둔다). SSH 세션이면 방 안에서 그 세션이 보이던 창을 없애고,
+ * 그래서 방이 비면 방도 화면에서 뺀다.
+ */
+function takeOut(s) {
+  if (!s.ssh) { tree = without(tree, s); return; }
+  for (const [group, inner] of rooms) {
+    if (!findLeaf(s, inner)) continue;
+    const left = without(inner, s);
+    if (left) rooms.set(group, left);
+    else { rooms.delete(group); tree = withoutSlot(tree, { room: group }); }
+  }
 }
 
 /** 나눈 둘 중 앞쪽(a)이 차지하는 비율. 경계선을 끌어 바꾼다. 너무 좁아지지 않게 범위를 둔다. */
@@ -1089,30 +1313,24 @@ function startResize(ev, node, box, first, second, bar) {
   document.addEventListener('mouseup', stop);
 }
 
-/** target 세션의 자리를 둘로 나눠 한쪽(side: left | right | top | bottom)에 s를 놓는다. */
-function splitAt(target, s, side) {
-  const leaf = findLeaf(target);
-  if (!leaf) { tree = tree ? { dir: 'row', a: tree, b: { s } } : { s }; return; }
-  const fresh = { s }, old = { s: leaf.s };
-  const first = side === 'left' || side === 'top';
-  delete leaf.s;
-  Object.assign(leaf, { dir: side === 'left' || side === 'right' ? 'row' : 'col', a: first ? fresh : old, b: first ? old : fresh });
-}
-
-/** 놓을 자리를 정하지 않았을 때: 지금 창을 나눠 옆(넓으면 오른쪽, 좁으면 아래)에 놓는다. */
-function placeBeside(s) {
-  const target = visible.includes(active) ? active : visible[visible.length - 1];
-  if (!target) { tree = { s }; return; }
-  const rect = target.pane.getBoundingClientRect();
-  splitAt(target, s, rect.width >= rect.height * 1.2 ? 'right' : 'bottom');
-}
-
-/** 지금 창의 자리에 s를 놓는다(있던 세션은 화면에서만 빠지고 계속 살아 있다). */
+/**
+ * 지금 창의 자리에 s를 놓는다(있던 것은 화면에서만 빠지고 계속 살아 있다). SSH 세션이면 그 워크스페이스의 SSH 방을 놓고
+ * (방이 이미 화면에 있으면 그대로 둔다), 지금 창이 SSH 창이면 그 방 전체의 자리에 놓는다(방은 통째로 화면에서 빠진다).
+ */
 function placeInActive(s) {
+  const content = slotFor(s);
+  if (findSlot(content)) return true; // 이미 화면에 있다.
   // 지금 고른 것이 화면에 없으면 마지막 창 자리에 놓는다(화면은 나누지 않는다: 창 분할은 사용자가 끌어다 놓을 때만).
-  const leaf = findLeaf(active) || findLeaf(visible[visible.length - 1]);
-  if (leaf) leaf.s = s; else if (!tree) tree = { s }; else placeBeside(s);
+  const shownSlot = (x) => (x && sessions.has(x.key) ? findSlot(slotFor(x)) : null);
+  const at = shownSlot(active) || shownSlot(leavesOf(tree).pop());
+  // SSH 방은 창이 여럿일 수 있다: 그 자리에 놓았을 때 화면의 창이 한도를 넘으면 놓지 않는다.
+  if (leavesOf(tree).length - (at ? panesOf(at) : 0) + panesOf(content) > MAX_PANES) return false;
+  if (at) become(at, content); else splitNode(null, content);
+  return true;
 }
+
+/** 큰 배치의 한 자리가 화면에서 차지하는 창 수: 세션은 하나, SSH 방은 방 안의 창 수. */
+const panesOf = (content) => (content.room ? Math.max(1, leavesOf(rooms.get(content.room) || null).length) : 1);
 
 /** 세션 여러 개를 고르게 나눈 배치. */
 function balanced(list, dir = 'row') {
@@ -1127,14 +1345,27 @@ function layout() {
   const focused = document.activeElement;
   // 창을 떼었다 붙이면 그 안의 스크롤이 맨 위로 돌아간다. 보던 자리를 스스로 지키는 항목(코드 보기)에 미리 알린다.
   for (const s of visible) { try { s.view?.freeze?.(); } catch { /* 그 화면의 문제로 배치가 멈추지 않게 */ } }
+  settleRooms(); // SSH는 워크스페이스마다 방 하나, 한 탭 묶음은 한 창에만 보인다.
   visible = leavesOf(tree);
-  untangleTabs(); // 한 탭 묶음은 한 창에만 보인다.
   for (const s of sessions.values()) {
     const shown = visible.includes(s);
     s.pane.classList.toggle('hidden', !shown);
     if (!shown && s.pane.parentElement !== $('parked')) $('parked').append(s.pane);
   }
+  roomBoxes.clear();
   const build = (node) => {
+    if (node.room) {
+      // SSH 방: 방 안의 창들을 상자 하나에 담는다. 큰 배치에서는 이 상자가 한 칸이다.
+      const box = make('div', 'ssh-room');
+      const room = rooms.get(node.room);
+      if (room) {
+        const inner = build(room);
+        inner.style.flex = ''; // 방 안의 맨 위 칸은 상자를 다 쓴다(예전 비율이 남아 있지 않게).
+        box.append(inner);
+      }
+      roomBoxes.set(node.room, box);
+      return box;
+    }
     if (node.s) return node.s.pane;
     const box = make('div', `split split-${node.dir}`);
     const first = build(node.a), second = build(node.b);
@@ -1200,68 +1431,99 @@ function fitVisible() {
 }
 
 /**
- * 사이드바나 SSH 탭 줄에서 끌어온 세션을 창(target) 위에 놓았을 때. 화면을 나누는 것은 이것뿐이다(사용자가 끌어다 놓을 때만).
- * 가장자리에 놓으면 그 창을 좌우·상하로 나눠 그쪽에 열고, 가운데에 놓으면 그 자리에 연다
- * (이미 화면에 있던 세션이면 둘의 자리를 바꾼다). SSH 세션을 같은 워크스페이스의 SSH 창 탭 줄이나 가운데에 놓으면(`tabs`)
- * 그 창의 탭 묶음에 넣는다(`before` 탭 앞에, null이면 맨 끝, 주지 않으면 지금 탭 바로 뒤).
- * 화면에 보이던 SSH 탭을 다른 곳에 놓으면 원래 창 자리에는 옆 탭이 남는다.
+ * 끌어온 것을 창 위에 놓았을 때. 화면을 나누는 것은 이것뿐이다(사용자가 끌어다 놓을 때만).
+ * `d`는 끌던 것({ s, tab?, room? }), `hit`은 놓은 자리(dropZoneAt이 준 { target, zone, before }).
+ *
+ * - SSH 탭(`d.tab`): 그 워크스페이스의 SSH 방 안에서만 옮긴다. 창의 가장자리에 놓으면 방 안에서 그 창을 좌우·상하로 나눠 그쪽에 열고,
+ *   탭 줄이나 가운데에 놓으면(`tabs`) 그 창의 탭 묶음에 넣는다(`before` 탭 앞에, null이면 맨 끝, 주지 않으면 지금 탭 바로 뒤).
+ *   창에 보이던 탭을 옮기면 원래 창에는 옆 탭이 남고, 혼자 쓰던 창이면 그 창이 없어진다.
+ * - 사이드바의 항목(SSH 줄이면 방 통째. `d.room`): 가장자리에 놓으면 그 자리를 나눠 그쪽에 열고, 가운데에 놓으면 그 자리에 연다
+ *   (이미 화면에 있던 것이면 둘의 자리를 바꾼다). SSH 창 위에서는 방 전체가 한 자리다.
  */
-function dropOnPane(s, target, zone, before) {
-  if (zone === 'tabs') {
-    // 다른 창에 보이던 탭이면 그 창 자리를 옆 탭에 넘기고(옆 탭이 없으면 그 창을 닫고) 이 묶음으로 옮긴다.
-    if (s.tabSet !== target.tabSet && visible.includes(s) && !handOffTab(s)) tree = without(tree, s);
-    joinTabs(s, target, before);
-    const leaf = findLeaf(target);
-    if (leaf) leaf.s = s;
-  } else if (zone === 'center') {
-    if (s === target) return;
-    // 화면에 보이던 SSH 탭은 그 자리를 옆 탭에 넘기고 옮긴다(자리를 바꾸면 탭 묶음이 통째로 사라진다).
-    const heir = s.tabSet && visible.includes(s) ? handOffTab(s) : null;
-    // 남은 탭들은 원래 창에 그대로 두고, 옮긴 탭만 묶음에서 뗀다(사이드바에서 끌어온 숨은 탭도, 묶음이 다른 창에 보이면 뗀다).
-    if (heir || (s.tabSet && tabsOf(s).some((x) => x !== s && visible.includes(x)))) leaveTabs(s);
-    const from = heir ? null : findLeaf(s), to = findLeaf(target);
-    if (from) from.s = target;
-    to.s = s;
-  } else {
-    // 새 창이 생기는지: 화면에 없던 것이거나, 화면에 보이던 탭을 묶음에서 떼어 내는 것.
-    const tearing = !!s.tabSet && visible.includes(s) && tabsOf(s).length > 1;
-    if ((!visible.includes(s) || tearing) && visible.length >= MAX_PANES) return setStatus(`한 화면에 볼 수 있는 창은 ${MAX_PANES}개까지입니다.`);
-    if (tearing) {
-      // 탭을 떼어 나눠 연다: 그 창 자리에는 옆 탭이 남는다. 자기 창의 가장자리에 놓았으면 남은 탭의 창을 나눈다.
-      const heir = handOffTab(s);
-      if (target === s) target = heir;
-      leaveTabs(s);
-    } else if (s.tabSet && tabsOf(s).some((x) => x !== s && visible.includes(x))) {
-      leaveTabs(s); // 묶음이 다른 창에 보이고 있으면 이것만 떼어 나눠 연다(묶음이 화면에 없으면 묶음째 연다).
+function dropOnPane(d, hit) {
+  const { s } = d;
+  let { target } = hit;
+  const { zone } = hit;
+  if (hit.blocked) return setStatus('SSH 탭은 같은 워크스페이스의 SSH 창 안에서만 옮깁니다. SSH를 통째로 옮기려면 사이드바의 SSH 줄을 끌어다 놓으세요.');
+  if (hit.full) return setStatus(`한 화면에 볼 수 있는 창은 ${MAX_PANES}개까지입니다.`);
+  if (d.tab) {
+    if (zone === 'tabs') {
+      // 다른 창에 보이던 탭이면 그 창을 옆 탭에 넘기고(옆 탭이 없으면 그 창을 없애고) 이 창의 묶음으로 옮긴다.
+      if (s.tabSet !== target.tabSet && roomLeaf(s) && !handOffTab(s)) takeOut(s);
+      joinTabs(s, target, hit.before);
+      const leaf = roomLeaf(target);
+      if (leaf) leaf.s = s;
+    } else {
+      if (roomLeaf(s) && tabsOf(s).length > 1) {
+        // 보이던 탭을 떼어 나눠 연다: 그 창에는 옆 탭이 남는다. 자기 창의 가장자리에 놓았으면 남은 탭의 창을 나눈다.
+        const heir = handOffTab(s);
+        // 제 창의 가장자리에 놓았는데 그 창을 넘겨받을 탭이 없으면(옆 탭이 모두 쉬는 중) 나눌 것이 없다.
+        if (target === s && !heir) return;
+        if (target === s) target = heir;
+        leaveTabs(s);
+      } else if (!roomLeaf(s)) {
+        leaveTabs(s); // 가려져 있던 탭: 묶음에서 떼어 새 창으로 연다.
+      }
+      if (s === target) return;
+      takeOut(s); // 혼자 쓰던 창을 옮기는 것이면 원래 자리를 없앤다.
+      splitNode(roomLeaf(target), { s }, zone);
     }
-    if (s === target) return;
-    tree = without(tree, s);
-    splitAt(target, s, zone);
+  } else {
+    const content = slotFor(s);
+    const from = findSlot(content), to = findSlot(slotFor(target));
+    if (!to || from === to) return;
+    if (zone === 'center') {
+      const old = { ...to };
+      become(to, content);
+      if (from) become(from, old);
+    } else {
+      tree = withoutSlot(tree, content);
+      splitNode(findSlot(slotFor(target)), content, zone);
+    }
   }
   layout();
   activate(s);
 }
 
 /**
- * 끄는 세션(s)을 그 위치에 놓으면 어떻게 되는지: { target, rect, zone, before }.
- * SSH 세션을 같은 워크스페이스의 SSH 창 탭 줄에 놓으면 그 탭 묶음의 그 자리(`before` 탭 앞)에, 그 창 가운데에 놓으면 지금 탭 옆에 넣는다.
+ * 끄는 것(d: { s, tab?, room? })을 그 위치에 놓으면 어떻게 되는지: { target, rect, zone, before, blocked?, full? }.
+ * SSH 탭은 같은 워크스페이스의 SSH 창 위에서만 놓인다: 탭 줄에 놓으면 그 탭 묶음의 그 자리(`before` 탭 앞)에, 창 가운데에 놓으면
+ * 지금 탭 옆에 넣고, 가장자리에 놓으면 방 안에서 나눠 연다. 다른 곳 위에서는 놓을 수 없다(`blocked`).
+ * 사이드바에서 끌어온 것은 SSH 창 위에서 방 전체를 한 자리로 본다.
  */
-function dropZoneAt(x, y, s) {
-  if (s?.tabSet) {
+function dropZoneAt(x, y, d) {
+  const s = d?.s;
+  if (!s) return null;
+  if (d.tab) {
     const head = document.elementFromPoint(x, y)?.closest?.('.pane.ssh > .pane-head');
-    const target = head && visible.find((v) => v.head === head);
-    if (target?.tabSet && target.group === s.group) {
-      const before = tabsOf(target).find((t) => {
+    const onHead = head && visible.find((v) => v.head === head);
+    if (onHead?.tabSet && onHead.group === s.group) {
+      const before = tabsOf(onHead).find((t) => {
         const r = t.sshTab?.getBoundingClientRect();
         return r && x < r.left + r.width / 2;
       }) ?? null;
-      return { target, rect: head.getBoundingClientRect(), zone: 'tabs', before };
+      return { target: onHead, rect: head.getBoundingClientRect(), zone: 'tabs', before };
     }
+    const hit = paneZoneAt(x, y);
+    if (!hit) return null;
+    if (!hit.target.ssh || hit.target.group !== s.group) return { ...roomZone(hit, x, y), zone: 'center', blocked: true };
+    if (hit.zone === 'center') return hit.target === s ? null : { ...hit, zone: 'tabs', before: undefined };
+    // 가장자리: 창이 하나 늘어나는지(가려져 있던 탭을 꺼내거나, 보이던 탭을 옆 탭들에서 떼어 내거나). 혼자 쓰던 창은 자리만 옮긴다.
+    const adds = !roomLeaf(s) || tabsOf(s).length > 1;
+    if (!adds && hit.target === s) return null; // 혼자 쓰는 제 창의 가장자리: 옮길 곳이 없다.
+    if (adds && visible.length >= MAX_PANES) return { ...hit, full: true };
+    return hit;
   }
-  const hit = paneZoneAt(x, y);
-  if (hit?.zone === 'center' && s?.tabSet && hit.target.tabSet && hit.target.group === s.group && hit.target !== s) return { ...hit, zone: 'tabs', before: undefined };
-  // 가장자리에 놓아 창이 하나 늘어나는데 이미 한도면, 나눌 수 없다고 미리 보여 준다.
-  if (hit && hit.zone !== 'center' && s && visible.length >= MAX_PANES && (!visible.includes(s) || (s.tabSet && tabsOf(s).length > 1))) return { ...hit, full: true };
+  let hit = paneZoneAt(x, y);
+  if (!hit) return null;
+  if (hit.target.ssh) {
+    if (d.room && hit.target.group === d.room) return null; // 제 방 위에 놓았다.
+    hit = roomZone(hit, x, y);
+  }
+  // 놓으면 창이 늘어나는데 한도를 넘으면, 놓을 수 없다고 미리 보여 준다(가운데에 놓으면 그 자리에 있던 것은 화면에서 빠진다).
+  const adds = (d.room ? roomShown(d.room) : visible.includes(s)) ? 0 : panesOf(slotFor(s));
+  const frees = hit.zone === 'center' ? panesOf(slotFor(hit.target)) : 0;
+  if (adds && visible.length + adds - frees > MAX_PANES) return { ...hit, full: true };
   return hit;
 }
 
@@ -1269,11 +1531,20 @@ function dropZoneAt(x, y, s) {
 function paneZoneAt(x, y) {
   const el = document.elementFromPoint(x, y)?.closest?.('.pane');
   const target = el && visible.find((v) => v.pane === el);
-  if (!target) return null;
-  const rect = el.getBoundingClientRect();
+  return target ? zoneIn(target, el.getBoundingClientRect(), x, y) : null;
+}
+
+/** 네모(rect) 안에서 그 위치가 어느 구역인지: 가장자리에 가까우면 그쪽, 아니면 가운데. */
+function zoneIn(target, rect, x, y) {
   const fx = (x - rect.left) / rect.width, fy = (y - rect.top) / rect.height;
   const [nearest, distance] = [['left', fx], ['right', 1 - fx], ['top', fy], ['bottom', 1 - fy]].sort((p, q) => p[1] - q[1])[0];
   return { target, rect, zone: distance < 0.3 ? nearest : 'center' };
+}
+
+/** SSH 창 위의 자리를 그 창이 든 SSH 방 전체로 넓힌다(방 밖의 것에게는 방 전체가 한 자리다). */
+function roomZone(hit, x, y) {
+  const box = hit.target.ssh ? roomBoxes.get(hit.target.group) : null;
+  return box?.isConnected ? zoneIn(hit.target, box.getBoundingClientRect(), x, y) : hit;
 }
 
 const DROP_TEXT = { left: '왼쪽에 나눠 열기', right: '오른쪽에 나눠 열기', top: '위에 나눠 열기', bottom: '아래에 나눠 열기', center: '이 자리에 열기', tabs: '이 창의 탭으로 넣기' };
@@ -1293,15 +1564,21 @@ function showDropHint(hit) {
     tabs: [r.left, r.top, r.width, r.height],
   }[zone];
   Object.assign(hint.style, { left: `${box[0]}px`, top: `${box[1]}px`, width: `${box[2]}px`, height: `${box[3]}px` });
-  hint.textContent = hit.full ? `화면에 창이 ${MAX_PANES}개라 더 나눌 수 없습니다` : DROP_TEXT[zone];
+  hint.classList.toggle('blocked', !!(hit.blocked || hit.full));
+  hint.textContent = hit.blocked ? 'SSH 탭은 SSH 창 안에서만 옮깁니다'
+    : hit.full ? `한 화면에 볼 수 있는 창은 ${MAX_PANES}개까지입니다` : DROP_TEXT[zone];
 }
 
 /** 항목을 고른다(화면에 없으면 지금 창 자리에 놓는다). `keepFocus`이면 초점을 옮기지 않는다(사이드바에서 방향키로 오갈 때). */
 function activate(s, { keepFocus = false } = {}) {
   if (!s || !sessions.has(s.key)) return; // 기다리는 사이 닫힌 항목(넘기기, 워크스페이스 틀 펼치기)은 화면에 올리지 않는다.
   if (!visible.includes(s)) {
-    // SSH 탭은 그 묶음이 보이는 창 자리에서 탭만 바꾼다(묶음이 화면에 없으면 지금 창 자리에).
-    if (s.tabSet) placeTab(s); else placeInActive(s);
+    // SSH 탭은 SSH 방 안에서 그 묶음의 창에 보인다(방이 화면에 없으면 방이 지금 창 자리에 놓인다).
+    if (!(s.tabSet ? placeTab(s) : placeInActive(s))) {
+      // SSH 방의 창이 여럿이라 그 자리에 놓으면 화면의 창이 한도를 넘는다: 놓지 않고 알린다.
+      setStatus(`SSH 창 ${panesOf(slotFor(s))}개를 여기에 열면 화면의 창이 ${MAX_PANES}개를 넘습니다. 다른 창을 숨기거나, 사이드바의 SSH 줄을 오른쪽 클릭 → "SSH만 보기"로 여세요.`);
+      return;
+    }
     layout();
   }
   // 찾기 줄이 열려 있었으면 보던 세션의 찾기 강조를 지운다(아래 closeSearch는 새로 고른 세션의 것을 지운다).
@@ -1328,6 +1605,12 @@ function activate(s, { keepFocus = false } = {}) {
 function toggleShown(s) {
   if (!visible.includes(s)) {
     activate(s);
+  } else if (s.ssh) {
+    // SSH 창: 방에 다른 창이 있으면 이 창만 접는다(이 창의 탭들은 옆 창의 탭 줄로 간다). 방에 하나뿐인 창이면 SSH 방을 화면에서 뺀다.
+    const next = foldPane(s);
+    if (!next) return toggleRoom(s.group);
+    layout();
+    if (active === s || !visible.includes(active)) activate(next); else { render(); saveState(); }
   } else {
     // 화면에서만 숨긴다. 마지막 창도 숨길 수 있고, 그때는 화면이 비고 세션은 사이드바에 남는다.
     tree = without(tree, s);
@@ -1381,18 +1664,20 @@ async function closeSession(s, { forget = false } = {}) {
   }
   s.pane.remove();
   s.shots.forEach((shot) => URL.revokeObjectURL(shot.url));
-  // 화면에 보이던 SSH 탭이면 그 창 자리에 옆 탭을 대신 보인다(브라우저의 탭처럼). 그다음 탭 묶음에서 뺀다.
+  // 창에 보이던 SSH 탭이면 그 창에 옆 탭을 대신 보인다(브라우저의 탭처럼). 그다음 탭 묶음에서 뺀다.
+  // 넘겨받을 탭이 없으면(옆 탭이 없거나 모두 쉬는 중) 그 창이 없어지고, 방에 남은 창이 없으면 SSH 방도 화면에서 빠진다
+  // (쉬는 탭은 사이드바의 SSH 줄에 남아 있고, 누르면 다시 접속한다).
   const heir = s.tabSet ? handOffTab(s) : null;
   if (s.tabSet) s.tabSet.list = s.tabSet.list.filter((x) => x !== s);
   sessions.delete(s.key);
-  tree = without(tree, s);
+  takeOut(s);
   visible = leavesOf(tree);
   if (active === s) {
     active = null;
     // 화면에 남은 것이 없으면 다음에 볼 항목을 고른다. 쉬는 세션은 고르지 않는다(고르면 재개된다. 재개는 사용자가
-    // 누른 세션만 한다). 같은 워크스페이스의 것을 먼저 고른다. 닫은 탭의 자리를 받은 옆 탭이 있으면 그것을 고른다.
+    // 누른 세션만 한다). 같은 워크스페이스의 것을 먼저 고른다. 닫은 탭의 자리를 받은 옆 탭이 화면에 있으면 그것을 고른다.
     const awake = [...sessions.values()].filter((other) => !other.dormant);
-    const next = heir || visible[0] || awake.filter((other) => other.group === s.group).pop() || awake.pop();
+    const next = (heir && visible.includes(heir) ? heir : null) || visible[0] || awake.filter((other) => other.group === s.group).pop() || awake.pop();
     if (next) activate(next);
   }
   layout();
@@ -1416,11 +1701,13 @@ async function restartSession(s) {
   if (s.mark) { fresh.mark = s.mark; s.mark = ''; }
   // SSH 탭 묶음에서도 원래 자리(바로 뒤)를 이어받는다. 옛 세션은 아래에서 닫으며 묶음에서 빠진다.
   if (s.tabSet && fresh.tabSet) joinTabs(fresh, s);
-  const leaf = findLeaf(s);
+  // 옛 세션이 보이던 창을 새 세션이 받는다(SSH는 방이 화면에 없어도 방 안의 그 창을 받는다).
+  const shown = visible.includes(s);
+  const leaf = s.ssh ? roomLeaf(s) : findLeaf(s);
   if (leaf) leaf.s = fresh;
   const wasActive = active === s;
   await closeSession(s, { forget: true });
-  if (wasActive || leaf) activate(fresh); else render();
+  if (wasActive || shown) activate(fresh); else render();
 }
 
 // ── 북마크: 항목에 숫자(0~9)를 붙여 두고 Ctrl+숫자로 바로 간다 ──
@@ -1471,12 +1758,13 @@ function jumpToMark(digit) {
   collapsed.delete(groupKey(s)); // 접어 둔 묶음 안에 있으면 펴서 사이드바에서도 보이게 한다.
   localStorage.setItem('cypher.collapsed', JSON.stringify([...collapsed]));
   activate(s);
-  $list.querySelector(`li[data-key="${s.key}"]`)?.scrollIntoView({ block: 'nearest' });
+  rowOf(s)?.scrollIntoView({ block: 'nearest' });
   return true;
 }
 
-/** 사이드바에 보이는 차례대로의 항목(접어 둔 묶음 안의 것도 포함). */
-const inSidebarOrder = () => groupsInOrder().flatMap((group) => group.list);
+/** 사이드바에 보이는 차례대로의 항목(접어 둔 묶음 안의 것도 포함). SSH 줄에서는 그 방의 탭을 창과 탭 줄에 놓인 차례로 잇는다. */
+const inSidebarOrder = () => groupsInOrder().flatMap((group) => sidebarRows(group.list)
+  .flatMap((row) => (row.list ? roomTabs(row.room).filter((s) => row.list.includes(s)) : [row.s])));
 
 function cycle(step) {
   // 쉬는 세션은 건너뛴다(지나가기만 해도 재개되지 않게). 재개하려면 사이드바에서 누른다.
@@ -1548,7 +1836,7 @@ function paintSshButtons(s, targets = castTargets()) {
       ? `동시 입력 끄기 (지금 ${count}개 세션에 함께 입력됩니다)`
       : why || (loggingIn(s)
         ? '로그인을 마친 뒤에 쓸 수 있습니다'
-        : 'SSH 동시 입력 켜기: 여기에 치는 글쇠가 나란히 보이는 다른 SSH 창에도 함께 들어갑니다\n나란히 볼 SSH 창은 탭이나 사이드바의 세션을 화면 가장자리로 끌어다 놓아 띄웁니다');
+        : 'SSH 동시 입력 켜기: 여기에 치는 글쇠가 나란히 보이는 다른 SSH 창에도 함께 들어갑니다\n나란히 볼 SSH 창은 탭을 SSH 창의 가장자리로 끌어다 놓아 띄웁니다');
   }
 }
 
@@ -1628,22 +1916,16 @@ function paintSshTab(s) {
     `계정: ${account}`,
     `서버: ${s.ssh.target}${s.ssh.port ? ` · 포트 ${s.ssh.port}` : ''}`,
     ...(state ? [`상태: ${state}`] : []),
-    '누르기: 이 탭 보기 · 끌기: 화면 가장자리에 놓으면 나눠 보기, 다른 SSH 창의 탭 줄에 놓으면 그 창으로 옮기기',
-    '오른쪽 클릭: 세션 복제·닫기 · ×: 닫기',
+    '누르기: 이 탭 보기 · 끌기: SSH 창의 가장자리에 놓으면 나눠 보기, 다른 SSH 창의 탭 줄에 놓으면 그 창으로 옮기기 (SSH 창 안에서만)',
+    '오른쪽 클릭: 별칭·색·세션 복제·닫기 · ×: 닫기',
   ].join('\n');
 }
 
-/** SSH 탭의 오른쪽 클릭 메뉴: 세션 복제(바로 옆 탭으로), 세션 닫기(묻고 닫는다). */
-function sshTabMenu(s, ev) {
+/** SSH 탭 메뉴의 맨 위에 적는 글: 계정@서버와, 복제가 다시 인증하는지. */
+function sshTabCaption(s) {
   // 내장 SSH로 로그인을 마친 세션이면 그 연결에 채널만 더 연다. 아니면(끝남·쉬는 중·로그인 중·ssh.exe) 새로 접속한다.
   const reuse = s.id != null && !s.exited && !s.dormant && s.sshReady === true && s.sshBuiltin;
-  const how = reuse ? '복제는 같은 연결을 써서 다시 인증하지 않습니다' : '복제는 새로 접속해 다시 인증합니다';
-  showMenu(ev, [
-    { caption: `${s.sshUser ? `${s.sshUser}@` : ''}${sshServer(s)} · ${how}` },
-    { label: '세션 복제 (바로 옆 탭으로)', action: () => cloneSsh(s) },
-    { label: '세션 닫기…', action: () => askCloseTab(s) },
-    { caption: '나란히 보려면 탭을 화면 가장자리로 끌어다 놓으세요' },
-  ]);
+  return `${s.sshUser ? `${s.sshUser}@` : ''}${sshServer(s)} · ${reuse ? '복제는 같은 연결을 써서 다시 인증하지 않습니다' : '복제는 새로 접속해 다시 인증합니다'}`;
 }
 
 /**
@@ -1658,7 +1940,7 @@ function toggleSshCast(s) {
     if (visible.some((v) => v !== s && v.ssh && loggingIn(v) && !v.exited)) {
       return setStatus('다른 SSH 세션이 아직 로그인 중입니다. 로그인을 마친 뒤 다시 누르세요(로그인 중인 세션은 동시 입력에 넣지 않습니다).');
     }
-    return setStatus('동시 입력은 나란히 보이는 SSH 창끼리 씁니다. SSH 탭이나 사이드바의 SSH 세션을 화면 가장자리로 끌어다 놓아 나란히 띄운 뒤 누르세요.');
+    return setStatus('동시 입력은 나란히 보이는 SSH 창끼리 씁니다. SSH 탭을 SSH 창의 가장자리로 끌어다 놓아 나란히 띄운 뒤 누르세요.');
   }
   setBroadcast(SSH);
 }
@@ -2237,6 +2519,143 @@ function sessionItem(s) {
   return li;
 }
 
+/** SSH 탭의 짧은 이름: 별칭이나 서버에 붙인 이름, 없으면 사용자@서버. */
+const tabName = (s) => [s.name, s.ssh.name].find((text) => text && text !== sshServer(s)) || `${s.sshUser ? `${s.sshUser}@` : ''}${sshServer(s)}`;
+
+/**
+ * 사이드바의 SSH 줄. SSH는 워크스페이스마다 하나라서, 그 워크스페이스의 SSH 세션(탭)이 몇 개든 줄은 하나다.
+ * 누르면 SSH 방이 지금 창 자리에 열리고, 서버를 더 열면 이 줄이 늘지 않고 방 안의 탭이 는다.
+ */
+function sshItem(group, given) {
+  const list = roomTabs(group).filter((s) => given.includes(s)); // 창과 탭 줄에 놓인 순서대로 적는다.
+  const shown = roomShown(group);
+  const here = !!active?.ssh && active.group === group && sessions.has(active.key);
+  const alive = list.filter((s) => !s.exited && !s.dormant);
+  const li = make('li', [
+    'ssh-row', here && 'active', shown && 'shown',
+    list.every((s) => s.exited) ? 'exited' : !alive.length ? 'dormant' : list.some((s) => s.busy) ? 'busy' : list.some((s) => s.attention) && 'attention',
+  ].filter(Boolean).join(' '));
+  li.title = 'SSH는 워크스페이스마다 하나입니다(서버를 더 열면 이 안의 탭이 됩니다)\n누르기: SSH 창 열기 · 끌기: 화면 가장자리에 놓으면 나눠 보기·순서 바꾸기·워크스페이스 옮기기 · 오른쪽 클릭: 메뉴\n탭과 창은 SSH 창 안에서 끌어 옮깁니다(창 가장자리에 놓으면 나눠 보기, 다른 창의 탭 줄에 놓으면 그 창으로)';
+  li.dataset.key = given[0].key; // 순서를 옮길 때의 기준: 이 워크스페이스의 첫 SSH 세션
+  li.dataset.room = group;
+  li.onclick = (ev) => {
+    if (ev.target.closest('button')) return;
+    // Ctrl+클릭: 화면에 보이는 것은 화면에서 뺀다.
+    if (ev.ctrlKey && roomShown(group)) toggleRoom(group); else openRoom(group);
+  };
+  li.onmousedown = (ev) => {
+    if (ev.button !== 0 || ev.ctrlKey || ev.target.closest('button')) return;
+    const s = roomFront(group);
+    if (!s) return;
+    cancelDrag();
+    drag = { s, room: group, x: ev.clientX, y: ev.clientY, active: false }; // SSH 줄을 끈다: 방을 통째로 옮긴다.
+  };
+  li.oncontextmenu = (ev) => { ev.preventDefault(); roomMenu(group, ev); };
+
+  const name = make('span', 'name');
+  for (const s of list) if (s.mark) name.append(markBadge(s.mark));
+  name.append(make('span', 'alias', 'SSH'), make('span', 'origin', `탭 ${list.length}개`));
+  name.title = `SSH — 워크스페이스 "${group}"\n${list.map((s) => `· ${tabName(s)}${s.exited ? ' (끝남)' : s.dormant ? ' (쉬는 중)' : loggingIn(s) ? ' (로그인 중)' : ''}`).join('\n')}`;
+  const add = make('button', 'close', '+');
+  add.title = '서버에 접속… (이 SSH의 새 탭으로)';
+  add.onclick = (ev) => { ev.stopPropagation(); addSshTab(group); };
+  const eye = make('button', `eye${shown ? ' on' : ''}`, shown ? '◉' : '○');
+  eye.title = shown ? 'SSH를 화면에서 숨기기 (세션은 계속 실행)' : 'SSH를 화면에 보이기 (지금 창 자리에)';
+  eye.onclick = (ev) => { ev.stopPropagation(); toggleRoom(group); };
+  const close = make('button', 'close', '×');
+  close.title = 'SSH 세션 모두 닫기 (닫기 전에 묻습니다)';
+  close.onclick = (ev) => { ev.stopPropagation(); closeRoom(group); };
+  const buttons = make('span', 'row-buttons');
+  buttons.append(add, eye, close);
+
+  const dot = make('span', 'dot kind', '⇌');
+  dot.title = 'SSH (워크스페이스마다 하나)';
+  const sub = make('span', 'sub');
+  if (shown) {
+    const chip = make('b', 'on-stage', here ? '보는 중' : '화면');
+    chip.title = here ? '지금 화면에서 보고 있는 SSH (입력이 여기로 갑니다)' : '화면에 나란히 보이는 SSH';
+    sub.append(chip, ' ');
+  }
+  const logging = list.filter((s) => s.logPath);
+  if (logging.length) {
+    const rec = make('b', 'recording', '● 기록');
+    rec.title = `출력을 파일로 기록하는 중:\n${logging.map((s) => `${tabName(s)} → ${s.logPath}`).join('\n')}`;
+    sub.append(rec, ' ');
+  }
+  const names = list.map(tabName).join(' · ');
+  sub.append(list.every((s) => s.exited) ? `종료됨 · ${names}` : !alive.length ? `쉬는 중 · 누르면 다시 접속 · ${names}` : names);
+  li.append(dot, name, buttons, sub);
+  return li;
+}
+
+/** 사이드바에 놓을 줄들: 항목마다 한 줄, SSH 세션은 몇 개든 그 워크스페이스의 SSH 줄 하나(첫 SSH 세션의 자리에 놓인다). */
+function sidebarRows(list) {
+  const rows = [];
+  const done = new Set();
+  for (const s of list) {
+    if (!s.ssh) rows.push({ s });
+    else if (!done.has(s.group)) {
+      done.add(s.group);
+      rows.push({ room: s.group, list: list.filter((x) => x.ssh && x.group === s.group) });
+    }
+  }
+  return rows;
+}
+
+/** 그 항목이 사이드바에서 보이는 줄(SSH 세션이면 그 워크스페이스의 SSH 줄). */
+const rowOf = (s) => (s.ssh
+  ? [...$list.querySelectorAll('li[data-room]')].find((li) => li.dataset.room === s.group)
+  : $list.querySelector(`li[data-key="${s.key}"]`)) || null;
+
+/** 사이드바의 줄이 가리키는 항목. SSH 줄이면 그 방에서 지금 보고 있는(또는 마지막으로 쓴) 탭. */
+function rowItem(li) {
+  const group = li?.dataset?.room;
+  if (group) return active?.ssh && active.group === group && sessions.has(active.key) ? active : roomFront(group);
+  return sessions.get(Number(li?.dataset?.key));
+}
+
+/** 사이드바 SSH 줄의 [+]와 메뉴: 접속 창을 띄워 그 워크스페이스의 SSH에 탭을 더한다. */
+function addSshTab(group) {
+  const near = roomFront(group);
+  showSsh({ group, ...(near ? { cwd: near.startCwd } : {}), show: 'replace' });
+}
+
+/**
+ * 여럿을 한꺼번에 닫을 때의 순서: 쉬는 세션부터 닫는다. 보이던 탭을 먼저 닫으면 그 창을 옆의 쉬는 탭이 받아 화면에 올라가고,
+ * 닫으려던 세션이 그사이 깨어나 서버에 접속한다.
+ */
+const restingFirst = (list) => [...list.filter((s) => s.dormant), ...list.filter((s) => !s.dormant)];
+
+/** 그 워크스페이스의 SSH 세션을 모두 닫는다(정말 닫을지 먼저 묻는다). */
+async function closeRoom(group) {
+  const list = sshOf(group);
+  if (!list.length) return;
+  const live = list.filter((s) => s.id != null && !s.exited && !s.dormant).length;
+  if (!confirm(`워크스페이스 "${group}"의 SSH 세션 ${list.length}개를 모두 닫을까요?${live ? `\n접속 중인 세션 ${live}개의 접속을 끊습니다.` : ''}`)) return;
+  for (const s of restingFirst(list)) await closeSession(s);
+}
+
+/** 사이드바 SSH 줄의 오른쪽 클릭 메뉴: 서버 더 열기, 탭으로 가기, 화면에 보이기·숨기기, 모두 닫기. */
+function roomMenu(group, ev) {
+  const list = roomTabs(group);
+  const shown = roomShown(group);
+  const panes = leavesOf(rooms.get(group) || null).length;
+  const resting = list.filter((s) => s.dormant);
+  showMenu(ev, [
+    { caption: `SSH · 워크스페이스 "${group}" · 탭 ${list.length}개${panes > 1 ? ` · 창 ${panes}개` : ''} (SSH는 워크스페이스마다 하나입니다)` },
+    { label: '서버에 접속… (새 탭으로)', action: () => addSshTab(group) },
+    ...list.map((s) => ({
+      label: `탭으로 가기: ${tabName(s)}${s.exited ? ' (끝남)' : s.dormant ? ' (쉬는 중 · 다시 접속)' : loggingIn(s) ? ' (로그인 중)' : ''}`,
+      action: () => activate(s),
+    })),
+    ...(resting.length > 1 ? [{ label: `쉬는 세션 ${resting.length}개 모두 다시 접속`, action: () => { for (const s of resting) wake(s, true); render(); } }] : []),
+    ...(!shown || visible.length > panes ? [{ label: 'SSH만 보기 (나머지는 화면에서 숨기기)', action: () => showRoomOnly(group) }] : []),
+    ...(shown ? [{ label: '화면에서 숨기기', action: () => toggleRoom(group) }] : []),
+    { caption: '탭 하나를 다루려면 SSH 창의 탭을 오른쪽 클릭하세요 (별칭·색·복제·닫기) · 탭을 끌면 SSH 창 안에서 옮기거나 나눠 봅니다' },
+    { label: `SSH 세션 모두 닫기… (${list.length}개)`, action: () => closeRoom(group) },
+  ]);
+}
+
 /** 서브에이전트의 종류별 개수: "Explore 2, general-purpose 1". 종류를 모르면 빈 글. */
 function agentKinds(s) {
   const counts = new Map();
@@ -2376,11 +2795,37 @@ async function newGroup() {
 function moveToGroup(list, name) {
   if (!name) return setStatus('항목은 워크스페이스 안에만 둘 수 있습니다. 옮길 워크스페이스의 이름을 적어 주세요.');
   ensureGroup(name);
-  // 탭 묶음은 한 워크스페이스 안에서만 묶는다. 묶음째 옮기면(워크스페이스 이름 바꾸기) 그대로 두고, 일부만 옮기면 그것을 뗀다.
+  // SSH 방과 탭 묶음은 한 워크스페이스 안의 것이다. 한 워크스페이스의 SSH를 통째로, SSH가 없는 워크스페이스로 옮기면
+  // (워크스페이스 이름 바꾸기, SSH 줄을 끌어 옮기기) 방 안의 배치를 그대로 가져간다. 그 밖에는 옮기는 탭을 방에서 떼고,
+  // 옮겨 간 워크스페이스의 SSH 방에 탭으로 넣는다(SSH는 워크스페이스마다 하나다).
   const moving = new Set(list);
-  const leaving = list.filter((s) => s.group !== name && s.tabSet && !tabsOf(s).every((x) => moving.has(x)));
-  for (const s of leaving) leaveTabsShown(s);
+  let taken = sshOf(name).length > 0;
+  for (const from of new Set(list.filter((s) => s.ssh && s.group !== name).map((s) => s.group))) {
+    const all = sshOf(from);
+    if (!taken && all.every((s) => moving.has(s))) {
+      const inner = rooms.get(from);
+      rooms.delete(from);
+      if (inner) rooms.set(name, inner);
+      const slot = findSlot({ room: from });
+      if (slot) slot.room = name;
+      taken = true;
+    } else {
+      // 통째로 옮기는데 옮겨 갈 워크스페이스에 이미 SSH가 있으면 탭으로 합친다. 보고 있던 SSH의 자리에는 합쳐진 SSH가 열린다.
+      const slot = all.every((s) => moving.has(s)) && !roomShown(name) ? findSlot({ room: from }) : null;
+      if (slot) slot.room = name;
+      for (const s of all) if (moving.has(s)) leaveRoom(s);
+    }
+  }
+  const changed = list.some((s) => s.ssh && s.group !== name);
   for (const s of list) s.group = name;
+  if (changed) {
+    layout(); // 방을 옮긴 뒤의 세션에 맞춘다.
+    // 보고 있던 탭이 옮겨 가며 다른 탭에 가려졌으면: 옮겨 간 SSH가 화면에 있을 때는 그 탭을 다시 보이고, 없으면 화면에 남은 것을 고른다.
+    if (active && sessions.has(active.key) && !visible.includes(active)) {
+      if (active.ssh && moving.has(active) && roomShown(name)) activate(active);
+      else if (visible[0]) activate(visible[0]);
+    }
+  }
   render();
   return saveState();
 }
@@ -2425,11 +2870,25 @@ async function deleteGroup(group) {
   const members = membersOf(group.name);
   if (members.length) {
     const running = members.filter((s) => isTerm(s) && !s.dormant && !s.exited).length;
-    if (!confirm(`워크스페이스 "${group.name}"에 세션·항목이 ${members.length}개 있습니다${running ? ` (실행 중인 세션 ${running}개)` : ''}.\n모두 닫고 워크스페이스를 삭제할까요?`)) return false;
-    for (const s of members) await closeSession(s);
-    // 닫는 사이 취소한 항목이나 새로 생긴 항목이 있으면 워크스페이스를 남긴다.
+    if (!confirm(`워크스페이스 "${group.name}"에 세션·항목이 ${members.length}개 있습니다${running ? ` (실행 중인 세션 ${running}개)` : ''}.\n모두 닫고 워크스페이스를 삭제할까요?\n\n삭제한 워크스페이스의 기록(항목 목록과 메모·할 일의 글)은 3년 동안 보관합니다.`)) return false;
+  }
+  // 닫기 전에 기록을 적어 둔다(닫은 뒤에는 화면이 글과 상태를 내놓지 못한다). 처음 읽기가 끝난 뒤의 내용으로 만든다.
+  await Promise.all(members.map((s) => Promise.resolve(s.view?.ready).catch(() => {})));
+  // 항목이 하나도 없는 워크스페이스는 남길 것이 없어 기록하지 않는다(잘못 만들었다 지운 워크스페이스가 3년 동안 목록에 쌓이지 않게).
+  let kept = '';
+  if (membersOf(group.name).length) {
+    try {
+      kept = await keepHistory(historyRecord(group.name, membersOf(group.name)));
+    } catch (err) {
+      if (!confirm(`워크스페이스 "${group.name}"의 기록을 보관하지 못했습니다:\n${err}\n\n기록 없이 삭제할까요?`)) return false;
+    }
+  }
+  if (members.length) {
+    for (const s of restingFirst(members)) await closeSession(s);
+    // 닫는 사이 취소한 항목이나 새로 생긴 항목이 있으면 워크스페이스를 남긴다(삭제하지 않았으니 기록도 남기지 않는다).
     const left = membersOf(group.name).length;
     if (left) {
+      if (kept) dropHistory(kept);
       notice('워크스페이스를 지우지 않았습니다', `워크스페이스 "${group.name}"에 닫지 않은 항목이 ${left}개 남아 있습니다. 그 항목을 닫거나 다른 워크스페이스로 옮긴 뒤에 다시 지우세요.`);
       return false;
     }
@@ -2438,11 +2897,72 @@ async function deleteGroup(group) {
   saveGroups();
   delete groupFolders[group.name];
   localStorage.setItem('cypher.groupFolders', JSON.stringify(groupFolders));
+  rooms.delete(group.name);
   render();
+  const where = kept ? ' · 기록은 3년 동안 보관: 도구 → 삭제한 워크스페이스 기록' : '';
   setStatus(members.length
-    ? `워크스페이스 "${group.name}"을(를) 지웠습니다 (세션·항목 ${members.length}개를 닫음 · 다시 열기: Ctrl+Shift+R).`
-    : `워크스페이스 "${group.name}"을(를) 지웠습니다.`);
+    ? `워크스페이스 "${group.name}"을(를) 지웠습니다 (세션·항목 ${members.length}개를 닫음 · 다시 열기: Ctrl+Shift+R${where}).`
+    : `워크스페이스 "${group.name}"을(를) 지웠습니다${where ? ` (${where.slice(3)})` : ''}.`);
   return true;
+}
+
+// ── 삭제한 워크스페이스의 기록(history.js): 삭제할 때의 항목과, 글로 보관할 수 있는 내용을 3년 동안 둔다 ──
+
+/**
+ * 기록에 담을 항목 하나. 틀에 담는 모양(templateItem)에 이름(label)·종류 이름(kindLabel)을 더한 것이라, 틀을 펼치는 길로 되살린다.
+ * - 메모·할 일·마인드맵·ERD는 글째, 명령 항목은 명령째 담는다(`saved.text`, `saved.command`).
+ * - 세션은 프로필·폴더와 이어 갈 대화 번호(SSH는 서버 주소·포트·이름)만 담는다.
+ * - 사이트·HTTP·문서·표·코드·헥사는 가리키던 주소·경로만 담고, 이미지처럼 담을 것이 없는 산출물은 이름만 남긴다(내용은 보관하지 않는다).
+ */
+function historyItem(s) {
+  const base = {
+    kind: s.kind, label: label(s), kindLabel: isTerm(s) ? s.profile.label : KINDS[s.kind].label,
+    cwd: s.project || s.startCwd, name: s.name || undefined, color: s.color || undefined,
+  };
+  if (isTerm(s)) {
+    return {
+      ...base, profile: s.profile.id, resume: resumeOf(s) || undefined,
+      ...(s.ssh ? { ssh: { target: s.ssh.target, name: s.ssh.name, port: s.ssh.port } } : {}),
+    };
+  }
+  try {
+    if (s.kind === 'memo') {
+      // 파일에 연결된 메모도 지금의 글을 담는다(그 파일이 3년 안에 없어질 수 있다). 연결돼 있던 파일은 경로만 적어 둔다.
+      const state = s.view.state();
+      return { ...base, saved: { text: s.view.text(), encoding: state.encoding, eol: state.eol }, file: state.path || undefined };
+    }
+    const item = templateItem(s);
+    if (item?.saved) return { ...base, saved: item.saved };
+  } catch { /* 상태를 내놓지 못하는 항목은 이름만 남긴다 */ }
+  return base;
+}
+
+/** 그 워크스페이스의 기록: { name, folder, summary("Claude 2 · 메모 1"), items }. 삭제한 때와 보관 기한은 앱이 적는다. */
+function historyRecord(name, members) {
+  const counts = new Map();
+  const items = members.filter((s) => sessions.has(s.key)).map((s) => {
+    const item = historyItem(s);
+    counts.set(item.kindLabel, (counts.get(item.kindLabel) || 0) + 1);
+    return item;
+  });
+  return { name, folder: groupFolderOf(name), summary: [...counts].map(([kind, count]) => `${kind} ${count}`).join(' · '), items };
+}
+
+/**
+ * 기록을 워크스페이스 `name`으로 되살린다(있는 워크스페이스면 거기에 더한다). 틀을 펼치는 길을 쓰되, 세션은 띄우지 않고
+ * 쉬는 세션으로 놓는다(누르면 재개하고, Claude 세션은 그때 하던 대화를 잇는다). 새로 만든 워크스페이스면 그때의 폴더가 아직 있을 때 그 폴더를 정한다.
+ */
+async function restoreHistory(record, name) {
+  const items = (Array.isArray(record?.items) ? record.items : []).filter((item) => item && typeof item === 'object');
+  // 내용을 보관하지 않은 것(이미지, 파일을 고르지 않았던 문서)은 되살릴 것이 없다.
+  const usable = items.filter((item) => !item.kind || item.kind === 'term' || (item.saved && typeof item.saved === 'object'));
+  const fresh = !groupList.includes(name);
+  const own = typeof record?.folder === 'string' ? record.folder : '';
+  createGroup(name);
+  if (fresh && own && !/^[\\/]{2}/.test(own) && await groupFolderExists(own) && groupList.includes(name)) setGroupFolder(name, own);
+  const result = await openTemplate({ items: usable }, { group: name, resting: true });
+  if (items.length > usable.length) result.skipped.push(`내용을 보관하지 않은 항목 ${items.length - usable.length}개(이미지 등)는 되살리지 않았습니다`);
+  return result;
 }
 
 /** 그 묶음에 새 항목을 넣을 때 쓸 워크스페이스 이름과 폴더. */
@@ -2466,8 +2986,12 @@ function addItems(group) {
   const forSession = group.logical && groupFolderOf(group.name) ? { group: opts.group } : opts;
   return [
     { caption: `폴더: ${opts.cwd}${group.logical && groupFolderOf(group.name) ? ' (워크스페이스 폴더)' : ''}` },
-    // SSH 세션은 접속할 곳을 고르는 창이 먼저 뜬다.
-    ...config.profiles.map((p) => ({ label: isSshProfile(p) ? `+ ${p.label} 세션… (서버에 접속)` : `+ ${p.label} 세션`, action: () => newSession(p.id, forSession) })),
+    // SSH 세션은 접속할 곳을 고르는 창이 먼저 뜬다. SSH는 워크스페이스마다 하나라서, 이미 있으면 그 SSH의 탭으로 더한다.
+    ...config.profiles.map((p) => ({
+      label: !isSshProfile(p) ? `+ ${p.label} 세션`
+        : group.logical && sshOf(group.name).length ? `+ ${p.label}: 서버에 더 접속… (이 워크스페이스 SSH의 새 탭으로)` : `+ ${p.label} 세션… (서버에 접속 · 워크스페이스마다 하나)`,
+      action: () => newSession(p.id, forSession),
+    })),
     ...Object.entries(KINDS).map(([kind, def]) => ({ label: kind === 'code' ? `+ ${def.label}… (볼 폴더를 고름)` : `+ ${def.label}`, action: () => createKind(kind, opts) })),
   ];
 }
@@ -2550,10 +3074,12 @@ function templateSaved(kind, saved) {
  * 틀을 워크스페이스로 펼친다. `cwd`를 주면 모든 항목을 그 폴더에서 열고, 아니면 저장해 둔 폴더에서 연다
  * (없어진 폴더의 항목은 기본 폴더에서). `cwd`를 줬고 그 워크스페이스에 폴더를 정해 두지 않았으면 그 폴더를 워크스페이스의 폴더로 정한다.
  * 만든 항목 수와 건너뛴 것의 까닭을 돌려준다.
+ * `resting`(삭제한 워크스페이스의 기록을 되살릴 때): 세션을 띄우지 않고 쉬는 세션으로 놓고, 적혀 있는 대화 번호를 이어 갈 대화로 둔다.
  */
-async function openTemplate(template, { group, cwd = null }) {
+async function openTemplate(template, { group, cwd = null, resting = false }) {
   const all = (Array.isArray(template?.items) ? template.items : []).filter((item) => item && typeof item === 'object');
-  const items = all.slice(0, MAX_TEMPLATE_ITEMS);
+  // 기록을 되살릴 때는 수를 줄이지 않는다: 빠진 항목은 다시 되살려도 돌아오지 않는다(기록 하나의 항목 수는 앱이 한도를 둔다).
+  const items = resting ? all : all.slice(0, MAX_TEMPLATE_ITEMS);
   const skipped = [];
   if (all.length > items.length) skipped.push(`한 번에 ${MAX_TEMPLATE_ITEMS}개까지만 펼칩니다`);
   const folders = [...new Set(items.map((item) => item.cwd).filter((path) => typeof path === 'string' && path))];
@@ -2581,10 +3107,11 @@ async function openTemplate(template, { group, cwd = null }) {
     try {
       const s = await revive({
         kind: term ? 'term' : item.kind, profile: item.profile, saved, ssh,
+        ...(resting && term && typeof item.resume === 'string' && /^[\w-]{1,80}$/.test(item.resume) ? { resume: item.resume } : {}),
         name: title, color: COLORS.includes(item.color) ? item.color : '',
         cwd: cwd || (kept ? item.cwd : folder), group,
         // 틀로 펼친 SSH 세션은 쉬는 세션으로 둔다. 틀은 남에게서 받을 수 있으니, 펼치자마자 그 주소로 접속하지 않고 사용자가 누를 때 접속한다.
-      }, { show: 'hidden', ...(ssh ? { dormant: true } : {}) });
+      }, { show: 'hidden', ...(ssh || (resting && term) ? { dormant: true } : {}) });
       if (s) made.push(s);
     } catch (err) {
       skipped.push(`${title || item.kind}: ${err}`);
@@ -2629,7 +3156,7 @@ function groupMenu(group, ev) {
   items.push({
     label: '이 워크스페이스의 세션 모두 닫기',
     action: () => {
-      if (confirm(`"${group.name}" 워크스페이스의 세션 ${live.length}개를 모두 닫을까요?`)) live.forEach(closeSession);
+      if (confirm(`"${group.name}" 워크스페이스의 세션 ${live.length}개를 모두 닫을까요?`)) restingFirst(live).forEach((s) => closeSession(s));
     },
   });
   showMenu(ev, items);
@@ -2642,10 +3169,10 @@ document.addEventListener('mousemove', (ev) => {
   if (!drag.active) {
     if (Math.hypot(ev.clientX - drag.x, ev.clientY - drag.y) < 6) return;
     drag.active = true;
-    drag.ghost = make('div', 'drag-ghost', drag.group ? `◆ ${drag.group}` : label(drag.s));
+    drag.ghost = make('div', 'drag-ghost', drag.group ? `◆ ${drag.group}` : drag.room ? `⇌ SSH · ${drag.room}` : drag.tab ? tabName(drag.s) : label(drag.s));
     document.body.append(drag.ghost);
     $list.classList.add('dragging');
-    if (!drag.group) render(); // "새 워크스페이스" 놓을 자리를 보여 준다.
+    if (!drag.group && !drag.tab) render(); // "새 워크스페이스" 놓을 자리를 보여 준다.
   }
   drag.ghost.style.left = `${ev.clientX + 12}px`;
   drag.ghost.style.top = `${ev.clientY + 8}px`;
@@ -2657,16 +3184,21 @@ document.addEventListener('mousemove', (ev) => {
     if (over && over.name !== drag.group) (over.after ? over.last : over.head).classList.add(over.after ? 'after' : 'before');
     return;
   }
-  point?.closest?.('li.group[data-drop]')?.classList.add('drop');
-  // 다른 항목의 줄 위에서는 놓으면 끼어들 자리(그 줄의 위나 아래)를 선으로 보여 준다.
+  if (!drag.tab) point?.closest?.('li.group[data-drop]')?.classList.add('drop'); // SSH 탭은 사이드바에 놓이지 않는다.
+  // 다른 항목의 줄 위에서는 놓으면 끼어들 자리(그 줄의 위나 아래)를 선으로 보여 준다(SSH 탭은 사이드바의 줄 사이에 끼우지 않는다).
   const over = rowUnder(point, ev.clientY);
-  if (over && over.target !== drag.s) over.row.classList.add(over.after ? 'after' : 'before');
+  if (over && !drag.tab && !ownRow(over, drag)) over.row.classList.add(over.after ? 'after' : 'before');
+  if (drag.tab && point?.closest?.('#sidebar')) return showDropHint(null);
   // 터미널 화면 위에서는 놓으면 창이 어떻게 나뉘는지(SSH 탭 줄이면 그 창의 탭으로 들어가는지) 미리 보여 준다.
-  showDropHint(dropZoneAt(ev.clientX, ev.clientY, drag.s));
+  showDropHint(dropZoneAt(ev.clientX, ev.clientY, drag));
 });
+
+/** 끌던 것을 제 줄 위에 놓았는지(SSH 줄을 끌면 그 워크스페이스의 SSH 줄이 제 줄이다). */
+const ownRow = (over, d) => (d.room ? over.row.dataset.room === d.room : over.target === d.s);
 
 document.addEventListener('mouseup', (ev) => {
   if (!drag) return;
+  const dragged = drag;
   const { s, group: draggedGroup, active: moved, ghost } = drag;
   drag = null;
   if (!moved) return; // 그냥 클릭
@@ -2681,29 +3213,41 @@ document.addEventListener('mouseup', (ev) => {
     if (over) moveGroup(draggedGroup, over.name, over.after);
     return render();
   }
+  // SSH 탭은 SSH 창 안에서만 옮긴다: 사이드바(워크스페이스 머리, 다른 줄)에 놓으면 아무 일도 하지 않는다.
+  // (탭 하나를 다른 워크스페이스로 보내는 것은 탭 오른쪽 클릭 → "워크스페이스 바꾸기…"로 한다.)
+  if (dragged.tab && point?.closest?.('#sidebar')) {
+    setStatus('SSH 탭은 SSH 창 안에서만 옮깁니다. 다른 워크스페이스로 보내려면 탭을 오른쪽 클릭 → "워크스페이스 바꾸기…"를 쓰세요.');
+    return render();
+  }
+  // 옮길 것: 사이드바의 SSH 줄을 끌었으면 그 워크스페이스의 SSH 세션 전부(방 통째), 아니면 그 항목 하나.
+  const moving = dragged.room ? sshOf(dragged.room) : [s];
   const head = point?.closest?.('li.group[data-drop]');
   if (head) {
-    // 묶음 머리에 놓음: 그 묶음으로 옮긴다.
-    if (head.dataset.drop === 'new') askGroup([s]).then(render);
-    else if (head.dataset.drop === 'logical') moveToGroup([s], head.dataset.name);
+    // 묶음 머리에 놓음: 그 묶음으로 옮긴다(SSH는 옮겨 간 워크스페이스의 SSH 탭이 된다).
+    if (head.dataset.drop === 'new') askGroup(moving).then(render);
+    else if (head.dataset.drop === 'logical') moveToGroup(moving, head.dataset.name);
     else render();
     return;
   }
   // 다른 항목의 줄에 놓음: 그 줄의 위나 아래로 순서를 옮긴다. 다른 워크스페이스의 줄이면 그 워크스페이스로도 옮긴다.
+  // SSH 탭은 사이드바의 줄 사이에 끼우지 않는다(SSH는 워크스페이스마다 한 줄이고, 그 줄을 끌어 옮긴다).
   const over = rowUnder(point, ev.clientY);
   if (over) {
-    if (over.target !== s) {
-      if (over.target.group) ensureGroup(over.target.group);
-      if (over.target.group && over.target.group !== s.group) { leaveTabsShown(s); s.group = over.target.group; } // 워크스페이스 밖으로는 옮기지 않는다.
-      placeInOrder(s, over.target, over.after);
+    if (!ownRow(over, dragged)) {
+      const to = over.target.group;
+      if (to && to !== s.group) moveToGroup(moving, to); // 워크스페이스 밖으로는 옮기지 않는다.
+      // SSH 줄의 뒤에 끼울 때는 그 워크스페이스의 마지막 SSH 세션 뒤에 끼운다(SSH 세션들 사이에 끼어들지 않게).
+      const anchor = over.row.dataset.room && over.after ? sshOf(over.row.dataset.room).filter((x) => !moving.includes(x)).pop() || over.target : over.target;
+      // 여럿(SSH 세션들)을 옮길 때도 서로의 순서는 지킨다: 뒤에 끼울 때는 거꾸로 하나씩 끼운다.
+      for (const item of over.after ? [...moving].reverse() : moving) if (item !== anchor) placeInOrder(item, anchor, over.after);
       saveState();
     }
     return render();
   }
-  // 터미널 화면에 놓음: 놓은 위치에 따라 그 창을 나누거나 그 자리에 연다(SSH 탭 줄이면 그 창의 탭으로 넣는다).
-  const hit = dropZoneAt(ev.clientX, ev.clientY, s);
-  if (hit) dropOnPane(s, hit.target, hit.zone, hit.before);
-  else if (point?.closest?.('#terms')) activate(s);
+  // 터미널 화면에 놓음: 놓은 위치에 따라 그 창을 나누거나 그 자리에 연다(SSH 탭은 SSH 방 안에서 옮긴다).
+  const hit = dropZoneAt(ev.clientX, ev.clientY, dragged);
+  if (hit) dropOnPane(dragged, hit);
+  else if (!dragged.tab && point?.closest?.('#terms')) activate(s);
   render();
 });
 
@@ -2845,10 +3389,10 @@ function render() {
   for (const group of groupsInOrder({ waitingOnly: filterWaiting })) {
     const folded = collapsed.has(group.key);
     const head = make('li', [
-      'group', group.logical && 'logical', group.list.some((s) => s.attention || s.waiting) && 'attention',
+      'group', group.logical && 'logical', folded && 'folded', group.list.some((s) => s.attention || s.waiting) && 'attention',
     ].filter(Boolean).join(' '));
     const ownFolder = group.logical ? groupFolderOf(group.name) : '';
-    head.title = `${group.hint}\n${group.logical ? `워크스페이스 폴더: ${ownFolder ? `${ownFolder} (바꿀 수 없음)` : `정하지 않음 (기본 폴더 ${folder}에서 시작)`}\n` : ''}클릭: 접기·펼치기 · 오른쪽 클릭: 메뉴 · +: 세션·항목 더하기 · 항목을 끌어다 놓기: 이 워크스페이스에 넣기${group.logical ? ' · 이 머리를 끌기: 워크스페이스 순서 바꾸기' : ''}`;
+    head.title = `${group.hint}\n${group.logical ? `워크스페이스 폴더: ${ownFolder ? `${ownFolder} (바꿀 수 없음)` : `정하지 않음 (기본 폴더 ${folder}에서 시작)`}\n` : ''}클릭: 접기·펼치기 · 오른쪽 클릭: 메뉴${folded ? '(세션·항목 더하기 포함)' : ' · +: 세션·항목 더하기'} · 항목을 끌어다 놓기: 이 워크스페이스에 넣기${group.logical ? ' · 이 머리를 끌기: 워크스페이스 순서 바꾸기' : ''}`;
     head.dataset.drop = group.logical ? 'logical' : 'folder';
     head.dataset.name = group.name;
     // 밖에서 끌어다 놓은 것을 이 묶음의 항목으로 만들 때 쓴다(drop.js).
@@ -2859,55 +3403,59 @@ function render() {
       make('span', '', folded ? '▸' : '▾'),
       make('span', 'name', group.logical ? `◆ ${group.name}` : group.name),
     );
-    // 묶음의 할 일 진행(그 묶음의 할 일 항목을 모두 합친 것. 접어 두어도 보인다).
-    const todo = group.list.reduce((sum, s) => {
-      const part = isTerm(s) ? null : s.view?.progress?.();
-      return part ? { done: sum.done + part.done, total: sum.total + part.total } : sum;
-    }, { done: 0, total: 0 });
-    const progress = make('span', todo.total ? `todo-pill${todo.done === todo.total ? ' full' : ''}` : '', todo.total ? `${todo.done}/${todo.total}` : '');
-    if (todo.total) progress.title = `이 워크스페이스의 할 일: ${todo.total}개 가운데 ${todo.done}개 끝냄`;
-    head.append(progress);
-    // 묶음 안에서 돌고 있는 서브에이전트 수(접어 두어도 보인다).
-    const running = group.list.reduce((sum, s) => sum + s.agents.size, 0);
-    head.append(running ? agentPill(running, `이 워크스페이스에서 서브에이전트 ${running}개 실행 중`) : make('span'));
-    // 쉬는 세션이 있는 묶음: 한 번에 재개하는 단추
-    const resting = group.list.filter((s) => s.dormant).length;
-    const play = make(resting ? 'button' : 'span', resting ? 'close wake' : '', resting ? '▶' : '');
-    if (resting) {
-      play.title = `쉬는 세션 ${resting}개 재개`;
-      play.onclick = (ev) => { ev.stopPropagation(); wakeGroup(group); };
-    }
-    head.append(play);
-    const add = make('button', 'close add', '+'); // 세션·항목을 만드는 길이므로 마우스를 올리지 않아도 늘 보인다.
-    add.title = '이 워크스페이스에 세션·항목 더하기';
-    add.onclick = (ev) => { ev.stopPropagation(); showMenu(ev, addItems(group)); };
-    head.append(add);
-    head.append(make('span', 'count', String(group.list.length)));
-    // 워크스페이스의 폴더 줄: 이름 바로 아래에 워크스페이스 폴더를 그대로 보여 준다(접어 두어도 보인다).
-    // 정해 둔 폴더는 바꿀 수 없어 [폴더] 단추(와 경로)는 그 폴더를 탐색기에서 열기만 한다. 정하지 않은 워크스페이스만 여기서 한 번 고른다.
-    if (group.logical) {
-      const row = make('div', ownFolder ? 'group-folder' : 'group-folder unset');
-      // 오른쪽 정렬 말줄임에서 글자 순서가 뒤집히지 않도록 방향 표시 문자를 붙인다.
-      const path = make('span', 'path', ownFolder ? '‎' + ownFolder : '폴더를 정하지 않음');
-      path.title = ownFolder
-        ? `워크스페이스 "${group.name}"의 폴더: ${ownFolder}\n이 워크스페이스에서 여는 세션은 여기서 시작합니다. 이 폴더는 바꿀 수 없습니다.\n클릭: 탐색기에서 열기`
-        : `워크스페이스 "${group.name}"의 폴더를 정하지 않았습니다. 이 워크스페이스의 세션은 이 워크스페이스에 있는 항목의 폴더나 기본 폴더(${folder})에서 시작합니다.\n클릭·▾: 정하기 (한 번 정하면 바꿀 수 없습니다)`;
-      row.onclick = (ev) => ev.stopPropagation(); // 폴더 줄을 눌러도 묶음이 접히지 않게
-      if (ownFolder) {
-        const open = make('button', '', '폴더');
-        open.title = `탐색기에서 이 폴더 열기: ${ownFolder}`;
-        path.onclick = open.onclick = () => openGroupFolder(group.name);
-        row.append(path, open);
-      } else {
-        const recent = make('button', '', '▾');
-        recent.title = '지금 항목의 폴더·최근 폴더에서 골라 이 워크스페이스의 폴더로 정하기 (한 번 정하면 바꿀 수 없습니다)';
-        const pick = make('button', '', '폴더…');
-        pick.title = '이 워크스페이스의 폴더 정하기 (한 번 정하면 바꿀 수 없습니다)';
-        path.onclick = recent.onclick = (ev) => groupFolderMenu(ev, group.name);
-        pick.onclick = () => pickGroupFolder(group.name);
-        row.append(path, recent, pick);
+    // 접어 둔 워크스페이스는 이름만 보이는 납작한 한 줄이다(폴더 줄·진행·단추·항목 수는 펼쳤을 때만 보인다).
+    // 그 안에 대기 중인 세션이 있는지는 이름 옆의 점으로만 알린다(CSS의 .folded.attention).
+    if (!folded) {
+      // 묶음의 할 일 진행(그 묶음의 할 일 항목을 모두 합친 것).
+      const todo = group.list.reduce((sum, s) => {
+        const part = isTerm(s) ? null : s.view?.progress?.();
+        return part ? { done: sum.done + part.done, total: sum.total + part.total } : sum;
+      }, { done: 0, total: 0 });
+      const progress = make('span', todo.total ? `todo-pill${todo.done === todo.total ? ' full' : ''}` : '', todo.total ? `${todo.done}/${todo.total}` : '');
+      if (todo.total) progress.title = `이 워크스페이스의 할 일: ${todo.total}개 가운데 ${todo.done}개 끝냄`;
+      head.append(progress);
+      // 묶음 안에서 돌고 있는 서브에이전트 수.
+      const running = group.list.reduce((sum, s) => sum + s.agents.size, 0);
+      head.append(running ? agentPill(running, `이 워크스페이스에서 서브에이전트 ${running}개 실행 중`) : make('span'));
+      // 쉬는 세션이 있는 묶음: 한 번에 재개하는 단추
+      const resting = group.list.filter((s) => s.dormant).length;
+      const play = make(resting ? 'button' : 'span', resting ? 'close wake' : '', resting ? '▶' : '');
+      if (resting) {
+        play.title = `쉬는 세션 ${resting}개 재개`;
+        play.onclick = (ev) => { ev.stopPropagation(); wakeGroup(group); };
       }
-      head.append(row);
+      head.append(play);
+      const add = make('button', 'close add', '+'); // 세션·항목을 만드는 길이므로 마우스를 올리지 않아도 늘 보인다.
+      add.title = '이 워크스페이스에 세션·항목 더하기';
+      add.onclick = (ev) => { ev.stopPropagation(); showMenu(ev, addItems(group)); };
+      head.append(add);
+      head.append(make('span', 'count', String(sidebarRows(group.list).length)));
+      // 워크스페이스의 폴더 줄: 이름 바로 아래에 워크스페이스 폴더를 그대로 보여 준다.
+      // 정해 둔 폴더는 바꿀 수 없어 [폴더] 단추(와 경로)는 그 폴더를 탐색기에서 열기만 한다. 정하지 않은 워크스페이스만 여기서 한 번 고른다.
+      if (group.logical) {
+        const row = make('div', ownFolder ? 'group-folder' : 'group-folder unset');
+        // 오른쪽 정렬 말줄임에서 글자 순서가 뒤집히지 않도록 방향 표시 문자를 붙인다.
+        const path = make('span', 'path', ownFolder ? '‎' + ownFolder : '폴더를 정하지 않음');
+        path.title = ownFolder
+          ? `워크스페이스 "${group.name}"의 폴더: ${ownFolder}\n이 워크스페이스에서 여는 세션은 여기서 시작합니다. 이 폴더는 바꿀 수 없습니다.\n클릭: 탐색기에서 열기`
+          : `워크스페이스 "${group.name}"의 폴더를 정하지 않았습니다. 이 워크스페이스의 세션은 이 워크스페이스에 있는 항목의 폴더나 기본 폴더(${folder})에서 시작합니다.\n클릭·▾: 정하기 (한 번 정하면 바꿀 수 없습니다)`;
+        row.onclick = (ev) => ev.stopPropagation(); // 폴더 줄을 눌러도 묶음이 접히지 않게
+        if (ownFolder) {
+          const open = make('button', '', '폴더');
+          open.title = `탐색기에서 이 폴더 열기: ${ownFolder}`;
+          path.onclick = open.onclick = () => openGroupFolder(group.name);
+          row.append(path, open);
+        } else {
+          const recent = make('button', '', '▾');
+          recent.title = '지금 항목의 폴더·최근 폴더에서 골라 이 워크스페이스의 폴더로 정하기 (한 번 정하면 바꿀 수 없습니다)';
+          const pick = make('button', '', '폴더…');
+          pick.title = '이 워크스페이스의 폴더 정하기 (한 번 정하면 바꿀 수 없습니다)';
+          path.onclick = recent.onclick = (ev) => groupFolderMenu(ev, group.name);
+          pick.onclick = () => pickGroupFolder(group.name);
+          row.append(path, recent, pick);
+        }
+        head.append(row);
+      }
     }
     // 워크스페이스의 머리를 끌면 다른 워크스페이스의 위나 아래로 순서를 옮긴다(단추와 폴더 줄에서는 끌기를 시작하지 않는다).
     if (group.logical && !filterWaiting) {
@@ -2923,7 +3471,8 @@ function render() {
     };
     head.oncontextmenu = (ev) => { ev.preventDefault(); groupMenu(group, ev); };
     rows.push(head);
-    if (!folded) rows.push(...group.list.map(sessionItem));
+    // SSH 세션은 몇 개든 그 워크스페이스의 SSH 줄 하나로 놓인다(SSH는 워크스페이스마다 하나).
+    if (!folded) rows.push(...sidebarRows(group.list).map((row) => (row.list ? sshItem(row.room, row.list) : sessionItem(row.s))));
   }
   if (renaming != null && !sessions.has(renaming)) renaming = null;
   if (filterWaiting && !rows.length) rows.push(make('li', 'group', '대기 중인 세션이 없습니다.'));
@@ -2934,7 +3483,7 @@ function render() {
     hint.onclick = () => newGroup();
     rows.push(hint);
   }
-  if (drag?.active && !drag.group) {
+  if (drag?.active && !drag.group && !drag.tab) {
     const fresh = make('li', 'group new', '+ 새 워크스페이스로 (여기에 놓기)');
     fresh.dataset.drop = 'new';
     rows.push(fresh);
@@ -2970,6 +3519,8 @@ function render() {
       s.headInfo = make('span', 'pane-info');
       s.head.replaceChildren(s.headInfo, only, hide);
       if (s.ssh) {
+        only.title = '이 창만 보기: SSH의 다른 창은 이 창의 탭으로 모으고 나머지 항목은 숨깁니다 (제목 줄 두 번 누르기)';
+        hide.title = '이 창 접기: 탭들은 옆 창의 탭 줄로 갑니다. SSH에 창이 하나뿐이면 SSH를 화면에서 숨깁니다 (세션은 계속 실행)';
         // SSH 세션은 한 창만 볼 때도 제목 줄을 보이고, 거기에 출력 기록·동시 입력 단추를 눈에 띄게 둔다.
         s.pane.classList.add('ssh');
         // 맨 왼쪽의 탭 줄: 이 창 자리의 SSH 탭들(계정@서버 ×). 탭이 넘치면 가로로 밀린다(휠로도 민다).
@@ -3087,7 +3638,7 @@ function initSidebarKeys() {
   $list.addEventListener('keydown', (ev) => {
     if (ev.target !== $list || ev.ctrlKey || ev.altKey) return;
     // 쉬는 세션은 건너뛴다(Ctrl+Tab처럼): 방향키로 지나가기만 해도 재개되면 안 된다. 재개하려면 그 세션을 누른다.
-    const rows = [...$list.querySelectorAll('li[data-key]')].map((li) => sessions.get(Number(li.dataset.key))).filter((s) => s && !s.dormant);
+    const rows = [...$list.querySelectorAll('li[data-key]')].map(rowItem).filter((s) => s && !s.dormant);
     const at = rows.indexOf(active);
     let next = null;
     if (ev.key === 'ArrowDown') next = rows[at < 0 ? 0 : Math.min(rows.length - 1, at + 1)];
@@ -3099,7 +3650,7 @@ function initSidebarKeys() {
     ev.preventDefault();
     if (!next) return;
     if (next !== active) activate(next, { keepFocus: true });
-    $list.querySelector(`li[data-key="${next.key}"]`)?.scrollIntoView({ block: 'nearest' });
+    rowOf(next)?.scrollIntoView({ block: 'nearest' });
   });
 }
 
@@ -3118,7 +3669,9 @@ function applyLook(look) {
 
 /** 분할을 풀고 이 세션 하나만 화면에 남긴다. 다른 세션은 닫지 않는다. */
 function showOnly(s) {
-  tree = { s };
+  // SSH 창이면 그 워크스페이스의 SSH 방만 남기고, 방 안의 다른 창은 이 창의 탭으로 모은다(탭은 닫지 않는다).
+  if (s.ssh) mergeRoom(s);
+  tree = slotFor(s);
   layout();
   activate(s);
 }
@@ -3131,6 +3684,7 @@ function sidebarMenu(ev) {
   ];
   items.push({ label: '빠른 이동·명령 찾기…  (Ctrl+Shift+K)', action: showPalette });
   if (closedCount()) items.push({ label: '닫은 항목 다시 열기…  (Ctrl+Shift+R)', action: showClosed });
+  items.push({ label: '삭제한 워크스페이스 기록…  (3년 보관)', action: showHistory });
   if (visible.length > 1) {
     items.push({ label: '분할 풀기 (지금 창만 보기)', action: () => active && showOnly(active) });
   }
@@ -3181,6 +3735,7 @@ function paletteEntries() {
     ...Object.entries(KINDS).map(([kind, def]) => command(`새 ${def.label}`, () => createKind(kind), where)),
     command('새 워크스페이스 만들기…', newGroup),
     command('닫은 항목 다시 열기…', showClosed, '명령 · Ctrl+Shift+R: 가장 나중에 닫은 것'),
+    command('삭제한 워크스페이스 기록…', showHistory, '명령 · 3년 보관 · 메모·할 일의 글 보기 · 워크스페이스로 되살리기'),
     command('알림 기록', showNotices, `명령 · Ctrl+Shift+A${unreadCount() ? ` · 새 알림 ${unreadCount()}개` : ''}`),
     command('타이머·알람 맞추기…', showTimers, `명령 · 24시간 이내${nextTimer() ? ` · 다음 알림까지 ${nextTimer().left}` : ''}`),
     command('워크스페이스 틀: 저장해 둔 구성 펼치기…', showTemplates),
@@ -3246,6 +3801,15 @@ function renderLimits() {
  * 사이드바·창 제목·알림에 보이는 이름만 바뀐다. 비우면 원래 이름으로 돌아간다.
  */
 function rename(s) {
+  if (s.ssh) {
+    // SSH 탭은 사이드바에 제 줄이 없다(SSH는 워크스페이스마다 한 줄). 별칭을 물어 탭에 적는다.
+    return ask('SSH 탭의 별칭 (비우면 원래 이름으로)', `${s.sshUser ? `${s.sshUser}@` : ''}${sshServer(s)}`, s.name).then((name) => {
+      if (name === null || !sessions.has(s.key)) return;
+      s.name = name;
+      render();
+      saveState();
+    });
+  }
   // 접힌 묶음 안에 있으면 펼쳐서 입력칸이 보이게 한다.
   collapsed.delete(groupKey(s));
   renaming = null;
@@ -3332,16 +3896,25 @@ async function exportText(s) {
 
 function sessionMenu(s, ev) {
   const term = isTerm(s);
+  // SSH 세션의 메뉴는 SSH 창의 탭을 오른쪽 클릭하면 뜬다(사이드바에는 워크스페이스마다 SSH 줄 하나뿐이다).
+  const panes = s.ssh ? leavesOf(rooms.get(s.group) || null).length : 0;
   showMenu(ev, [
+    ...(s.ssh ? [{ caption: sshTabCaption(s) }] : []),
     { label: s.name ? `별칭 바꾸기… (지금: ${s.name})` : '별칭 붙이기…', action: () => rename(s) },
     ...(s.name ? [{ label: '별칭 지우기 (원래 이름으로)', action: () => { s.name = ''; render(); saveState(); } }] : []),
     { colors: COLORS, action: (color) => { s.color = color; render(); saveState(); } },
     { caption: s.mark ? `북마크 ${s.mark} · Ctrl+${s.mark}로 바로 가기 (같은 숫자를 다시 누르면 풂)` : '북마크: 숫자를 고르면 Ctrl+숫자로 바로 갑니다' },
     { icons: MARKS.map((digit) => ({ node: make('b', '', digit), title: markTitle(s, digit), on: s.mark === digit, action: () => setMark(s, digit) })) },
-    { label: s.group ? `워크스페이스 바꾸기… (지금: ${s.group})` : '워크스페이스 지정…', action: () => askGroup([s], s.group) },
-    ...(visible.length > 1 || !visible.includes(s) ? [{ label: '이것만 보기 (나머지는 화면에서 숨기기)', action: () => showOnly(s) }] : []),
-    // 화면에 올리는 것은 누르기(지금 창 자리), 나란히 놓는 것은 끌어다 놓기로만 한다.
-    ...(visible.includes(s) ? [{ label: '화면에서 숨기기', action: () => toggleShown(s) }] : []),
+    { label: s.group ? `워크스페이스 바꾸기… (지금: ${s.group}${s.ssh ? ' · 옮겨 간 워크스페이스의 SSH 탭이 됩니다' : ''})` : '워크스페이스 지정…', action: () => askGroup([s], s.group) },
+    ...(s.ssh ? [
+      // SSH 창: 방 안의 다른 창은 이 창의 탭으로 모으고, 다른 항목은 화면에서 숨긴다.
+      ...(visible.length > 1 || !visible.includes(s) ? [{ label: panes > 1 ? '이 창만 보기 (SSH의 다른 창은 이 창의 탭으로, 나머지는 숨기기)' : '이것만 보기 (나머지는 화면에서 숨기기)', action: () => showOnly(s) }] : []),
+      ...(visible.includes(s) ? [{ label: panes > 1 ? '이 창 접기 (탭들은 옆 창의 탭 줄로)' : 'SSH를 화면에서 숨기기', action: () => toggleShown(s) }] : []),
+    ] : [
+      ...(visible.length > 1 || !visible.includes(s) ? [{ label: '이것만 보기 (나머지는 화면에서 숨기기)', action: () => showOnly(s) }] : []),
+      // 화면에 올리는 것은 누르기(지금 창 자리), 나란히 놓는 것은 끌어다 놓기로만 한다.
+      ...(visible.includes(s) ? [{ label: '화면에서 숨기기', action: () => toggleShown(s) }] : []),
+    ]),
     ...(term ? [
       ...(s.dormant ? [{ label: resumeOf(s) ? '재개 (대화 이어 가기)' : '재개', action: () => activate(s) }] : []),
       ...(s.exited ? [{
@@ -3349,8 +3922,8 @@ function sessionMenu(s, ev) {
         action: () => restartSession(s),
       }] : []),
       ...(s.ssh ? [
-        { label: `이 연결 복제 (바로 옆 탭으로 · ${specLabel(s.ssh)})`, action: () => cloneSsh(s) },
-        { label: '다른 서버에 접속… (지금 창의 탭으로)', action: () => { if (!visible.includes(s)) activate(s); showSsh({ ...besideOf(s), cwd: s.startCwd, show: 'replace' }); } },
+        { label: `세션 복제 (바로 옆 탭으로 · ${specLabel(s.ssh)})`, action: () => cloneSsh(s) },
+        { label: '다른 서버에 접속… (이 창의 새 탭으로)', action: () => { activate(s); showSsh({ ...besideOf(s), cwd: s.startCwd, show: 'replace' }); } },
         ...(savedHosts().some((host) => host.target === s.ssh.target && (host.port || 0) === (s.ssh.port || 0)) ? [] : [{
           label: '이 서버를 저장해 두기 (접속 창에서 한 번에 접속)',
           action: () => { if (saveHost({ ...s.ssh, name: s.ssh.name || s.name })) setStatus(`SSH 서버를 저장했습니다: ${specLabel(s.ssh)}`); },
@@ -3375,7 +3948,9 @@ function sessionMenu(s, ev) {
     ] : []),
     { label: '폴더를 탐색기에서 열기', action: () => openFolder(s) },
     { label: '폴더 경로 복사', action: () => invoke('clipboard_write', { text: s.cwd }).then(() => setStatus(`복사했습니다: ${s.cwd}`)).catch((err) => setStatus(String(err))) },
-    { label: term ? '세션 닫기' : `${KINDS[s.kind].label} 닫기`, action: () => closeSession(s) },
+    // SSH 탭은 닫기 전에 묻는다(탭의 ×와 같다).
+    { label: s.ssh ? '세션 닫기…' : term ? '세션 닫기' : `${KINDS[s.kind].label} 닫기`, action: () => (s.ssh ? askCloseTab(s) : closeSession(s)) },
+    ...(s.ssh ? [{ caption: '나란히 보려면 탭을 SSH 창의 가장자리로 끌어다 놓으세요 (탭은 SSH 창 안에서만 옮깁니다)' }] : []),
   ]);
 }
 
@@ -4119,7 +4694,7 @@ function reveal(items) {
   }
   localStorage.setItem('cypher.collapsed', JSON.stringify([...collapsed]));
   render();
-  $list.querySelector(`li[data-key="${fresh[fresh.length - 1].key}"]`)?.scrollIntoView({ block: 'nearest' });
+  rowOf(fresh[fresh.length - 1])?.scrollIntoView({ block: 'nearest' });
 }
 
 /**
@@ -4495,6 +5070,11 @@ function writeState() {
     if (!setIds.has(s.tabSet)) setIds.set(s.tabSet, setIds.size);
     return { tab: { set: setIds.get(s.tabSet), at: tabs.indexOf(s) } };
   };
+  const pack = (node) => {
+    if (!node) return null;
+    if (node.room) return { room: node.room };
+    return node.s ? { i: live.indexOf(node.s) } : { dir: node.dir, ratio: ratioOf(node), a: pack(node.a), b: pack(node.b) };
+  };
   const state = {
     // 되살리지 못한 항목의 기록은 그대로 다시 적는다(순번이 배치와 어긋나지 않게 맨 뒤에 둔다).
     // 항목 하나의 화면이 상태를 내놓다 실패해도 저장 전체가 멈추지 않게, 그 항목은 지난번에 적은 내용을 그대로 쓴다.
@@ -4503,11 +5083,10 @@ function writeState() {
       return s.lastRecord ? { ...s.lastRecord, shown: visible.includes(s), ...tabOf(s) } : null;
     }), ...unrestored],
     active: live.indexOf(active),
-    // 화면 분할 모양. 잎은 세션의 순번({ i }), 가지는 { dir, a, b }.
-    layout: (function pack(node) {
-      if (!node) return null;
-      return node.s ? { i: live.indexOf(node.s) } : { dir: node.dir, ratio: ratioOf(node), a: pack(node.a), b: pack(node.b) };
-    })(tree),
+    // 화면 분할 모양. 잎은 세션의 순번({ i })이나 SSH 방({ room: 워크스페이스 이름 }), 가지는 { dir, a, b }.
+    layout: pack(tree),
+    // SSH 방 안의 배치(워크스페이스마다 하나). 방이 화면에 없어도 적어 둔다.
+    rooms: [...rooms].map(([group, inner]) => ({ group, layout: pack(inner) })),
   };
   try { localStorage.setItem('cypher.state', JSON.stringify(state)); } catch { /* 저장 공간 문제는 무시 */ }
 }
@@ -4544,11 +5123,15 @@ function revive(item, opts = {}) {
     : newItem(item.kind, { ...common, saved: item.saved });
 }
 
-/** 저장해 둔 분할 모양을 되살린다. 없어진 세션의 자리는 짝이 차지한다. */
-function unpack(data, list) {
-  if (!data) return null;
+/**
+ * 저장해 둔 분할 모양을 되살린다. 없어진 세션의 자리는 짝이 차지한다.
+ * SSH 방의 자리({ room })는 `roomOk(워크스페이스 이름)`이 참일 때만 되살린다(방 안의 배치를 되살릴 때는 주지 않는다: 방 안에 방은 없다).
+ */
+function unpack(data, list, roomOk = null) {
+  if (!data || typeof data !== 'object') return null;
+  if (typeof data.room === 'string') return roomOk?.(data.room) ? { room: data.room } : null;
   if ('i' in data) return list[data.i] ? { s: list[data.i] } : null;
-  const a = unpack(data.a, list), b = unpack(data.b, list);
+  const a = unpack(data.a, list, roomOk), b = unpack(data.b, list, roomOk);
   return a && b ? { dir: data.dir === 'col' ? 'col' : 'row', ratio: data.ratio, a, b } : (a || b);
 }
 
@@ -4597,7 +5180,8 @@ async function restore({ docsOnly = false } = {}) {
     restoring = false;
   }
   if (docsOnly) { render(); saveState(); return; } // 메모·HTTP는 사이드바에만 되살린다.
-  // SSH 탭 묶음과 탭 순서를 되살린다(같은 묶음 번호끼리, 적어 둔 순번대로).
+  // SSH 탭 묶음과 탭 순서를 되살린다(같은 묶음 번호끼리, 적어 둔 순번대로). 먼저 모두 저 혼자인 묶음으로 되돌려 둔다.
+  for (const s of restored) if (s?.ssh && sessions.has(s.key)) s.tabSet = { list: [s] };
   const tabSets = new Map();
   saved.sessions.forEach((item, index) => {
     const s = restored[index];
@@ -4606,14 +5190,25 @@ async function restore({ docsOnly = false } = {}) {
     tabSets.get(item.tab.set).push({ at: Number(item.tab.at) || 0, s });
   });
   for (const members of tabSets.values()) {
-    const set = { list: members.sort((p, q) => p.at - q.at).map((m) => m.s) };
+    // 한 묶음은 한 워크스페이스의 것이다(기록이 어긋나 있으면 첫 탭의 워크스페이스 것만 묶는다).
+    const list = members.sort((p, q) => p.at - q.at).map((m) => m.s).filter((s) => sessions.has(s.key));
+    if (!list.length) continue;
+    const set = { list: list.filter((s) => s.group === list[0].group) };
     for (const s of set.list) s.tabSet = set;
+  }
+  // SSH 방 안의 배치를 되살린다(쉬는 세션도 방 안에 제 창을 가진다. 방을 화면에 올릴지는 아래의 큰 배치가 정한다).
+  rooms.clear();
+  for (const room of Array.isArray(saved.rooms) ? saved.rooms : []) {
+    if (!room || typeof room.group !== 'string' || !room.group) continue;
+    const inner = unpack(room.layout, restored.map((s) => (s?.ssh && sessions.has(s.key) && s.group === room.group ? s : null)));
+    if (inner) rooms.set(room.group, inner);
   }
   // 분할 모양을 되살린다. 저장된 모양이 없으면(예전 기록) 보이던 세션을 고르게 나눈다.
   // 되살리는 도중에 사용자가 닫은 항목은 배치에서 뺀다(순번은 저장 때와 맞아야 하므로 자리는 비워 둔다).
-  // 쉬는 세션은 화면에 올리지 않는다(올리면 재개된다).
+  // 쉬는 세션은 화면에 올리지 않는다(올리면 재개된다): SSH 방도 그 안에 보이는 탭이 모두 깨어 있을 때만 화면에 올린다.
   const alive = restored.map((s) => (s && sessions.has(s.key) && !s.dormant ? s : null));
-  tree = unpack(saved.layout, alive)
+  const awake = (group) => rooms.has(group) && leavesOf(rooms.get(group)).every((s) => !s.dormant);
+  tree = unpack(saved.layout, alive, awake)
     || balanced(alive.filter((s, index) => s && saved.sessions[index].shown).slice(0, MAX_PANES));
   layout();
   // 끌 때 보던 것이 세션이면 지금은 쉬고 있어 고를 수 없다. 그때는 되살린 배치에 있는 것을 고른다
@@ -5441,6 +6036,9 @@ window.cypher = {
   showPalette, paletteEntries, showClosed, reopenLast, restartSession, placeInOrder, inSidebarOrder, cycle, find, recallPrompt, createGroup, newGroup, adoptGroup, groupFor,
   showTimers, addTimer, removeTimer, timers, nextTimer, onCreatedFile, placeHeld, cloneSsh, showSsh, castTargets, saveHost, savedHosts, onEditedFile, onTool, realign, settleResize, settleResizeSoon, moveGroup, nudgeGroup, closeGap, gapBelow, wake, wakeGroup, restore, runsClaude, askClaudeCommand, setClaudeCommand, setGroupFolder, groupFolderOf, openGroupFolder, groupContext, canControl, profileOf, ensureProfile, renameGroup, deleteGroup, createKind, showNotices, unreadCount, logNotice, notice, showTemplates, saveTemplate, currentGroup, packGroup, openTemplate, groupsInOrder, toggleDiff,
   startLog, stopLog, showLog, setSshFont, sshFontNow, setCopyOnSelect, syncSshScopes, clearHiddenInput,
+  rooms, sshOf, roomShown, roomFront, openRoom, toggleRoom, showRoomOnly, closeRoom, addSshTab, tabsOf, sidebarRows,
+  showHistory, historyRecord, restoreHistory,
+  get tree() { return tree; },
   get copyOnSelect() { return copyOnSelect; },
   get visible() { return visible; },
   get broadcast() { return broadcast; },

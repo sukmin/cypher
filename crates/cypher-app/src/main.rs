@@ -13,6 +13,7 @@ mod engine;
 mod update;
 mod extras;
 mod hex;
+mod history;
 mod http;
 mod image;
 mod magnet;
@@ -227,6 +228,7 @@ fn build_menu(app: &tauri::AppHandle) -> tauri::Result<tauri::menu::Menu<tauri::
     let tools = SubmenuBuilder::new(app, "도구")
         .item(&item("palette", "빠른 이동·명령 찾기\tCtrl+Shift+K")?)
         .item(&item("reopen", "닫은 항목 다시 열기…\tCtrl+Shift+R")?)
+        .item(&item("history", "삭제한 워크스페이스 기록… (3년 보관)")?)
         .item(&item("notices", "알림 기록\tCtrl+Shift+A")?)
         .item(&item("timers", "타이머·알람…")?)
         .item(&item("templates", "워크스페이스 틀: 저장·불러오기…")?)
@@ -322,6 +324,7 @@ fn main() {
             erd::clean_closed();
             todo::clean_closed();
             image::clean_closed();
+            history::clean_expired();
             let config_path = config_path();
             let (config, config_error) = Config::load(&config_path);
             // 어느 판을 쓰고 있는지 알 수 있게 창 제목에 버전을 붙인다.
@@ -476,6 +479,10 @@ fn main() {
             reader::table_pick,
             commands::store_dirs,
             closed::closed_restore,
+            history::history_save,
+            history::history_list,
+            history::history_read,
+            history::history_remove,
             commands::ui_zoom,
             engine::browser_engine_info,
             engine::browser_latest_version,

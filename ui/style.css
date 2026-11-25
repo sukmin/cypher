@@ -163,6 +163,11 @@ li:hover .close, .pane-head:hover .close { visibility: visible; }
 #sessions li.group:hover { background: var(--select); }
 #sessions li.group .count { padding: 0 6px; font-weight: normal; font-size: 11px; color: var(--dim); background: var(--chip); border-radius: 8px; }
 #sessions li.group.attention .count { background: var(--attention); color: var(--on-accent); }
+/* 접어 둔 워크스페이스: 이름만 보이는 납작한 한 줄(폴더 줄·진행·단추·항목 수는 펼쳤을 때만 보인다).
+   그 안에 대기 중인 세션이 있으면 이름 뒤에 점 하나만 찍는다. */
+#sessions li.group.folded { margin-top: 3px; padding: 2px 8px; line-height: 18px; }
+#sessions li.group.folded:first-child { margin-top: 0; }
+#sessions li.group.folded.attention::after { content: "●"; flex: none; font-size: 10px; color: var(--attention); }
 
 /* 묶음에 든 세션: 들여쓰기 + 세로 이음선 + 가로 가지 */
 #sessions li:not(.group) { position: relative; margin-left: 22px; }
@@ -224,6 +229,8 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
 
 .pane { flex: 1 1 0; display: flex; flex-direction: column; min-width: 0; min-height: 0; background: var(--bg); }
 .pane.hidden { display: none; }
+/* SSH 방: 워크스페이스마다 하나. 큰 배치에서는 한 칸이고, 그 안에 방의 창들(탭 줄을 가진 SSH 창)이 제 배치대로 놓인다. */
+.ssh-room { flex: 1 1 0; min-width: 0; min-height: 0; display: flex; background: var(--line); }
 
 /* 세션을 끌어다 놓을 때, 새 창이 차지할 자리 미리보기 */
 #drop-hint {
@@ -240,6 +247,8 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
   pointer-events: none;
 }
 #drop-hint[hidden] { display: none; }
+/* 놓을 수 없는 자리(SSH 탭을 SSH 창 밖에 놓으려 할 때, 창 수 한도) */
+#drop-hint.blocked { background: rgba(120, 120, 120, 0.32); border-color: var(--dead); border-style: dashed; }
 
 /* 나란히 볼 때만 창마다 제목 줄을 보여 준다. */
 .pane-head {
@@ -338,6 +347,11 @@ body.resizing-col, body.resizing-col * { cursor: row-resize !important; user-sel
 .ssh-tab-close:hover { color: #ffffff; background: var(--dead); opacity: 1; }
 @container pane (max-width: 400px) {
   .ssh-tab, #terms:not(.multi) .pane.ssh .ssh-tab { min-width: 4em; padding: 0 2px 0 6px; }
+}
+/* 아주 좁은 SSH 창: 탭 줄이 밀려 사라지지 않게 워크스페이스 이름·글자 크기 단추를 숨긴다(글자 크기는 Ctrl+휠, 나머지는 탭 오른쪽 클릭 메뉴). */
+@container pane (max-width: 320px) {
+  .pane.ssh .pane-head .pane-group, .pane.ssh .pane-head .pane-font { display: none; }
+  .pane.ssh .ssh-tabs { flex: 1 1 4em; min-width: 4em; }
 }
 /* 창이 좁으면 단추 글을 줄인다(제목이 가려지지 않게): 넓을 때 .full, 좁으면 .short, 아주 좁으면 기호(.tiny)만 */
 .pane { container: pane / inline-size; }
@@ -704,6 +718,28 @@ button:disabled:hover { border-color: var(--line); }
 /* 워크스페이스 틀 */
 .template-summary { margin-left: 10px; color: var(--dim); font-size: 11px; font-weight: normal; }
 .row .template-here { flex: none; padding: 2px 8px; font-size: 11px; }
+/* 삭제한 워크스페이스의 기록: 삭제할 때 있던 항목과 보관해 둔 글 */
+.history-item { margin: 2px 0; padding: 6px 8px; border: 1px solid var(--line); border-radius: 6px; }
+.history-head { display: flex; align-items: baseline; gap: 8px; }
+.history-head b { flex: 0 1 auto; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.history-kind { flex: 1; font-size: 11px; color: var(--dim); }
+.history-copy { flex: none; padding: 1px 8px; font-size: 11px; }
+.history-link { margin-top: 2px; font-size: 12px; color: var(--dim); overflow-wrap: anywhere; user-select: text; }
+.history-link.none { font-style: italic; }
+.history-text {
+  margin: 6px 0 0;
+  max-height: 220px;
+  padding: 6px 8px;
+  overflow: auto;
+  font: 12px/1.5 var(--mono-font);
+  color: var(--text);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  background: var(--field);
+  border-radius: 4px;
+  user-select: text;
+}
+.row.add.history-erase { color: var(--dead); }
 
 #menu {
   position: fixed;
