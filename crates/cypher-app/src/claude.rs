@@ -14,7 +14,15 @@ use std::path::{Path, PathBuf};
 pub struct StatusLine {
     pub command: String,
     padding: Option<Value>,
-    refresh: Option<u64>,
+    /// 적혀 있던 `refreshInterval` 값 그대로(쓸 수 있는 값인지는 `refresh_interval`이 가린다).
+    refresh: Option<Value>,
+}
+
+/// 원래 상태줄이 정해 둔 갱신 주기(초) 가운데 Claude Code가 받아들이는 것만: 1 이상의 수(소수도 됨).
+/// 0·음수·수가 아닌 값은 Claude Code가 "주기 없음"으로 읽는다. 그런 값을 1초로 올려 넣으면 쉬는 세션마다 1초에 한 번씩
+/// 상태줄이 돌게 되므로(프로세스 넷), Cypher도 주기 없음으로 둔다.
+fn refresh_interval(original: Option<&StatusLine>) -> Option<&Value> {
+    original?.refresh.as_ref().filter(|value| value.as_f64().is_some_and(|seconds| seconds >= 1.0))
 }
 
 /// 설정 파일 하나에서 명령형 상태줄을 읽는다. Cypher의 전달 프로그램을 가리키는 것은 뺀다.
@@ -32,7 +40,7 @@ fn read_status_line(file: &Path) -> Option<StatusLine> {
     Some(StatusLine {
         command: command.to_string(),
         padding: line.get("padding").cloned(),
-        refresh: line.get("refreshInterval").and_then(Value::as_u64),
+        refresh: line.get("refreshInterval").cloned(),
     })
 }
 
@@ -76,8 +84,8 @@ fn settings_json(bridge: &str, original: Option<&StatusLine>, watch_files: bool,
     // 전달 프로그램) 뜨고 백신 검사도 따라붙는다. 주기를 걸면 쉬는 세션마다 그만큼 CPU를 계속 쓴다(예전에는 5초마다 돌렸다).
     // 원래 상태줄이 주기를 정해 두었으면(시계를 보이는 HUD 등) 그 주기만 따른다.
     // 그래서 쉬는 동안 `/model`·`/effort`로 바꾼 것은 다음 답변이 올 때 사이드바에 보인다(이 둘은 상태줄을 다시 돌리지 않는다).
-    if let Some(refresh) = original.and_then(|o| o.refresh) {
-        status["refreshInterval"] = json!(refresh.max(1)); // Claude Code의 최소값은 1초
+    if let Some(refresh) = refresh_interval(original) {
+        status["refreshInterval"] = refresh.clone();
     }
     if let Some(padding) = original.and_then(|o| o.padding.clone()) {
         status["padding"] = padding;
@@ -200,14 +208,26 @@ mod tests {
         let refresh = |original: Option<&StatusLine>| settings_json("b", original, false, false)["statusLine"].get("refreshInterval").cloned();
         // 원래 상태줄이 없거나 주기를 정하지 않았으면 주기를 걸지 않는다(일이 생길 때만 Claude Code가 돌린다).
         assert_eq!(refresh(None), None);
-        let line = |refresh: Option<u64>| StatusLine { command: "hud".into(), padding: Some(json!(2)), refresh };
+        let line = |refresh: Option<Value>| StatusLine { command: "hud".into(), padding: Some(json!(2)), refresh };
         assert_eq!(refresh(Some(&line(None))), None);
-        // 정해 두었으면(시계를 보이는 HUD 등) 그 주기를 그대로 따른다.
-        assert_eq!(refresh(Some(&line(Some(1)))), Some(json!(1)));
-        assert_eq!(refresh(Some(&line(Some(3600)))), Some(json!(3600)));
-        assert_eq!(refresh(Some(&line(Some(0)))), Some(json!(1))); // Claude Code의 최소값은 1초
+        // 정해 두었으면(시계를 보이는 HUD 등) 그 주기를 그대로 따른다. 소수도 Claude Code가 받는 값이다.
+        assert_eq!(refresh(Some(&line(Some(json!(1))))), Some(json!(1)));
+        assert_eq!(refresh(Some(&line(Some(json!(3600))))), Some(json!(3600)));
+        assert_eq!(refresh(Some(&line(Some(json!(1.5))))), Some(json!(1.5)));
+        // Claude Code가 "주기 없음"으로 읽는 값(1보다 작은 수, 수가 아닌 값)은 주기를 걸지 않는다.
+        // 1초로 올려 넣으면 쉬는 세션마다 1초에 한 번씩 상태줄이 돈다.
+        for bad in [json!(0), json!(-5), json!(0.5), json!("5"), json!(null), json!(true)] {
+            assert_eq!(refresh(Some(&line(Some(bad.clone())))), None, "{bad}");
+        }
+        // 설정 파일에서 읽을 때도 같다.
+        let dir = project("refresh");
+        let file = dir.join(".claude").join("settings.json");
+        for (text, want) in [("0", None), ("2", Some(json!(2))), ("\"x\"", None)] {
+            std::fs::write(&file, format!(r#"{{"statusLine":{{"command":"hud","refreshInterval":{text}}}}}"#)).unwrap();
+            assert_eq!(refresh(read_status_line(&file).as_ref()), want, "{text}");
+        }
 
-        let chained = settings_json("C:/app/cypher-bridge.exe", Some(&line(Some(1))), false, false);
+        let chained = settings_json("C:/app/cypher-bridge.exe", Some(&line(Some(json!(1)))), false, false);
         assert_eq!(chained["statusLine"]["command"], "C:/app/cypher-bridge.exe"); // 자리는 전달 프로그램이 차지
         assert_eq!(chained["statusLine"]["padding"], json!(2));
     }

@@ -184,7 +184,7 @@ pub const DEFAULT_TEXT: &str = r#"# Cypher 설정. 고친 뒤 Cypher를 다시 �
 
 [session]
 # restore = true       # 다시 시작할 때 이전 세션과 배치를 되살림
-# restore_on_click = true   # 되살린 세션을 바로 띄우지 않고, 사이드바에서 누른 세션(이나 워크스페이스 머리의 ▶)만 재개. false면 모두 바로 띄움
+# restore_on_click = true   # 되살린 세션을 바로 띄우지 않고, 사이드바에서 누른 세션(이나 워크스페이스 머리의 ▶)만 재개. false면 모두 바로 띄움(SSH는 늘 눌러야 접속)
 # scrollback = 10000   # 세션마다 기억할 지난 출력 줄 수
 # utf8 = true          # PowerShell·cmd 세션의 글자 인코딩을 UTF-8로 (Claude 세션은 해당 없음)
 # Claude 세션이 새로 만든 파일을 그 세션의 워크스페이스에 항목으로 놓기.

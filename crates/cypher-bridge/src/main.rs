@@ -16,8 +16,9 @@ use std::time::{Duration, Instant};
 const ACK_WAIT: Duration = Duration::from_millis(1500);
 
 /// 원래 상태줄 명령이 끝나기를 기다리는 시간. 넘기면 그 명령이 띄운 것까지 함께 끝낸다.
-/// Claude Code는 상태줄이 아직 돌고 있을 때 다음 갱신이 오면 그 실행을 버린다. 그런데 Windows에서는 부모를 끝내도 자식이
-/// 남으므로, 셸 아래의 이 프로그램과 원래 명령까지 끝난다는 보장이 없다. 멈춘 명령을 끝없이 기다리면 남는 것이 갱신마다 쌓일 수 있다.
+/// Claude Code는 상태줄이 아직 돌고 있을 때 다음 갱신이 오면 그 실행을 버리지만(프로세스 트리를 부모 번호를 따라 끝낸다),
+/// 다음 갱신이 없으면 오래(기본 10분) 기다린다. 그리고 부모 번호를 따라 끝내는 방식은 부모가 먼저 끝난 프로세스
+/// (Git Bash가 띄운 프로그램이 그렇다)에 닿지 않는다. 멈춘 명령을 그대로 두면 남는 것이 갱신마다 쌓일 수 있다.
 const ORIGINAL_WAIT: Duration = Duration::from_secs(10);
 
 fn connect() -> Option<(TcpStream, String)> {
@@ -98,8 +99,16 @@ fn run_original(command: &str, input: &str) {
 /// 넘기면 그 명령과 그 명령이 띄운 프로세스를 모두 끝낸다(제때 끝난 명령이 뒤에 남겨 둔 프로세스는 건드리지 않는다).
 fn run_bounded(command: &mut Command, input: &str, limit: Duration) -> bool {
     let Ok(mut child) = command.stdin(Stdio::piped()).spawn() else { return false };
+    // 그 명령이 띄우는 프로세스를 한 묶음(작업 개체)에 담아 둔다. 시간을 넘기면 묶음째 끝낸다.
+    #[cfg(windows)]
+    let job = job::Job::holding(&child);
+    // 입력은 다른 스레드에서 써 넣는다. 명령이 입력을 읽지 않으면 큰 입력의 쓰기가 막히는데, 여기서 기다리면
+    // 시간 제한을 재기도 전에 그 명령이 끝날 때까지 붙잡힌다. 다 쓰면(또는 명령이 끝나 쓰지 못하면) 입력을 닫는다.
     if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(input.as_bytes());
+        let input = input.to_owned();
+        std::thread::spawn(move || {
+            let _ = stdin.write_all(input.as_bytes());
+        });
     }
     let deadline = Instant::now() + limit;
     loop {
@@ -109,11 +118,70 @@ fn run_bounded(command: &mut Command, input: &str, limit: Duration) -> bool {
             _ => break,
         }
     }
+    #[cfg(windows)]
+    if let Some(job) = &job {
+        job.kill();
+    }
     kill_tree(&mut child);
     false
 }
 
-/// 프로세스와 그 자손을 모두 끝낸다. 셸만 끝내면 셸이 띄운 프로그램(상태줄 HUD 등)은 그대로 남는다.
+/// Windows의 작업 개체(Job Object): 프로세스와 그 프로세스가 띄우는 모든 프로세스를 한 묶음으로 다룬다.
+///
+/// 부모 번호를 따라 내려가며 끝내는 방식(`taskkill /T`)은 부모가 먼저 끝난 프로세스에 닿지 않는다. Git Bash(MSYS)의
+/// 프로그램은 뜨는 방식 때문에 Windows에서 보는 부모가 곧 사라지고, `start /b`로 띄우고 끝난 셸의 자식도 그렇다.
+/// 작업 개체에 든 프로세스가 띄운 프로세스는 부모가 끝나도 그 묶음에 남으므로, 묶음째 끝내면 모두 끝난다.
+#[cfg(windows)]
+mod job {
+    use std::ffi::c_void;
+    use std::os::windows::io::AsRawHandle;
+
+    extern "system" {
+        fn CreateJobObjectW(attributes: *const c_void, name: *const u16) -> *mut c_void;
+        fn AssignProcessToJobObject(job: *mut c_void, process: *mut c_void) -> i32;
+        fn TerminateJobObject(job: *mut c_void, exit_code: u32) -> i32;
+        fn CloseHandle(handle: *mut c_void) -> i32;
+    }
+
+    pub struct Job(*mut c_void);
+
+    impl Job {
+        /// 그 프로세스를 새 묶음에 넣는다. 넣지 못하면(이미 든 묶음이 겹쳐 넣기를 막는 등) None: 그때는 부모 번호를 따라 끝낸다.
+        /// 묶음에는 아무 제한도 걸지 않는다: 제때 끝난 명령이 남겨 둔 프로세스는 손잡이를 닫아도 그대로 돈다.
+        pub fn holding(child: &std::process::Child) -> Option<Job> {
+            // SAFETY: 이름 없는 작업 개체를 만들어, 살아 있는 자식 프로세스의 손잡이(child가 쥐고 있다)를 넣는다.
+            // 만든 손잡이는 Job이 쥐고 있다가 버려질 때 한 번 닫는다.
+            unsafe {
+                let job = CreateJobObjectW(std::ptr::null(), std::ptr::null());
+                if job.is_null() {
+                    return None;
+                }
+                let job = Job(job);
+                (AssignProcessToJobObject(job.0, child.as_raw_handle() as *mut c_void) != 0).then_some(job)
+            }
+        }
+
+        /// 묶음에 든 프로세스를 모두 끝낸다.
+        pub fn kill(&self) {
+            // SAFETY: 이 Job이 쥐고 있는 살아 있는 손잡이다.
+            unsafe {
+                TerminateJobObject(self.0, 1);
+            }
+        }
+    }
+
+    impl Drop for Job {
+        fn drop(&mut self) {
+            // SAFETY: 이 Job이 만든 손잡이를 한 번만 닫는다.
+            unsafe {
+                CloseHandle(self.0);
+            }
+        }
+    }
+}
+
+/// 프로세스와 그 자손을 부모 번호를 따라 내려가며 끝낸다. 셸만 끝내면 셸이 띄운 프로그램(상태줄 HUD 등)은 그대로 남는다.
+/// 작업 개체에 넣지 못했을 때와, 넣기 전의 짧은 사이에 뜬 프로세스를 위해 묶음째 끝낸 뒤에도 한 번 더 한다.
 fn kill_tree(child: &mut Child) {
     #[cfg(windows)]
     {
@@ -329,6 +397,30 @@ mod tests {
         assert!(started.elapsed() < Duration::from_secs(2), "시간을 넘긴 뒤 바로 돌아와야 한다: {:?}", started.elapsed());
         std::thread::sleep(Duration::from_secs(3));
         assert!(!root.join("late.txt").exists(), "끝내지 못한 자손 프로세스가 남아 파일을 썼다");
+
+        // 부모가 먼저 끝난 자손도 끝낸다(Git Bash가 띄운 프로그램, `start /b`로 띄우고 끝난 셸의 자식이 그렇다).
+        // 가운데 셸은 맨 아래 셸을 띄우고 바로 끝나므로, 부모 번호를 따라 내려가서는 맨 아래 셸에 닿지 못한다.
+        // 따옴표가 겹치지 않게 아래 두 단계의 명령은 환경 변수로 넘긴다(셸이 제 단계에서 풀어 쓴다).
+        let mut orphan = Command::new("cmd");
+        orphan
+            .env("CYPHER_TEST_INNER", "ping -n 3 127.0.0.1 >nul & echo x>orphan.txt")
+            .env("CYPHER_TEST_MIDDLE", r#"start /b cmd /C "%CYPHER_TEST_INNER%""#)
+            .raw_arg(r#"/C "start /b cmd /C "%CYPHER_TEST_MIDDLE%" & ping -n 30 127.0.0.1 >nul""#)
+            .current_dir(&root)
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let started = Instant::now();
+        assert!(!run_bounded(&mut orphan, "{}", Duration::from_millis(800)));
+        assert!(started.elapsed() < Duration::from_secs(3), "{:?}", started.elapsed());
+        std::thread::sleep(Duration::from_secs(4));
+        assert!(!root.join("orphan.txt").exists(), "부모가 먼저 끝난 자손 프로세스가 남아 파일을 썼다");
+
+        // 입력을 읽지 않는 명령에 큰 입력을 넘겨도 시간 제한은 지킨다(입력 쓰기가 막혀도 기다리지 않는다).
+        let mut deaf = Command::new("cmd");
+        deaf.raw_arg("/C ping -n 8 127.0.0.1 >nul").stdout(Stdio::null());
+        let started = Instant::now();
+        assert!(!run_bounded(&mut deaf, &"x".repeat(1 << 20), Duration::from_millis(300)));
+        assert!(started.elapsed() < Duration::from_secs(2), "큰 입력이 막혀 시간 제한을 넘겼다: {:?}", started.elapsed());
         let _ = std::fs::remove_dir_all(&root);
     }
 }

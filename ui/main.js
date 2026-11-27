@@ -695,7 +695,7 @@ async function newSession(profileId, opts = {}) {
   };
   // SSH는 워크스페이스마다 하나(SSH 방)다: 새 SSH 세션은 그 방의 탭으로 들어간다. 복제(tabOf)는 원래 세션 바로 옆 탭으로,
   // 그 방의 탭을 보고 있었으면 그 옆 탭으로, 아니면 방에서 마지막으로 쓴 창의 맨 끝 탭으로 넣는다(방이 없으면 이 세션으로 방이 생긴다).
-  // 되살리는 중에는 넣지 않는다(탭 묶음과 방 안의 배치는 restore가 저장해 둔 대로 되돌린다).
+  // 되살리는 중에는 넣지 않는다(다시 켜면 SSH는 워크스페이스마다 탭 하나뿐이다. restore).
   let tabAnchor = null, tabBeside = false;
   if (ssh && !opts.restoring) {
     const beside = opts.tabOf && sessions.has(opts.tabOf.key) && opts.tabOf.group === group ? opts.tabOf
@@ -798,11 +798,20 @@ async function startProcess(s, worktree = null) {
   saveState();
 }
 
-/** 쉬는 세션을 재개한다: 프로세스를 띄우고, Claude 세션은 하던 대화를 잇는다. */
-function wake(s, retry = false) {
+/**
+ * 쉬는 세션을 재개한다: 프로세스를 띄우고, Claude 세션은 하던 대화를 잇는다.
+ * `chosen`은 그 세션을 고른 때(activate: 누르기, 끌어다 놓기, 북마크·빠른 이동으로 가기)에 참이다. 앱이 다음에 볼 항목을
+ * 대신 고르는 길(보던 것을 닫거나 숨긴 뒤. stageFallback)과 지나가기만 하는 길(Ctrl+Tab, 창 사이 이동, 사이드바 방향키)은
+ * 쉬는 세션을 고르지 않으므로, 사용자가 고르지 않은 쉬는 세션은 여기로 오지 않는다.
+ *
+ * SSH 세션은 고른 것만 접속한다. 화면에 올라왔다고, 또는 "모두 재개"로 여럿이 한꺼번에 접속하지 않는다:
+ * 한 서버에 여러 접속이 동시에 들어가면 서버가 침입 시도로 보고 막는다. 사용자가 한 번 누르면 접속은 하나만 시작한다.
+ */
+function wake(s, chosen = false) {
   if (!s?.dormant || !sessions.has(s.key)) return;
+  if (s.ssh && !chosen) return;
   // 재개에 실패했던 세션은 사용자가 다시 누를 때만 다시 해 본다(화면 배치가 바뀔 때마다 되풀이하지 않는다).
-  if (s.wakeFailed && !retry) return;
+  if (s.wakeFailed && !chosen) return;
   s.dormant = false;
   s.wakeFailed = false;
   startProcess(s).then(() => {
@@ -817,11 +826,14 @@ function wake(s, retry = false) {
   });
 }
 
-/** 그 묶음의 쉬는 세션을 모두 재개한다. */
+/** 한꺼번에 재개할 수 있는 쉬는 세션들: SSH 세션은 뺀다(SSH는 사용자가 그 SSH를 눌렀을 때만 접속한다. wake). */
+const wakeable = (list) => list.filter((s) => s.dormant && !s.ssh && sessions.has(s.key));
+
+/** 그 묶음의 쉬는 세션을 모두 재개한다. SSH 세션은 건드리지 않는다. */
 function wakeGroup(group) {
-  const resting = group.list.filter((s) => s.dormant && sessions.has(s.key));
+  const resting = wakeable(group.list);
   for (const s of resting) wake(s, true);
-  if (resting.length) setStatus(`"${group.name}" 워크스페이스의 세션 ${resting.length}개를 재개했습니다.`);
+  if (resting.length) setStatus(`"${group.name}" 워크스페이스의 세션 ${resting.length}개를 재개했습니다.${group.list.some((s) => s.ssh && s.dormant) ? ' SSH는 사이드바의 SSH 줄을 누르면 접속합니다.' : ''}`);
   // 화면이 비어 있으면 그 가운데 첫 세션을 보여 준다.
   if (resting.length && !visible.length) activate(resting[0]);
   render();
@@ -908,15 +920,27 @@ function cloneSsh(s) {
 //
 // 큰 배치(tree)에서는 방 전체가 한 자리다({ room: 워크스페이스 이름 }). 사이드바의 SSH 줄을 누르면 방이 지금 창 자리에 놓이고,
 // 그 줄을 화면 가장자리로 끌어다 놓으면 방이 통째로 그쪽에 나뉘어 열린다. 다른 항목을 방의 자리에 열면 방은 통째로 화면에서 빠진다
-// (방 안의 배치는 남아 있어, 다시 열면 그대로 돌아온다). 방 안의 배치와 탭 순서는 저장해 두었다가 다시 시작하면 되살린다.
+// (방 안의 배치는 남아 있어, 다시 열면 그대로 돌아온다).
+//
+// 앱을 다시 켜면 SSH는 워크스페이스마다 탭 하나로 돌아온다([+]로 처음 만든 것처럼. sshDropped). 접속은 사용자가 고른 탭만 한다(wake):
+// 여러 탭이 한꺼번에 접속하면 서버가 침입 시도로 본다.
 
 /** SSH 방 안의 배치: 워크스페이스 이름 → 잎 { s }·가지 { dir, ratio, a, b }. 방이 화면에 없어도 남아 있다. */
 const rooms = new Map();
 /** 지금 화면에 그려진 방의 상자(워크스페이스 이름 → 요소). 다른 항목을 SSH 창 위로 끌 때 방 전체를 한 자리로 보여 주는 데 쓴다. */
 const roomBoxes = new Map();
 
+/** 방금 고른 항목(activate가 화면에 놓는 동안만). 쉬는 SSH 탭도 고른 것이면 창에 보이는 탭이 된다(settleRoom). */
+let picked = null;
+
+/**
+ * 사용자가 고르지 않았는데 앱이 다음에 볼 항목을 대신 골라야 할 때(보던 것을 닫거나 숨긴 뒤) 고를 화면의 항목.
+ * 쉬는 세션은 고르지 않는다: 고르면 재개되는데(SSH는 서버에 접속한다), 재개는 사용자가 고른 것만 한다.
+ */
+const stageFallback = () => visible.find((v) => !v.dormant) || null;
+
 /** 그 워크스페이스의 SSH 세션들(사이드바에 놓인 순서). */
-const sshOf = (group) => [...sessions.values()].filter((s) => s.ssh && s.group === group);
+const sshOf =(group) => [...sessions.values()].filter((s) => s.ssh && s.group === group);
 
 /** 그 워크스페이스의 SSH 방이 지금 화면에 있는지. */
 const roomShown = (group) => !!findSlot({ room: group });
@@ -942,9 +966,10 @@ function setLeaf(s) {
 /**
  * 그 워크스페이스의 SSH 방을 지금 세션에 맞춘다: 방 안의 창은 살아 있는 그 워크스페이스의 SSH 세션만 보이고, 한 탭 묶음은
  * 한 창에만 놓이며, 창이 없는 묶음의 탭은 방의 첫 창 탭 줄 끝에 붙는다(방이 비어 있으면 첫 세션의 창을 만든다).
- * SSH 세션이 없는 워크스페이스의 방은 없앤다. 되살리는 중에는 건드리지 않는다(restore가 저장해 둔 대로 되돌린다).
+ * SSH 세션이 없는 워크스페이스의 방은 없앤다. 되살리는 중에는 건드리지 않는다(다 되살린 뒤에 한 번 맞춘다).
+ * `front`(배치를 지을 때)이면 쉬는 탭이 보이는 창에 그 묶음의 깨어 있는 탭을 대신 보인다.
  */
-function settleRoom(group) {
+function settleRoom(group, front = false) {
   if (restoring) return;
   const all = sshOf(group);
   if (!all.length) { rooms.delete(group); return; }
@@ -969,6 +994,19 @@ function settleRoom(group) {
       home = s;
       placed.add(s.tabSet);
     } else joinTabs(s, home, null);
+  }
+  // 창에 보이는 탭이 쉬는 탭인데 그 묶음에 깨어 있는 탭이 있으면, 깨어 있는 탭(접속 중인 것 먼저, 가장 최근에 쓴 것)을 보인다.
+  // 쉬는 탭이 앞에 남으면 화면에 빈 창이 보이고, SSH를 열 때 접속해 있는 탭을 두고 그 탭이 새로 접속하게 된다(쉬는 탭만 있던
+  // SSH에 다른 워크스페이스의 SSH를 합쳤을 때 생긴다). 사용자가 방금 고른 쉬는 탭(picked)은 그대로 둔다: 곧 접속한다(activate).
+  // 배치를 지을 때만 한다(layout): 그 밖의 때에 바꾸면 화면에 놓인 창과 어긋난다.
+  if (front) {
+    (function raise(node) {
+      if (!node) return;
+      if (!node.s) { raise(node.a); raise(node.b); return; }
+      if (!node.s.dormant || node.s === picked) return;
+      const up = tabsOf(node.s).filter((x) => !x.dormant).sort((p, q) => (p.exited - q.exited) || (q.usedAt || 0) - (p.usedAt || 0))[0];
+      if (up) node.s = up;
+    })(inner);
   }
   rooms.set(group, inner);
 }
@@ -997,7 +1035,7 @@ function settleRooms() {
     seen.add(group);
     return node.room ? node : { room: group };
   });
-  for (const group of new Set([...rooms.keys(), ...[...sessions.values()].filter((s) => s.ssh).map((s) => s.group)])) settleRoom(group);
+  for (const group of new Set([...rooms.keys(), ...[...sessions.values()].filter((s) => s.ssh).map((s) => s.group)])) settleRoom(group, true);
   tree = mend(tree, (node) => (node.room && !rooms.has(node.room) ? null : node));
 }
 
@@ -1028,7 +1066,8 @@ function toggleRoom(group) {
   const mine = active?.ssh && active.group === group;
   tree = withoutSlot(tree, { room: group });
   layout();
-  if (mine && visible[0]) activate(visible[0]); else { render(); saveState(); }
+  const next = mine ? stageFallback() : null;
+  if (next) activate(next); else { render(); saveState(); }
 }
 
 /** 분할을 풀고 그 워크스페이스의 SSH 방만 화면에 남긴다(방 안의 배치는 그대로 둔다). */
@@ -1104,7 +1143,7 @@ function joinTabs(s, anchor, before) {
 
 /**
  * 창에 보이던 탭 s 대신 그 창에 옆 탭(오른쪽, 없으면 왼쪽, 그다음 가까운 탭)을 놓는다(방이 화면에 없어도 한다).
- * 방이 화면에 있을 때는 쉬는 탭에게 넘기지 않는다: 쉬는 탭이 화면에 올라가면 그 자리에서 접속을 시작하는데, 재개는 사용자가 누른 것만 한다.
+ * 방이 화면에 있을 때는 쉬는 탭에게 넘기지 않는다: 쉬는 탭은 사용자가 고르기 전에는 접속하지 않으므로(wake) 화면에 빈 창으로 남는다.
  * 대신 놓은 세션을 돌려준다. 넘겨받을 탭이 없거나 s가 보이던 탭이 아니면 null(부른 쪽이 그 창을 없앤다. 남은 탭은 방의 다른 창으로 간다).
  */
 function handOffTab(s) {
@@ -1189,7 +1228,8 @@ function revealTab(s) {
 
 /** 모든 종류의 창에 공통인 동작: 나란히 보기에서 창을 누르면 그 창이 활성화된다. */
 function wirePane(s) {
-  s.pane.addEventListener('mousedown', () => { if (active !== s) activate(s); }, true);
+  // 쉬고 있는 세션의 창(재개하지 못해 다시 쉬는 세션 등)은 보고 있던 것이어도 누르면 재개한다.
+  s.pane.addEventListener('mousedown', () => { if (active !== s || s.dormant) activate(s); }, true);
 }
 
 async function newWorktree(show) {
@@ -1401,7 +1441,7 @@ function layout() {
     // 명령 항목처럼 자기 터미널을 가진 항목도 스크롤 막대를 다시 맞춘다.
     for (const s of visible) s.view?.resync?.();
   });
-  // 쉬는 세션이 화면에 올라왔으면(누르기, 끌어다 놓기, 묶음 나란히 보기) 재개한다.
+  // 쉬는 세션이 화면에 올라왔으면(누르기, 끌어다 놓기) 재개한다. SSH 세션은 여기서 접속하지 않는다(사용자가 고른 탭만. wake).
   for (const s of visible) wake(s);
   markBroadcast(); // 방금 재개한 세션도 동시 입력을 받는다.
 }
@@ -1573,13 +1613,19 @@ function showDropHint(hit) {
 function activate(s, { keepFocus = false } = {}) {
   if (!s || !sessions.has(s.key)) return; // 기다리는 사이 닫힌 항목(넘기기, 워크스페이스 틀 펼치기)은 화면에 올리지 않는다.
   if (!visible.includes(s)) {
-    // SSH 탭은 SSH 방 안에서 그 묶음의 창에 보인다(방이 화면에 없으면 방이 지금 창 자리에 놓인다).
-    if (!(s.tabSet ? placeTab(s) : placeInActive(s))) {
-      // SSH 방의 창이 여럿이라 그 자리에 놓으면 화면의 창이 한도를 넘는다: 놓지 않고 알린다.
-      setStatus(`SSH 창 ${panesOf(slotFor(s))}개를 여기에 열면 화면의 창이 ${MAX_PANES}개를 넘습니다. 다른 창을 숨기거나, 사이드바의 SSH 줄을 오른쪽 클릭 → "SSH만 보기"로 여세요.`);
-      return;
+    // 고른 것이 쉬는 SSH 탭이어도 그 창에 보이는 탭으로 둔다(settleRoom은 쉬는 탭을 깨어 있는 탭 뒤로 돌린다). 아래에서 곧 접속한다.
+    picked = s;
+    try {
+      // SSH 탭은 SSH 방 안에서 그 묶음의 창에 보인다(방이 화면에 없으면 방이 지금 창 자리에 놓인다).
+      if (!(s.tabSet ? placeTab(s) : placeInActive(s))) {
+        // SSH 방의 창이 여럿이라 그 자리에 놓으면 화면의 창이 한도를 넘는다: 놓지 않고 알린다.
+        setStatus(`SSH 창 ${panesOf(slotFor(s))}개를 여기에 열면 화면의 창이 ${MAX_PANES}개를 넘습니다. 다른 창을 숨기거나, 사이드바의 SSH 줄을 오른쪽 클릭 → "SSH만 보기"로 여세요.`);
+        return;
+      }
+      layout();
+    } finally {
+      picked = null;
     }
-    layout();
   }
   // 찾기 줄이 열려 있었으면 보던 세션의 찾기 강조를 지운다(아래 closeSearch는 새로 고른 세션의 것을 지운다).
   if (active !== s && !$search.hidden) active?.search?.clearDecorations();
@@ -1610,12 +1656,15 @@ function toggleShown(s) {
     const next = foldPane(s);
     if (!next) return toggleRoom(s.group);
     layout();
-    if (active === s || !visible.includes(active)) activate(next); else { render(); saveState(); }
+    // 탭을 받은 창에 지금 보이는 탭을 고른다. 쉬는 탭은 고르지 않는다(고르면 접속한다. 접속은 사용자가 고른 탭만).
+    const shown = tabsOf(next).find((x) => visible.includes(x) && !x.dormant) || stageFallback();
+    if ((active === s || !visible.includes(active)) && shown) activate(shown); else { render(); saveState(); }
   } else {
     // 화면에서만 숨긴다. 마지막 창도 숨길 수 있고, 그때는 화면이 비고 세션은 사이드바에 남는다.
     tree = without(tree, s);
     layout();
-    if (active === s && visible[0]) activate(visible[0]); else { render(); saveState(); }
+    const next = active === s ? stageFallback() : null;
+    if (next) activate(next); else { render(); saveState(); }
   }
 }
 
@@ -1674,10 +1723,10 @@ async function closeSession(s, { forget = false } = {}) {
   visible = leavesOf(tree);
   if (active === s) {
     active = null;
-    // 화면에 남은 것이 없으면 다음에 볼 항목을 고른다. 쉬는 세션은 고르지 않는다(고르면 재개된다. 재개는 사용자가
-    // 누른 세션만 한다). 같은 워크스페이스의 것을 먼저 고른다. 닫은 탭의 자리를 받은 옆 탭이 화면에 있으면 그것을 고른다.
+    // 다음에 볼 항목을 고른다. 쉬는 세션은 화면에 있어도 고르지 않는다(고르면 재개된다. 재개는 사용자가 누른 세션만 한다).
+    // 닫은 탭의 자리를 받은 옆 탭이 화면에 있으면 그것을, 아니면 화면에 있는 것을, 화면이 비었으면 같은 워크스페이스의 것을 먼저 고른다.
     const awake = [...sessions.values()].filter((other) => !other.dormant);
-    const next = (heir && visible.includes(heir) ? heir : null) || visible[0] || awake.filter((other) => other.group === s.group).pop() || awake.pop();
+    const next = (heir && !heir.dormant && visible.includes(heir) ? heir : null) || stageFallback() || awake.filter((other) => other.group === s.group).pop() || awake.pop();
     if (next) activate(next);
   }
   layout();
@@ -1774,8 +1823,10 @@ function cycle(step) {
 }
 
 function focusPane(step) {
-  if (visible.length < 2 || !active) return;
-  activate(visible[(visible.indexOf(active) + step + visible.length) % visible.length]);
+  // 쉬는 세션의 창은 건너뛴다(지나가기만 해도 재개되지 않게). 재개하려면 그 창이나 사이드바의 줄을 누른다.
+  const panes = visible.filter((v) => !v.dormant || v === active);
+  if (panes.length < 2 || !active) return;
+  activate(panes[(panes.indexOf(active) + step + panes.length) % panes.length]);
 }
 
 /**
@@ -2633,8 +2684,8 @@ function addSshTab(group) {
 }
 
 /**
- * 여럿을 한꺼번에 닫을 때의 순서: 쉬는 세션부터 닫는다. 보이던 탭을 먼저 닫으면 그 창을 옆의 쉬는 탭이 받아 화면에 올라가고,
- * 닫으려던 세션이 그사이 깨어나 서버에 접속한다.
+ * 여럿을 한꺼번에 닫을 때의 순서: 쉬는 세션부터 닫는다. 보이던 탭을 먼저 닫으면 그 창을 옆의 쉬는 탭이 받아, 곧 닫을 탭이
+ * 그사이 화면에 올라왔다 내려간다(쉬는 SSH 탭은 올라와도 접속하지 않지만, 다른 쉬는 세션은 올라오면 재개된다).
  */
 const restingFirst = (list) => [...list.filter((s) => s.dormant), ...list.filter((s) => !s.dormant)];
 
@@ -2652,7 +2703,7 @@ function roomMenu(group, ev) {
   const list = roomTabs(group);
   const shown = roomShown(group);
   const panes = leavesOf(rooms.get(group) || null).length;
-  const resting = list.filter((s) => s.dormant);
+  // 쉬는 탭을 한꺼번에 다시 접속하는 길은 두지 않는다(동시 접속은 서버가 침입 시도로 본다). 탭을 하나씩 눌러 접속한다.
   showMenu(ev, [
     { caption: `SSH · 워크스페이스 "${group}" · 탭 ${list.length}개${panes > 1 ? ` · 창 ${panes}개` : ''} (SSH는 워크스페이스마다 하나입니다)` },
     { label: '서버에 접속… (새 탭으로)', action: () => addSshTab(group) },
@@ -2660,7 +2711,6 @@ function roomMenu(group, ev) {
       label: `탭으로 가기: ${tabName(s)}${s.exited ? ' (끝남)' : s.dormant ? ' (쉬는 중 · 다시 접속)' : loggingIn(s) ? ' (로그인 중)' : ''}`,
       action: () => activate(s),
     })),
-    ...(resting.length > 1 ? [{ label: `쉬는 세션 ${resting.length}개 모두 다시 접속`, action: () => { for (const s of resting) wake(s, true); render(); } }] : []),
     ...(!shown || visible.length > panes ? [{ label: 'SSH만 보기 (나머지는 화면에서 숨기기)', action: () => showRoomOnly(group) }] : []),
     ...(shown ? [{ label: '화면에서 숨기기', action: () => toggleRoom(group) }] : []),
     { caption: '탭 하나를 다루려면 SSH 창의 탭을 오른쪽 클릭하세요 (별칭·색·복제·닫기) · 탭을 끌면 SSH 창 안에서 옮기거나 나눠 봅니다' },
@@ -2835,7 +2885,7 @@ function moveToGroup(list, name) {
     // 보고 있던 탭이 옮겨 가며 다른 탭에 가려졌으면: 옮겨 간 SSH가 화면에 있을 때는 그 탭을 다시 보이고, 없으면 화면에 남은 것을 고른다.
     if (active && sessions.has(active.key) && !visible.includes(active)) {
       if (active.ssh && moving.has(active) && roomShown(name)) activate(active);
-      else if (visible[0]) activate(visible[0]);
+      else if (stageFallback()) activate(stageFallback()); // 쉬는 세션은 고르지 않는다(고르면 접속한다).
     }
   }
   render();
@@ -3146,8 +3196,8 @@ function groupMenu(group, ev) {
   const all = whole.list.filter((s) => sessions.has(s.key));
   const items = [];
   items.push(...addItems(group));
-  const resting = whole.list.filter((s) => s.dormant && sessions.has(s.key)).length;
-  if (resting) items.push({ label: `쉬는 세션 ${resting}개 모두 재개`, action: () => wakeGroup(whole) });
+  const resting = wakeable(whole.list).length;
+  if (resting) items.push({ label: `쉬는 세션 ${resting}개 모두 재개${whole.list.some((s) => s.ssh && s.dormant) ? ' (SSH는 빼고)' : ''}`, action: () => wakeGroup(whole) });
   if (all.length) items.push({ label: '이 워크스페이스를 틀로 저장… (같은 구성을 다시 펼칠 수 있게)', action: () => saveTemplate(whole) });
   if (group.logical) {
     // 워크스페이스 폴더: 이 워크스페이스에서 여는 세션이 시작될 폴더. 한 번 정하면 바꿀 수 없어, 정해 둔 워크스페이스에서는 탐색기로 열기만 한다.
@@ -3429,11 +3479,11 @@ function render() {
       // 묶음 안에서 돌고 있는 서브에이전트 수.
       const running = group.list.reduce((sum, s) => sum + s.agents.size, 0);
       head.append(running ? agentPill(running, `이 워크스페이스에서 서브에이전트 ${running}개 실행 중`) : make('span'));
-      // 쉬는 세션이 있는 묶음: 한 번에 재개하는 단추
-      const resting = group.list.filter((s) => s.dormant).length;
+      // 쉬는 세션이 있는 묶음: 한 번에 재개하는 단추. SSH 세션은 세지 않는다(SSH는 SSH 줄을 눌러야 접속한다).
+      const resting = wakeable(group.list).length;
       const play = make(resting ? 'button' : 'span', resting ? 'close wake' : '', resting ? '▶' : '');
       if (resting) {
-        play.title = `쉬는 세션 ${resting}개 재개`;
+        play.title = `쉬는 세션 ${resting}개 재개${group.list.some((s) => s.ssh && s.dormant) ? ' (SSH는 SSH 줄을 눌러 접속)' : ''}`;
         play.onclick = (ev) => { ev.stopPropagation(); wakeGroup(group); };
       }
       head.append(play);
@@ -3721,13 +3771,16 @@ function sidebarMenu(ev) {
 
 /**
  * 빠른 이동 창에 올릴 것: 사이드바의 항목(최근에 본 순서, 지금 보고 있는 것은 맨 뒤)과 앱의 명령.
- * 아무것도 치지 않고 Enter를 누르면 바로 전에 보던 항목으로 간다.
+ * 아무것도 치지 않고 Enter를 누르면 바로 전에 보던 항목으로 간다. 쉬는 세션은 지금 보는 항목보다 뒤에, 쉬는 SSH 세션은 명령보다도 뒤에 둔다.
  */
 function paletteEntries() {
   const items = [...sessions.values()]
-    .sort((a, b) => (a === active) - (b === active) || (b.usedAt || 0) - (a.usedAt || 0))
+    // 쉬는 세션은 지금 보는 항목보다도 뒤로 돌린다: 창을 열자마자 Enter를 눌렀을 때, 본 적 없는 쉬는 세션이 맨 앞에 있어
+    // 재개되지 않게 한다. 쉬는 세션은 설명에 "쉬는 중"으로 보이고, 골라서 Enter를 누르면 재개한다.
+    .sort((a, b) => !!a.dormant - !!b.dormant || (a === active) - (b === active) || (b.usedAt || 0) - (a.usedAt || 0))
     .map((s) => {
-      const state = !isTerm(s) ? '' : s.exited ? '종료됨' : WAITING_TEXT[s.waiting] || (s.busy || s.workStart ? '작업 중' : '');
+      const state = !isTerm(s) ? '' : s.exited ? '종료됨' : s.dormant ? (s.ssh ? '쉬는 중 · 고르면 접속' : '쉬는 중 · 고르면 재개')
+        : WAITING_TEXT[s.waiting] || (s.busy || s.workStart ? '작업 중' : '');
       return {
         icon: isTerm(s) ? '›' : KINDS[s.kind].icon,
         title: label(s),
@@ -3735,6 +3788,7 @@ function paletteEntries() {
         keywords: [s.cwd, s.title, isTerm(s) ? '세션 터미널' : KINDS[s.kind].label, s.model].filter(Boolean).join(' '),
         tone: s.waiting === 'approval' ? 'alert' : s.waiting === 'done' ? 'done' : '',
         action: () => activate(s),
+        restingSsh: !!s.ssh && !!s.dormant,
       };
     });
   const command = (title, action, note = '명령') => ({ icon: '⌘', title, note, action });
@@ -3785,7 +3839,9 @@ function paletteEntries() {
       ? command(`워크스페이스 "${viewedGroup()}"의 폴더 열기 (탐색기)`, () => openGroupFolder(viewedGroup()), `폴더 · ${groupFolderOf(viewedGroup())}`)
       : command(`워크스페이스 "${viewedGroup()}"의 폴더 정하기…`, () => pickGroupFolder(viewedGroup()), '폴더 · 지금: 정하지 않음 · 한 번 정하면 바꿀 수 없음')] : []),
   ];
-  return [...items, ...commands];
+  // 쉬는 SSH 세션은 명령보다도 뒤에 둔다: 아무것도 치지 않았을 때의 첫 줄(열자마자 Enter)이 되면 본 적 없는 서버에 접속한다.
+  // 이름을 쳐서 찾거나 아래로 내려 고르면 접속한다(접속은 사용자가 고른 것만).
+  return [...items.filter((item) => !item.restingSsh), ...commands, ...items.filter((item) => item.restingSsh)];
 }
 
 /** 창 아래에 5시간·주간 사용 한도를 항상 보여 준다. */
@@ -3935,7 +3991,8 @@ function sessionMenu(s, ev) {
       }] : []),
       ...(s.ssh ? [
         { label: `세션 복제 (바로 옆 탭으로 · ${specLabel(s.ssh)})`, action: () => cloneSsh(s) },
-        { label: '다른 서버에 접속… (이 창의 새 탭으로)', action: () => { activate(s); showSsh({ ...besideOf(s), cwd: s.startCwd, show: 'replace' }); } },
+        // 쉬는 탭에서 고른 것이면 그 탭을 고르지 않는다(고르면 그 탭도 접속을 시작한다). 새 탭은 그 탭 바로 옆에 놓는다.
+        { label: '다른 서버에 접속… (이 창의 새 탭으로)', action: () => { if (!s.dormant) activate(s); showSsh({ ...besideOf(s), cwd: s.startCwd, show: 'replace', tabOf: s }); } },
         ...(savedHosts().some((host) => host.target === s.ssh.target && (host.port || 0) === (s.ssh.port || 0)) ? [] : [{
           label: '이 서버를 저장해 두기 (접속 창에서 한 번에 접속)',
           action: () => { if (saveHost({ ...s.ssh, name: s.ssh.name || s.name })) setStatus(`SSH 서버를 저장했습니다: ${specLabel(s.ssh)}`); },
@@ -5074,14 +5131,6 @@ function writeState() {
   // 쉬는 세션(아직 재개하지 않은 것)도 적어 둔다. 빠뜨리면 다음에 켰을 때 목록에서 사라진다.
   // 띄우는 중인 세션(번호를 아직 받지 못했다)도 적는다. 재개하는 짧은 사이에 적은 기록에서 빠지면 안 된다.
   const live = [...sessions.values()].filter((s) => (isTerm(s) ? s.dormant || !s.exited : !!s.view));
-  // SSH 탭 묶음: 둘 이상인 묶음에 번호를 붙여 세션마다 { set: 묶음 번호, at: 탭 순번 }으로 적는다.
-  const setIds = new Map();
-  const tabOf = (s) => {
-    const tabs = s.tabSet ? tabsOf(s) : [];
-    if (tabs.length < 2) return {};
-    if (!setIds.has(s.tabSet)) setIds.set(s.tabSet, setIds.size);
-    return { tab: { set: setIds.get(s.tabSet), at: tabs.indexOf(s) } };
-  };
   const pack = (node) => {
     if (!node) return null;
     if (node.room) return { room: node.room };
@@ -5092,12 +5141,13 @@ function writeState() {
     // 항목 하나의 화면이 상태를 내놓다 실패해도 저장 전체가 멈추지 않게, 그 항목은 지난번에 적은 내용을 그대로 쓴다.
     sessions: [...live.map((s) => {
       try { s.lastRecord = describe(s); } catch (err) { console.error('항목의 상태를 읽지 못했습니다', s.kind, err); }
-      return s.lastRecord ? { ...s.lastRecord, shown: visible.includes(s), ...tabOf(s) } : null;
+      return s.lastRecord ? { ...s.lastRecord, shown: visible.includes(s) } : null;
     }), ...unrestored],
     active: live.indexOf(active),
     // 화면 분할 모양. 잎은 세션의 순번({ i })이나 SSH 방({ room: 워크스페이스 이름 }), 가지는 { dir, a, b }.
     layout: pack(tree),
-    // SSH 방 안의 배치(워크스페이스마다 하나). 방이 화면에 없어도 적어 둔다.
+    // SSH 방 안의 배치(워크스페이스마다 하나). 다시 켜면 SSH는 탭 하나로 돌아오므로 배치를 되살리지는 않고,
+    // 어느 탭을 남길지 고르는 데만 쓴다(sshDropped: 창에 보이던 탭이 먼저다).
     rooms: [...rooms].map(([group, inner]) => ({ group, layout: pack(inner) })),
   };
   try { localStorage.setItem('cypher.state', JSON.stringify(state)); } catch { /* 저장 공간 문제는 무시 */ }
@@ -5137,14 +5187,45 @@ function revive(item, opts = {}) {
 
 /**
  * 저장해 둔 분할 모양을 되살린다. 없어진 세션의 자리는 짝이 차지한다.
- * SSH 방의 자리({ room })는 `roomOk(워크스페이스 이름)`이 참일 때만 되살린다(방 안의 배치를 되살릴 때는 주지 않는다: 방 안에 방은 없다).
+ * SSH 방의 자리({ room })는 되살리지 않는다: 다시 켠 뒤의 SSH는 쉬고 있고, 화면에 올리는 것은 사용자가 SSH 줄을 누를 때다.
  */
-function unpack(data, list, roomOk = null) {
+function unpack(data, list) {
   if (!data || typeof data !== 'object') return null;
-  if (typeof data.room === 'string') return roomOk?.(data.room) ? { room: data.room } : null;
+  if (typeof data.room === 'string') return null;
   if ('i' in data) return list[data.i] ? { s: list[data.i] } : null;
-  const a = unpack(data.a, list, roomOk), b = unpack(data.b, list, roomOk);
+  const a = unpack(data.a, list), b = unpack(data.b, list);
   return a && b ? { dir: data.dir === 'col' ? 'col' : 'row', ratio: data.ratio, a, b } : (a || b);
+}
+
+/**
+ * 다시 켰을 때 되살리지 않을 SSH 세션들(저장 기록의 순번): 워크스페이스마다 하나만 남기고 나머지는 뺀다.
+ *
+ * 탭을 모두 되살리면 사용자가 SSH를 다시 열 때 여러 탭이 한꺼번에 서버에 접속하게 되고, 서버는 동시에 들어오는 접속을 침입 시도로
+ * 보고 막는다. 그래서 다시 켠 뒤의 SSH는 워크스페이스 머리의 [+]로 처음 만든 것과 같게 둔다: 탭 하나, 창 하나, 접속은 사용자가
+ * 누를 때 한 번(사용자 이름부터 묻는다). 서버가 더 필요하면 접속한 뒤 탭을 복제하거나(같은 연결을 써서 다시 인증하지 않는다)
+ * [+]로 더 연다. 남기는 탭은 끌 때 보고 있던 탭, 아니면 그 SSH 창에 보이던 첫 탭, 그것도 없으면 첫 탭이다.
+ */
+function sshDropped(saved) {
+  const isSsh = (item) => !!item && typeof item === 'object' && (!item.kind || item.kind === 'term')
+    && isSshProfile(config.profiles.find((p) => p.id === item.profile)) && !!cleanSpec(item.ssh);
+  const leaves = (node) => (!node || typeof node !== 'object' ? [] : Number.isInteger(node.i) ? [node.i] : [...leaves(node.a), ...leaves(node.b)]);
+  const front = new Map(); // 워크스페이스 → 그 SSH 창들에 보이던 탭의 순번
+  for (const room of Array.isArray(saved.rooms) ? saved.rooms : []) {
+    if (room && typeof room.group === 'string') front.set(room.group, leaves(room.layout));
+  }
+  const byGroup = new Map(); // 워크스페이스 → 그 워크스페이스의 SSH 세션 순번들
+  saved.sessions.forEach((item, index) => {
+    if (!isSsh(item)) return;
+    const group = String(item.group || ROOT_GROUP); // revive와 같게 센다: 워크스페이스 없이 적힌 것은 root로 간다.
+    if (!byGroup.has(group)) byGroup.set(group, []);
+    byGroup.get(group).push(index);
+  });
+  const dropped = new Set();
+  for (const [group, list] of byGroup) {
+    const keep = list.includes(saved.active) ? saved.active : (front.get(group) || []).find((i) => list.includes(i)) ?? list[0];
+    for (const index of list) if (index !== keep) dropped.add(index);
+  }
+  return dropped;
 }
 
 /**
@@ -5162,18 +5243,22 @@ async function restore({ docsOnly = false } = {}) {
   if (!saved?.sessions?.length) return;
   const restored = [];
   unrestored = [];
+  // SSH는 워크스페이스마다 탭 하나만 되살린다(sshDropped). 뺀 탭은 되살리지 못한 것이 아니므로 기록에도 남기지 않는다.
+  const dropped = docsOnly ? new Set() : sshDropped(saved);
   // 되살리는 동안에는 상태를 적지 않는다. 도중에 적으면 아직 되살리지 않은 뒤쪽 항목이 기록에서 빠져,
   // 그때 앱이 꺼지면 그 항목(메모 포함)이 목록에서 사라진다.
   restoring = true;
   try {
-    for (const item of saved.sessions) {
+    for (const [index, item] of saved.sessions.entries()) {
+      if (dropped.has(index)) { restored.push(null); continue; }
       // 항목 하나가 되살아나지 못해도(깨진 기록 포함) 뒤의 항목은 되살린다. 여기서 멈추면 뒤의 항목들이 다음 저장 때
       // 기록에서 사라진다. 되살리지 못한 항목의 기록은 남겨 두었다가 다음에 켤 때 다시 되살려 본다.
       try {
         const term = !item.kind || item.kind === 'term';
         // 터미널 세션은 프로세스를 띄우지 않고 사이드바에만 되살려 둔다(쉬는 세션). 사용자가 누른 것만 재개한다.
-        // 설정의 [session] restore_on_click = false이면 예전처럼 모두 바로 띄운다.
-        const dormant = term && config.session.restore_on_click !== false;
+        // 설정의 [session] restore_on_click = false이면 예전처럼 모두 바로 띄운다. SSH 세션은 그 설정과 무관하게 늘 쉬는 세션으로
+        // 둔다: 켜자마자 여러 워크스페이스의 SSH가 한꺼번에 접속하면 안 된다(접속은 사용자가 SSH 줄을 누를 때).
+        const dormant = term && (config.session.restore_on_click !== false || !!item.ssh);
         const skip = term && docsOnly;
         const s = skip ? null : await revive(item, { show: 'hidden', restoring: true, dormant });
         restored.push(s);
@@ -5192,44 +5277,25 @@ async function restore({ docsOnly = false } = {}) {
     restoring = false;
   }
   if (docsOnly) { render(); saveState(); return; } // 메모·HTTP는 사이드바에만 되살린다.
-  // SSH 탭 묶음과 탭 순서를 되살린다(같은 묶음 번호끼리, 적어 둔 순번대로). 먼저 모두 저 혼자인 묶음으로 되돌려 둔다.
-  for (const s of restored) if (s?.ssh && sessions.has(s.key)) s.tabSet = { list: [s] };
-  const tabSets = new Map();
-  saved.sessions.forEach((item, index) => {
-    const s = restored[index];
-    if (!s?.tabSet || !Number.isInteger(item?.tab?.set)) return;
-    if (!tabSets.has(item.tab.set)) tabSets.set(item.tab.set, []);
-    tabSets.get(item.tab.set).push({ at: Number(item.tab.at) || 0, s });
-  });
-  for (const members of tabSets.values()) {
-    // 한 묶음은 한 워크스페이스의 것이다(기록이 어긋나 있으면 첫 탭의 워크스페이스 것만 묶는다).
-    const list = members.sort((p, q) => p.at - q.at).map((m) => m.s).filter((s) => sessions.has(s.key));
-    if (!list.length) continue;
-    const set = { list: list.filter((s) => s.group === list[0].group) };
-    for (const s of set.list) s.tabSet = set;
-  }
-  // SSH 방 안의 배치를 되살린다(쉬는 세션도 방 안에 제 창을 가진다. 방을 화면에 올릴지는 아래의 큰 배치가 정한다).
+  // SSH 방은 저장해 둔 배치로 되돌리지 않는다: 워크스페이스마다 탭 하나뿐이라, 방은 그 탭의 창 하나로 새로 생긴다(settleRoom).
   rooms.clear();
-  for (const room of Array.isArray(saved.rooms) ? saved.rooms : []) {
-    if (!room || typeof room.group !== 'string' || !room.group) continue;
-    const inner = unpack(room.layout, restored.map((s) => (s?.ssh && sessions.has(s.key) && s.group === room.group ? s : null)));
-    if (inner) rooms.set(room.group, inner);
-  }
   // 분할 모양을 되살린다. 저장된 모양이 없으면(예전 기록) 보이던 세션을 고르게 나눈다.
   // 되살리는 도중에 사용자가 닫은 항목은 배치에서 뺀다(순번은 저장 때와 맞아야 하므로 자리는 비워 둔다).
-  // 쉬는 세션은 화면에 올리지 않는다(올리면 재개된다): SSH 방도 그 안에 보이는 탭이 모두 깨어 있을 때만 화면에 올린다.
+  // 쉬는 세션은 화면에 올리지 않는다(올리면 재개된다). SSH는 늘 쉬고 있으므로 SSH 방도 화면에 올리지 않는다.
   const alive = restored.map((s) => (s && sessions.has(s.key) && !s.dormant ? s : null));
-  const awake = (group) => rooms.has(group) && leavesOf(rooms.get(group)).every((s) => !s.dormant);
-  tree = unpack(saved.layout, alive, awake)
+  tree = unpack(saved.layout, alive)
     || balanced(alive.filter((s, index) => s && saved.sessions[index].shown).slice(0, MAX_PANES));
   layout();
   // 끌 때 보던 것이 세션이면 지금은 쉬고 있어 고를 수 없다. 그때는 되살린 배치에 있는 것을 고른다
   // (화면에 없던 항목을 골라 배치에 끼워 넣지 않는다).
   const target = alive[saved.active] || leavesOf(tree)[0] || alive.find(Boolean);
   if (target) activate(target); else render();
-  const resting = restored.filter((s) => s?.dormant).length;
-  if (unrestored.length) setStatus(`지난 항목 ${unrestored.length}개를 되살리지 못했습니다. 다음에 켤 때 다시 되살려 봅니다.`);
-  else if (resting) setStatus(`지난 세션 ${resting}개는 쉬고 있습니다. 사이드바에서 세션을 누르거나 워크스페이스 머리의 ▶를 누르면 재개합니다.`);
+  const resting = wakeable(restored.filter(Boolean)).length; // ▶로 한꺼번에 재개할 수 있는 것(SSH가 아닌 쉬는 세션)
+  const sshResting = restored.some((s) => s?.ssh && s.dormant && sessions.has(s.key));
+  const sshNote =dropped.size ? ` SSH는 워크스페이스마다 탭 하나로 되살렸습니다(다른 탭 ${dropped.size}개는 닫음 · 접속한 뒤 탭을 복제하거나 +로 더 엽니다).` : '';
+  if (unrestored.length) setStatus(`지난 항목 ${unrestored.length}개를 되살리지 못했습니다. 다음에 켤 때 다시 되살려 봅니다.${sshNote}`);
+  else if (resting) setStatus(`지난 세션 ${resting}개는 쉬고 있습니다. 사이드바에서 세션을 누르거나 워크스페이스 머리의 ▶를 누르면 재개합니다${sshResting ? '(SSH는 SSH 줄을 누를 때만 접속)' : ''}.${sshNote}`);
+  else if (sshResting) setStatus(`SSH는 쉬고 있습니다. 사이드바의 SSH 줄을 누르면 접속합니다.${sshNote}`);
 }
 
 // ───────────────────────── 입력 ─────────────────────────
