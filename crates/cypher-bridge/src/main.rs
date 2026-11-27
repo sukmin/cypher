@@ -9,11 +9,16 @@
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::time::Duration;
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
 /// 본체가 신호를 처리하고 연결을 닫기를 기다리는 시간. 본체가 멈춰 있어도 Claude Code를 오래 붙잡지 않는다.
 const ACK_WAIT: Duration = Duration::from_millis(1500);
+
+/// 원래 상태줄 명령이 끝나기를 기다리는 시간. 넘기면 그 명령이 띄운 것까지 함께 끝낸다.
+/// Claude Code는 상태줄이 아직 돌고 있을 때 다음 갱신이 오면 그 실행을 버린다. 그런데 Windows에서는 부모를 끝내도 자식이
+/// 남으므로, 셸 아래의 이 프로그램과 원래 명령까지 끝난다는 보장이 없다. 멈춘 명령을 끝없이 기다리면 남는 것이 갱신마다 쌓일 수 있다.
+const ORIGINAL_WAIT: Duration = Duration::from_secs(10);
 
 fn connect() -> Option<(TcpStream, String)> {
     let port = std::env::var("CYPHER_PORT").ok()?.parse::<u16>().ok()?;
@@ -85,11 +90,45 @@ fn run_original(command: &str, input: &str) {
     };
     // 원래 명령이 다시 이 프로그램을 부르더라도 끝없이 이어지지 않게 한다.
     shell.env_remove("CYPHER_STATUSLINE");
-    let spawned = shell.stdin(Stdio::piped()).stdout(Stdio::inherit()).stderr(Stdio::null()).spawn();
-    let Ok(mut child) = spawned else { return };
+    shell.stdout(Stdio::inherit()).stderr(Stdio::null());
+    run_bounded(&mut shell, input, ORIGINAL_WAIT);
+}
+
+/// 명령을 띄워 표준 입력으로 `input`을 넘기고 `limit` 안에 끝나기를 기다린다. 제때 끝났으면 true.
+/// 넘기면 그 명령과 그 명령이 띄운 프로세스를 모두 끝낸다(제때 끝난 명령이 뒤에 남겨 둔 프로세스는 건드리지 않는다).
+fn run_bounded(command: &mut Command, input: &str, limit: Duration) -> bool {
+    let Ok(mut child) = command.stdin(Stdio::piped()).spawn() else { return false };
     if let Some(mut stdin) = child.stdin.take() {
         let _ = stdin.write_all(input.as_bytes());
     }
+    let deadline = Instant::now() + limit;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return true,
+            Ok(None) if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(10)),
+            _ => break,
+        }
+    }
+    kill_tree(&mut child);
+    false
+}
+
+/// 프로세스와 그 자손을 모두 끝낸다. 셸만 끝내면 셸이 띄운 프로그램(상태줄 HUD 등)은 그대로 남는다.
+fn kill_tree(child: &mut Child) {
+    #[cfg(windows)]
+    {
+        // 이름만으로 부르지 않고 Windows 폴더의 것을 직접 부른다.
+        let taskkill = std::env::var_os("SystemRoot").map(|root| PathBuf::from(root).join("System32").join("taskkill.exe"));
+        if let Some(taskkill) = taskkill.filter(|path| path.is_file()) {
+            let _ = Command::new(taskkill)
+                .args(["/T", "/F", "/PID", &child.id().to_string()])
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status();
+        }
+    }
+    let _ = child.kill();
     let _ = child.wait();
 }
 
@@ -267,6 +306,29 @@ mod tests {
         // 진짜 claude는 이 이름들로, 이 순서로 찾는다.
         assert_eq!(CLAUDE_NAMES, ["claude.exe", "claude.cmd", "claude.bat"]);
         assert_eq!(find_claude(&path, &shim), None);
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn 원래_상태줄이_제때_끝나지_않으면_그_명령이_띄운_것까지_끝낸다() {
+        use std::os::windows::process::CommandExt;
+        // 표시 파일은 임시 폴더가 아니라 빌드 폴더 아래에 둔다.
+        let root = std::env::current_exe().unwrap().parent().unwrap().join("test-files").join("cypher-bounded-test");
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        // 제때 끝나는 명령은 끝날 때까지 기다린다.
+        let mut quick = Command::new("cmd");
+        quick.raw_arg("/C exit 0").stdout(Stdio::null());
+        assert!(run_bounded(&mut quick, "{}", Duration::from_secs(10)));
+        // 셸(cmd)이 띄운 셸이 2초쯤 뒤에 표시 파일을 쓴다. 시간을 넘겨 셸만 끝냈다면 그 아래 셸이 남아 파일을 쓴다.
+        let mut slow = Command::new("cmd");
+        slow.raw_arg(r#"/C "cmd /C "ping -n 3 127.0.0.1 >nul & echo x>late.txt"""#).current_dir(&root).stdout(Stdio::null());
+        let started = Instant::now();
+        assert!(!run_bounded(&mut slow, "{}", Duration::from_millis(300)));
+        assert!(started.elapsed() < Duration::from_secs(2), "시간을 넘긴 뒤 바로 돌아와야 한다: {:?}", started.elapsed());
+        std::thread::sleep(Duration::from_secs(3));
+        assert!(!root.join("late.txt").exists(), "끝내지 못한 자손 프로세스가 남아 파일을 썼다");
         let _ = std::fs::remove_dir_all(&root);
     }
 }

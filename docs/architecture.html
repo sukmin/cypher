@@ -202,7 +202,7 @@
   <text x="705" y="48" text-anchor="middle" class="h">화면</text>
 
   <text x="34" y="84" class="tac">① 상태줄</text>
-  <text x="34" y="100" class="s">몇 초마다</text>
+  <text x="34" y="100" class="s">일이 생길 때</text>
   <path class="a" d="M170 90 L230 90"/><path class="a" d="M370 90 L430 90"/><path class="a" d="M570 90 L630 90"/>
   <text x="644" y="86" class="s">모델 · effort</text><text x="644" y="100" class="s">컨텍스트 · 비용 · 한도</text>
 
@@ -228,7 +228,8 @@
   <li>본체는 도구 신호를 화면에 그대로 넘기지 않습니다. 도구 이름과 짧은 설명만 뽑아 <code>session-tool</code> 이벤트로 알리고(<a href="#activity">9절</a>), <code>Write</code> 도구의 신호에서는 새로 만든 파일을 가려 <code>session-file</code>로, 있던 파일을 고쳐 쓴 것(<code>Write</code>·<code>Edit</code>)은 <code>session-edit</code>로 알립니다(<a href="#created">8절</a>). 상태줄은 <code>session-status</code>, 그 밖의 훅은 <code>session-hook</code>입니다.</li>
   <li><b>도구는 26개</b>입니다: 브라우저 13개(<code>browser_*</code>), HTTP 2개(<code>http_list</code>·<code>http_run</code>), 항목 11개(<code>cypher_items</code>, <code>memo_write</code>, <code>mindmap_write</code>, <code>erd_write</code>, <code>todo_write</code>, <code>todo_check</code>, <code>run_output</code>, <code>image_add</code>, <code>doc_show</code>, <code>table_show</code>, <code>notify_user</code>).</li>
   <li>워크스페이스를 알아야 하는 도구는 본체가 화면에 물어서(<code>mcp-request</code> 이벤트) 답을 받습니다(20초 안에). 화면이 그 시각을 넘겨 받은 요청은 실행하지 않습니다(Claude가 다시 시도한 것과 겹치지 않게).</li>
-  <li>상태줄 자리는 하나뿐이라, 사용자가 원래 쓰던 상태줄(HUD)이 있으면 전달 프로그램이 정보를 넘긴 뒤 그 명령을 이어서 실행해 출력을 그대로 내보냅니다(<code>CYPHER_STATUSLINE</code>).</li>
+  <li><b>프로세스를 적게 띄웁니다.</b> Windows에서 Claude Code는 상태줄 명령을 늘 Git Bash로 돌립니다. 그래서 상태줄이 한 번 돌 때마다 프로세스가 넷(Git Bash 실행기, 콘솔 호스트, bash, 전달 프로그램) 뜨고 백신 검사도 따라붙습니다. 상태줄은 일이 생길 때(세션 시작, 새 답변, <code>/compact</code>, 권한 모드 변경, 사용 한도 초기화 시각)마다 Claude Code가 돌리고, Cypher는 쉬는 동안 다시 돌리는 주기(<code>refreshInterval</code>)를 걸지 않습니다. 원래 상태줄(HUD)이 주기를 정해 두었을 때만 그 주기를 따릅니다. 예전처럼 5초마다 돌리면 쉬는 세션 하나가 1분에 프로세스 48개를 띄웁니다. 그 대신 쉬는 동안 <code>/model</code>·<code>/effort</code>로 바꾼 것은 다음 답변이 올 때 사이드바에 보입니다(이 둘은 상태줄을 다시 돌리지 않습니다). 훅은 셸을 거치지 않는 형식(<code>"args": []</code>)으로 걸어 전달 프로그램만 바로 뜹니다(한 번에 드는 CPU가 다섯 배쯤 적습니다). 화면은 상태줄 신호가 와도 보이는 값이 그대로면 사이드바를 다시 그리지 않습니다.</li>
+  <li>상태줄 자리는 하나뿐이라, 사용자가 원래 쓰던 상태줄(HUD)이 있으면 전달 프로그램이 정보를 넘긴 뒤 그 명령을 이어서 실행해 출력을 그대로 내보냅니다(<code>CYPHER_STATUSLINE</code>). 원래 명령은 10초 안에 끝나야 하며, 넘기면 그 명령이 띄운 것까지 끝냅니다(Claude Code가 버린 실행이 Windows에서는 자식을 남길 수 있어, 멈춘 명령을 끝없이 기다리면 갱신마다 쌓입니다).</li>
   <li>설정 → "Claude 실행 명령…"에 적어 둔 명령이 있으면 <code>claude</code> 대신 그 명령으로 띄우고, 위 인자는 그 뒤에 붙입니다.</li>
 </ul>
 

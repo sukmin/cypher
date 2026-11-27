@@ -2026,9 +2026,15 @@ function onExit({ id, code }) {
   saveState();
 }
 
+/** 상태줄 신호로 바뀌는 것 가운데 화면에 보이는 것. 신호가 와도 이것이 그대로면 다시 그리지 않는다. */
+const statusShown = (s) => JSON.stringify([s.claudeLive, s.model, s.effort, s.context, s.cost, s.cwd, s.worktree]);
+/** 마지막으로 그린 사용 한도(JSON 글). */
+let limitsShown = '';
+
 function onStatus({ id, model, effort, context, cwd, project, session, worktree, cost, limits: newLimits }) {
   const s = byId(id);
   if (!s) return;
+  const before = statusShown(s);
   // 셸 세션(PowerShell)에서 사용자가 직접 띄운 Claude가 보내온 신호: 이 세션에서 Claude가 돌고 있다고 적어 둔다.
   // 끝난 직후에 뒤늦게 온 상태줄 신호로 되살아나지 않게 잠깐은 받지 않는다.
   if (!s.profile?.claude) {
@@ -2048,7 +2054,11 @@ function onStatus({ id, model, effort, context, cwd, project, session, worktree,
   } else if (context != null && context < CONTEXT_WARN) {
     s.contextAlerted = false;
   }
-  if (newLimits) { limits = newLimits; renderLimits(); }
+  if (newLimits) {
+    limits = newLimits;
+    const text = JSON.stringify(newLimits);
+    if (text !== limitsShown) { limitsShown = text; renderLimits(); }
+  }
   if (cwd) s.cwd = cwd; // 상대경로 링크의 기준 폴더도 따라간다.
   if (worktree) s.worktree = worktree;
   if ((project && project !== s.project) || (session && session !== s.claudeSession)) {
@@ -2056,7 +2066,9 @@ function onStatus({ id, model, effort, context, cwd, project, session, worktree,
     s.claudeSession = session || s.claudeSession;
     saveState();
   }
-  render();
+  // 상태줄 신호는 바뀐 것이 없어도 온다(원래 상태줄이 정해 둔 갱신 주기 등). 그때마다 사이드바 전체를
+  // 다시 만들지 않는다.
+  if (statusShown(s) !== before) render();
 }
 
 /** 알림(Notification) 가운데 알려 주기만 하는 것: 사용자의 입력·승인을 기다린다는 뜻이 아니다. */

@@ -51,7 +51,8 @@ pub fn original_status_line(cwd: &Path) -> Option<StatusLine> {
 const WRITING_TOOLS: &str = "Write|Edit|MultiEdit";
 
 /// 세션 하나의 설정 내용: 상태줄과 훅을 전달 프로그램으로 지정한다.
-/// 원래 상태줄이 있으면 그 여백을 따르고, 더 자주 갱신하던 쪽에 맞춘다.
+/// `bridge`는 셸이 읽을 호출문이다(경로에 셸이 달리 읽는 글자가 있으면 따옴표로 감싸 온다).
+/// 원래 상태줄이 있으면 그 여백과 갱신 주기를 따른다. Cypher가 따로 거는 갱신 주기는 없다.
 /// `watch_files`이면 Write 도구의 직전 훅과 파일을 쓰는 도구의 직후 훅을 건다(세션이 새로 만든 파일을 사이드바에 놓고,
 /// 고쳐 쓴 파일을 보여 주는 항목을 다시 읽게 하는 데 쓴다).
 /// `activity`이면 모든 도구의 직전·직후·실패 훅을 건다(사이드바의 그 줄에 지금 쓰는 도구를 보여 주는 데 쓴다).
@@ -60,9 +61,24 @@ fn settings_json(bridge: &str, original: Option<&StatusLine>, watch_files: bool,
     // 훅: 요청 시작(UserPromptSubmit), 응답 완료(Stop), 입력·승인 대기(Notification),
     // 서브에이전트 시작·종료(SubagentStart·SubagentStop), Claude Code 종료(SessionEnd: 셸 세션에서 직접 띄운
     // Claude가 끝났을 때 그 줄의 모델·상태 표시를 지우는 데 쓴다).
-    let hook = json!([{ "hooks": [{ "type": "command", "command": bridge }] }]);
-    let refresh = original.and_then(|o| o.refresh).map_or(5, |r| r.clamp(1, 5));
-    let mut status = json!({ "type": "command", "command": bridge, "refreshInterval": refresh });
+    // 훅은 셸을 거치지 않고 전달 프로그램을 바로 띄운다(`args`가 있으면 Claude Code가 `command`를 실행 파일로 보고 그대로 띄운다).
+    // 셸을 거치면 Windows에서는 신호 하나마다 Git Bash가 두 번 떠서, 바로 띄울 때보다 CPU가 다섯 배쯤 든다.
+    // 도구 훅을 걸면 도구를 쓸 때마다 두 번씩 오므로 이 차이가 크다. `args`를 모르는 옛 Claude Code는 이 칸을 버리고
+    // `command`를 셸로 돌리므로, 경로가 셸에 평범하면(보통의 경우) 그때도 전처럼 동작한다.
+    let program = bridge.trim_matches('"');
+    let run = json!({ "type": "command", "command": program, "args": [] });
+    let hook = json!([{ "hooks": [run.clone()] }]);
+    // 상태줄에는 셸을 거치지 않는 형식이 없다(Claude Code는 상태줄 명령을 늘 셸로 돌린다).
+    let mut status = json!({ "type": "command", "command": bridge });
+    // 상태줄은 일이 생길 때마다 Claude Code가 돌린다(세션 시작, 새 답변, `/compact`, 권한 모드 변경, 사용 한도 초기화 시각).
+    // 모델·컨텍스트·비용·한도도 그때 바뀌므로, Cypher는 쉬는 동안 다시 돌리는 주기(`refreshInterval`)를 걸지 않는다.
+    // Windows에서 상태줄은 늘 Git Bash로 돌아서 한 번 돌 때마다 프로세스가 넷(Git Bash 실행기, 콘솔 호스트, bash,
+    // 전달 프로그램) 뜨고 백신 검사도 따라붙는다. 주기를 걸면 쉬는 세션마다 그만큼 CPU를 계속 쓴다(예전에는 5초마다 돌렸다).
+    // 원래 상태줄이 주기를 정해 두었으면(시계를 보이는 HUD 등) 그 주기만 따른다.
+    // 그래서 쉬는 동안 `/model`·`/effort`로 바꾼 것은 다음 답변이 올 때 사이드바에 보인다(이 둘은 상태줄을 다시 돌리지 않는다).
+    if let Some(refresh) = original.and_then(|o| o.refresh) {
+        status["refreshInterval"] = json!(refresh.max(1)); // Claude Code의 최소값은 1초
+    }
     if let Some(padding) = original.and_then(|o| o.padding.clone()) {
         status["padding"] = padding;
     }
@@ -73,7 +89,7 @@ fn settings_json(bridge: &str, original: Option<&StatusLine>, watch_files: bool,
             "SubagentStart": hook, "SubagentStop": hook, "SessionEnd": hook
         }
     });
-    let tools = |matcher: &str| json!([{ "matcher": matcher, "hooks": [{ "type": "command", "command": bridge }] }]);
+    let tools = |matcher: &str| json!([{ "matcher": matcher, "hooks": [run.clone()] }]);
     if activity {
         // 지금 쓰는 도구를 보여 주려면 모든 도구의 직전·직후를 본다. 실패하거나 중단된 도구에는 직후 신호 대신
         // 실패 신호가 온다. 받아야 "하는 중" 표시가 남지 않는다.
@@ -144,7 +160,7 @@ mod tests {
     }
 
     #[test]
-    fn 설정에는_전달_프로그램을_넣고_원래_여백과_갱신_주기를_따른다() {
+    fn 설정에는_전달_프로그램을_넣고_훅은_셸_없이_띄운다() {
         let plain = settings_json("C:/app/cypher-bridge.exe", None, false, false);
         assert!(plain["hooks"].get("PreToolUse").is_none() && plain["hooks"].get("PostToolUse").is_none());
         // 세션이 쓴 파일을 보려면 Write 도구의 직전 훅과, 파일을 쓰는 도구(고치는 도구 포함)의 직후 훅을 건다.
@@ -153,6 +169,7 @@ mod tests {
         assert_eq!(watching["hooks"]["PostToolUse"][0]["matcher"], "Write|Edit|MultiEdit");
         for event in ["PreToolUse", "PostToolUse"] {
             assert_eq!(watching["hooks"][event][0]["hooks"][0]["command"], "C:/app/cypher-bridge.exe");
+            assert_eq!(watching["hooks"][event][0]["hooks"][0]["args"], json!([]));
         }
         assert!(watching["hooks"].get("PostToolUseFailure").is_none());
         // 지금 쓰는 도구를 보여 주려면 모든 도구의 직전·직후·실패 훅을 건다(만든 파일 놓기를 꺼 두었어도).
@@ -165,16 +182,33 @@ mod tests {
         }
         assert_eq!(watching["hooks"]["Stop"], plain["hooks"]["Stop"]);
         assert_eq!(plain["statusLine"]["command"], "C:/app/cypher-bridge.exe");
-        assert_eq!(plain["statusLine"]["refreshInterval"], 5);
+        assert!(plain["statusLine"].get("args").is_none()); // 상태줄은 셸로만 돈다
         assert!(plain["statusLine"].get("padding").is_none());
-        assert_eq!(plain["hooks"]["SubagentStop"][0]["hooks"][0]["command"], "C:/app/cypher-bridge.exe");
+        // 훅은 셸을 거치지 않고 전달 프로그램을 바로 띄운다(`args`가 있으면 exec 형식).
+        for event in ["UserPromptSubmit", "Stop", "Notification", "SubagentStart", "SubagentStop", "SessionEnd"] {
+            let run = &plain["hooks"][event][0]["hooks"][0];
+            assert_eq!((run["command"].clone(), run["args"].clone()), (json!("C:/app/cypher-bridge.exe"), json!([])), "{event}");
+        }
+        // 셸용으로 따옴표를 두른 경로는 상태줄에만 그대로 쓰고, 바로 띄우는 훅에는 따옴표를 떼어 넘긴다.
+        let quoted = settings_json("\"C:/없는 폴더/cypher-bridge.exe\"", None, false, false);
+        assert_eq!(quoted["statusLine"]["command"], "\"C:/없는 폴더/cypher-bridge.exe\"");
+        assert_eq!(quoted["hooks"]["Stop"][0]["hooks"][0]["command"], "C:/없는 폴더/cypher-bridge.exe");
+    }
 
-        let original = StatusLine { command: "hud".into(), padding: Some(json!(2)), refresh: Some(1) };
-        let chained = settings_json("C:/app/cypher-bridge.exe", Some(&original), false, false);
+    #[test]
+    fn 쉬는_동안의_갱신_주기는_원래_상태줄이_정해_둔_것만_따른다() {
+        let refresh = |original: Option<&StatusLine>| settings_json("b", original, false, false)["statusLine"].get("refreshInterval").cloned();
+        // 원래 상태줄이 없거나 주기를 정하지 않았으면 주기를 걸지 않는다(일이 생길 때만 Claude Code가 돌린다).
+        assert_eq!(refresh(None), None);
+        let line = |refresh: Option<u64>| StatusLine { command: "hud".into(), padding: Some(json!(2)), refresh };
+        assert_eq!(refresh(Some(&line(None))), None);
+        // 정해 두었으면(시계를 보이는 HUD 등) 그 주기를 그대로 따른다.
+        assert_eq!(refresh(Some(&line(Some(1)))), Some(json!(1)));
+        assert_eq!(refresh(Some(&line(Some(3600)))), Some(json!(3600)));
+        assert_eq!(refresh(Some(&line(Some(0)))), Some(json!(1))); // Claude Code의 최소값은 1초
+
+        let chained = settings_json("C:/app/cypher-bridge.exe", Some(&line(Some(1))), false, false);
         assert_eq!(chained["statusLine"]["command"], "C:/app/cypher-bridge.exe"); // 자리는 전달 프로그램이 차지
-        assert_eq!((chained["statusLine"]["padding"].clone(), chained["statusLine"]["refreshInterval"].clone()), (json!(2), json!(1)));
-
-        let slow = StatusLine { command: "hud".into(), padding: None, refresh: Some(60) };
-        assert_eq!(settings_json("b", Some(&slow), false, false)["statusLine"]["refreshInterval"], 5); // Cypher 표시가 느려지지 않게
+        assert_eq!(chained["statusLine"]["padding"], json!(2));
     }
 }
