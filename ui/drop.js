@@ -124,8 +124,10 @@ async function onDrop(ev) {
     else if (place.zone === 'memo') await intoMemo(place.item, data);
     else if (place.zone === 'fill') await intoEmpty(place.item, data);
     else if (place.zone === 'upload') {
+      // 올릴 자리는 경로를 받아 오기 전에 정한다(받는 사이 목록이 다시 그려지거나 다른 폴더로 가도 놓은 곳에 올린다).
+      const where = place.item.view.dropPlace?.(place.target);
       const paths = (await pathsOf(data.files)).filter(Boolean);
-      if (paths.length) place.item.view.dropFiles(paths, place.target);
+      if (paths.length) place.item.view.dropFiles(paths, place.target, where);
       else api.setStatus('경로가 없는 파일이라 올릴 수 없습니다. 탐색기에서 끌어다 놓아 주세요.');
     }
     else await intoItems(data, contextOf(place));

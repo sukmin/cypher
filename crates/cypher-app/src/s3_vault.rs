@@ -324,19 +324,22 @@ fn store(path: &Path, vault: &Vault) -> Result<(), String> {
 
 /// 서명에 넣을 지역 이름(사용자에게 묻지 않고 주소를 보고 정한다). Ncloud Storage(`kr.ncloudstorage.com`, 사설망은 `kr-private.…`)는
 /// 주소의 지역 코드(`kr`)를 쓰고, 그 밖의 저장소는 S3 도구들의 기본값(`us-east-1`)을 쓴다.
-fn default_region(host: &str) -> &str {
-    let name = host.split(':').next().unwrap_or(host);
-    match name.strip_suffix(".ncloudstorage.com") {
-        // 예전 Object Storage(`kr.object.ncloudstorage.com`)는 지역 이름이 `kr-standard`다.
-        Some(front) if front == "object" || front.ends_with(".object") => "kr-standard",
-        // 가상 호스트 방식으로 버킷까지 적은 주소(`버킷.kr.ncloudstorage.com`)여도 마지막 마디가 지역 코드다.
-        Some(front) => {
-            let code = front.rsplit('.').next().unwrap_or(front);
-            let code = code.strip_suffix("-private").unwrap_or(code);
-            if code.is_empty() { "us-east-1" } else { code }
-        }
-        None => "us-east-1",
+fn default_region(host: &str) -> String {
+    let name = host.split(':').next().unwrap_or(host).to_ascii_lowercase();
+    let Some(front) = name.strip_suffix(".ncloudstorage.com").or_else(|| name.strip_suffix(".ncpstorage.com")) else {
+        return "us-east-1".into();
+    };
+    let labels: Vec<&str> = front.split('.').collect();
+    // 예전 Object Storage(`kr.object.ncloudstorage.com`, 사설 `kr.object.private.…`, 일본 `jp.object.ncpstorage.com`)는
+    // `object` 앞의 나라 코드에 `-standard`를 붙인 이름이다(kr-standard, us-standard, sg-standard, jp-standard, de-standard).
+    if let Some(at) = labels.iter().position(|label| *label == "object") {
+        let code = if at > 0 { labels[at - 1] } else { "kr" };
+        return format!("{code}-standard");
     }
+    // 가상 호스트 방식으로 버킷까지 적은 주소(`버킷.kr.ncloudstorage.com`)여도 마지막 마디가 지역 코드다.
+    let code = labels.last().copied().unwrap_or("");
+    let code = code.strip_suffix("-private").unwrap_or(code);
+    if code.is_empty() { "us-east-1".into() } else { code.into() }
 }
 
 fn signature_of(text: &str) -> Signature {
@@ -360,7 +363,7 @@ pub fn save_at(path: &Path, input: &ConnInput) -> Result<ConnInfo, String> {
         "" => endpoint.host.clone(),
         name => name.chars().take(80).collect(),
     };
-    let region = default_region(&endpoint.host).to_string();
+    let region = default_region(&endpoint.host);
     let signature = if signature_of(&input.signature) == Signature::V2 { "v2" } else { "v4" }.to_string();
 
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -426,7 +429,10 @@ pub fn open_at(path: &Path, id: &str, password: Option<&str>) -> Result<Opened, 
     };
     let endpoint = Endpoint::parse(&stored.endpoint, stored.path_style)?;
     let keys = open(&stored.id, &stored.secret, password)?;
-    Ok(Opened { info: ConnInfo::from(&stored), endpoint, signature: signature_of(&stored.signature), keys })
+    // 지역은 사용자가 적지 않으므로 접속할 때마다 주소로 다시 정한다(예전 판이 잘못 정해 저장해 둔 값을 쓰지 않게).
+    let mut info = ConnInfo::from(&stored);
+    info.region = default_region(&endpoint.host);
+    Ok(Opened { info, endpoint, signature: signature_of(&stored.signature), keys })
 }
 
 #[cfg(test)]
@@ -534,6 +540,12 @@ mod tests {
         assert_eq!(default_region("kr-private.ncloudstorage.com"), "kr");
         assert_eq!(default_region("kr.ncloudstorage.com:443"), "kr");
         assert_eq!(default_region("kr.object.ncloudstorage.com"), "kr-standard");
+        assert_eq!(default_region("kr.object.private.ncloudstorage.com"), "kr-standard");
+        assert_eq!(default_region("my-bucket.kr.object.ncloudstorage.com"), "kr-standard");
+        assert_eq!(default_region("sg.object.ncloudstorage.com"), "sg-standard");
+        assert_eq!(default_region("de.object.ncloudstorage.com"), "de-standard");
+        assert_eq!(default_region("jp.object.ncpstorage.com"), "jp-standard");
+        assert_eq!(default_region("KR.NcloudStorage.com"), "kr");
         assert_eq!(default_region("10.0.0.5:9000"), "us-east-1");
         assert_eq!(default_region("s3.example.com"), "us-east-1");
         let path = test_file("s3-vault-region");

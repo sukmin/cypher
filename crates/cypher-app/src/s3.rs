@@ -292,6 +292,20 @@ fn header_safe(value: &str) -> bool {
     value.bytes().all(|b| (0x20..0x7f).contains(&b))
 }
 
+/// 객체를 다시 쓸 때(고쳐 저장, 나눠 복사) 사용자 메타데이터(`x-amz-meta-…`)와 함께 그대로 다시 붙이는 표준 헤더와 저장 등급.
+const KEPT: [&str; 5] = ["cache-control", "content-disposition", "content-language", "content-encoding", "x-amz-storage-class"];
+
+/// 다시 붙일 헤더인지.
+fn kept(name: &str) -> bool {
+    name.starts_with("x-amz-meta-") || KEPT.contains(&name)
+}
+
+/// 다시 붙일 헤더 가운데 값을 읽을 수 없는 것(ASCII 밖의 글자가 든 값: 전송 라이브러리가 그런 값은 주지 않는다).
+/// 그대로 다시 쓰면 그 값이 말없이 사라지므로, 있으면 쓰지 않고 알린다.
+fn unreadable_kept(response: &ureq::Response) -> Option<String> {
+    response.headers_names().into_iter().find(|name| kept(name) && response.header(name).is_none())
+}
+
 impl Client {
     fn new(opened: vault::Opened) -> Result<Client, String> {
         let tls = if opened.endpoint.scheme == "https" { Some(tls_config(opened.info.insecure)?) } else { None };
@@ -381,7 +395,8 @@ impl Client {
             Ok(response) | Err(ureq::Error::Status(_, response)) => {
                 answered(&mut entry, &response);
                 let (fail, raw) = fail_of(response);
-                entry.response_body = clip(&raw);
+                // 서명이 틀렸을 때 저장소가 본문에 되돌려 적는 접근 키와 서명도 헤더처럼 가린다.
+                entry.response_body = clip(&api::mask_body(&raw, &self.keys.access));
                 Err(fail)
             }
             Err(ureq::Error::Transport(error)) => {
@@ -479,11 +494,9 @@ impl Client {
             request.headers.push(("content-type".into(), content_type.to_string()));
         }
         // 사용자 메타데이터와, 객체에 붙어 있던 표준 헤더·저장 등급만 붙인다(그 밖의 이름은 받지 않는다).
-        const KEPT: [&str; 5] = ["cache-control", "content-disposition", "content-language", "content-encoding", "x-amz-storage-class"];
         for (name, value) in meta {
             let name = name.to_ascii_lowercase();
-            let known = name.starts_with("x-amz-meta-") || KEPT.contains(&name.as_str());
-            if known && header_safe(&name) && !name.contains(' ') && !value.is_empty() && header_safe(value) {
+            if kept(&name) && header_safe(&name) && !name.contains(' ') && !value.is_empty() && header_safe(value) {
                 request.headers.push((name, value.clone()));
             }
         }
@@ -527,6 +540,11 @@ impl Client {
             single.extend(batch);
         }
         for key in single {
+            // `.`·`..`뿐인 마디가 든 키는 주소로 적을 수 없다: 그 하나만 실패로 적는다(닿지 못한 실패로 보고 남은 것을 그만두지 않게).
+            if api::has_dot_segment(&key) {
+                failed.push((key, "주소로 적을 수 없는 키(`.`·`..` 마디)라 하나씩 지울 수 없습니다. 저장소의 관리 화면에서 지워 주세요.".into()));
+                continue;
+            }
             if let Err(fail) = self.delete_one(bucket, &key) {
                 // 닿지도 못했으면(연결 끊김) 남은 것을 하나씩 더 해 보지 않는다.
                 if fail.status == 0 {
@@ -591,9 +609,16 @@ impl Client {
     fn copy_in_parts(&self, bucket: &str, key: &str, size: u64, to_bucket: &str, to_key: &str, part: u64, canceled: &dyn Fn() -> bool) -> Result<(), String> {
         let head = self.head(bucket, key).map_err(|fail| fail.text)?;
         let size = head.header("content-length").and_then(|length| length.trim().parse::<u64>().ok()).unwrap_or(size);
+        // 한 번에 하는 복사(CopyObject)처럼 종류·사용자 메타데이터·표준 헤더(Content-Encoding 등)·저장 등급을 옮긴다.
+        if let Some(name) = unreadable_kept(&head) {
+            return Err(format!("`{name}`의 값에 이 프로그램이 다룰 수 없는 글자(한글 등)가 있어, 나눠 복사하면 그 값이 사라집니다. 복사하지 않았습니다."));
+        }
         let mut headers: Vec<(String, String)> = head.header("content-type").map(|kind| vec![("content-type".to_string(), kind.to_string())]).unwrap_or_default();
-        for name in head.headers_names().into_iter().filter(|name| name.starts_with("x-amz-meta-")) {
-            if let Some(value) = head.header(&name).filter(|value| header_safe(value)) {
+        let mut names = head.headers_names();
+        names.sort();
+        names.dedup();
+        for name in names.into_iter().filter(|name| kept(name)) {
+            if let Some(value) = head.header(&name).filter(|value| !value.is_empty() && header_safe(value)) {
                 headers.push((name.clone(), value.to_string()));
             }
         }
@@ -929,7 +954,10 @@ fn preview(client: &Client, bucket: &str, key: &str) -> Result<Preview, Fail> {
     let mut bytes = Vec::new();
     // 범위를 모르는 저장소가 통째로 보내도 한도까지만 읽는다.
     response.into_reader().take(limit).read_to_end(&mut bytes).map_err(|e| Fail::local(format!("내용을 읽다가 끊겼습니다: {e}")))?;
-    let truncated = info.size > bytes.len() as u64;
+    // 앞부분만 읽었는지. 저장소가 알려 준 전체 크기로 보되, 크기를 알려 주지 않은 답(중간의 프록시가 헤더를 바꾼 경우 등)이면
+    // 한도까지 꽉 차게 읽었을 때 잘린 것으로 본다(잘린 글을 다 읽은 줄 알고 고쳐 저장하면 뒷부분이 사라진다).
+    let read = bytes.len() as u64;
+    let truncated = info.size > read || (read == limit && info.size != read);
     let empty = |kind| Preview { kind, text: String::new(), encoding: String::new(), eol: String::new(), lossy: false, truncated, image: String::new(), info: info.clone() };
     if let Some(kind) = image_type {
         if truncated {
@@ -953,8 +981,8 @@ pub async fn s3_preview(handle: u32, bucket: String, key: String) -> Result<Prev
 }
 
 /// 고친 글을 그 객체에 쓴다(덮어쓴다. 화면이 먼저 확인을 받는다). 원래의 종류와 사용자 메타데이터, 객체에 붙어 있던
-/// 표준 헤더(Cache-Control 등)와 저장 등급은 그대로 붙인다. `etag`(읽었을 때의 확인 값)를 주면 쓰기 직전에 한 번 물어,
-/// 그 사이에 다른 사람이 바꿨으면 쓰지 않는다(남의 고침을 모르고 덮어쓰지 않게).
+/// 표준 헤더(Cache-Control 등)와 저장 등급은 그대로 붙인다. 쓰기 직전에 한 번 물어, 그 사이 지워졌거나 `etag`(읽었을 때의
+/// 확인 값)와 달라졌으면(남의 고침을 모르고 덮어쓰지 않게), 또는 값을 읽을 수 없어 다시 붙일 수 없는 헤더가 있으면 쓰지 않는다.
 #[tauri::command]
 pub async fn s3_put_text(
     handle: u32, bucket: String, key: String, text: String, encoding: String, eol: String, content_type: String, meta: Vec<(String, String)>,
@@ -963,16 +991,20 @@ pub async fn s3_put_text(
     let client = client(handle)?;
     blocking(move || {
         let bytes = cypher_core::textfile::encode(&text, &encoding, &eol)?;
-        if let Some(seen) = etag.as_deref().filter(|seen| !seen.is_empty()) {
-            match client.head(&bucket, &key) {
-                Ok(response) => {
+        // 쓰기 직전에 한 번 묻는다(요청 하나): 그 사이 바뀌거나 지워졌는지, 그대로 다시 붙일 수 없는 헤더가 있는지.
+        match client.head(&bucket, &key) {
+            Ok(response) => {
+                if let Some(seen) = etag.as_deref().filter(|seen| !seen.is_empty()) {
                     if response.header("etag").unwrap_or("").trim_matches('"') != seen.trim_matches('"') {
                         return Err("읽은 뒤에 이 객체가 바뀌었습니다(다른 사람이나 다른 프로그램이 고쳤습니다). 저장하지 않았습니다. 고친 글을 복사해 둔 뒤 다시 열어 고쳐 주세요.".into());
                     }
                 }
-                Err(fail) if fail.missing() => return Err("읽은 뒤에 이 객체가 지워졌습니다. 저장하지 않았습니다.".into()),
-                Err(fail) => return Err(format!("저장하기 전에 객체를 확인하지 못했습니다: {}", fail.text)),
+                if let Some(name) = unreadable_kept(&response) {
+                    return Err(format!("이 객체에 붙은 `{name}`의 값에 이 프로그램이 다룰 수 없는 글자(한글 등)가 있어, 고쳐 저장하면 그 값이 사라집니다. 저장하지 않았습니다. 고친 글을 복사해 두고 다른 도구로 저장해 주세요."));
+                }
             }
+            Err(fail) if fail.missing() => return Err("읽은 뒤에 이 객체가 지워졌습니다. 저장하지 않았습니다.".into()),
+            Err(fail) => return Err(format!("저장하기 전에 객체를 확인하지 못했습니다: {}", fail.text)),
         }
         let kind = if content_type.is_empty() { content_type_of(&key).to_string() } else { content_type };
         client.put_bytes(&bucket, &key, &bytes, &kind, &meta).map_err(|fail| fail.text)
@@ -1120,6 +1152,13 @@ impl Run {
             return Err(format!("연달아 실패해 멈췄습니다: {why}"));
         }
         Ok(())
+    }
+
+    /// 이 PC 쪽에서 하나가 실패했다(파일을 열지 못함, 받을 폴더를 만들지 못함 등). 저장소에 요청을 보내기 전의 실패라
+    /// "연달아 실패"로 세지 않는다(잠긴 파일 몇 개가 이어졌다고 나머지 수천 개를 그만두지 않게).
+    fn local_fail(&mut self, what: &str, why: &str) {
+        self.note(what, why);
+        self.event.done += 1;
     }
 
     /// 이미 있는 것을 덮어쓰게 된다: 화면에 묻고 답을 기다린다. 덮어쓰면 참, 건너뛰면 거짓.
@@ -1299,6 +1338,10 @@ fn existing(client: &Client, bucket: &str, scopes: &[Scope], run: &mut Run) -> R
             }
         }
         for key in ask {
+            // `.`·`..`뿐인 마디가 든 키는 주소로 적을 수 없어 물을 수 없다(놓을 수도 없어, 놓을 때 그 하나만 실패로 적힌다).
+            if api::has_dot_segment(key) {
+                continue;
+            }
             run.step(&format!("이미 있는지 확인하는 중: {key}"))?;
             if client.exists(bucket, key).map_err(|fail| format!("확인하지 못했습니다({key}): {}", fail.text))? {
                 found.insert(key.clone());
@@ -1338,14 +1381,25 @@ fn scan_local(paths: &[String], prefix: &str, run: &mut Run) -> Result<(Vec<Loca
     }
     fn visit(dir: &Path, key: &str, found: &mut Vec<Local>, run: &mut Run) -> Result<(), String> {
         run.step(&format!("올릴 파일 찾는 중: {}", dir.display()))?;
-        let mut children: Vec<std::fs::DirEntry> = std::fs::read_dir(dir).map_err(|e| format!("폴더를 읽지 못했습니다({}): {e}", dir.display()))?.filter_map(Result::ok).collect();
+        // 건너뛴 것은 실패 목록에 까닭과 함께 적는다(끝났다고만 알리고 몇 개를 빼먹은 것을 모르게 하지 않는다).
+        let mut children: Vec<std::fs::DirEntry> = Vec::new();
+        for child in std::fs::read_dir(dir).map_err(|e| format!("폴더를 읽지 못했습니다({}): {e}", dir.display()))? {
+            match child {
+                Ok(child) => children.push(child),
+                Err(e) => run.note(&key.to_string(), &format!("이 폴더 안의 항목 하나를 읽지 못해 올리지 않았습니다: {e}")),
+            }
+        }
         children.sort_by_key(|child| child.file_name());
         let before = found.len();
         for child in children {
-            let Ok(kind) = child.file_type() else { continue };
             let Some(name) = name_of(&child.path()) else { continue };
+            let Ok(kind) = child.file_type() else {
+                run.note(&format!("{key}{name}"), "종류를 알 수 없어 올리지 않았습니다.");
+                continue;
+            };
             // 바로 가기(심볼릭 링크·연결 지점)는 따라가지 않는다(끝없이 돌거나 뜻하지 않은 폴더가 올라간다).
             if kind.is_symlink() {
+                run.note(&format!("{key}{name}"), "바로 가기(심볼릭 링크·연결 지점)라 따라가지 않고 올리지 않았습니다.");
                 continue;
             }
             if kind.is_dir() {
@@ -1399,24 +1453,27 @@ impl<R: Read> Read for Feed<'_, R> {
     }
 }
 
-fn file_sha256(file: &mut std::fs::File, run: &Run) -> Result<String, String> {
+/// 파일의 앞 `size` 바이트(올릴 때 보내는 만큼)의 해시. 연 뒤에 파일이 커졌어도(쓰이는 중인 기록 파일 등) 보내는 만큼만 센다.
+fn file_sha256(file: &mut std::fs::File, size: u64, run: &Run) -> Result<String, String> {
     let mut hasher = Sha256::new();
     let mut buffer = vec![0u8; 1 << 20];
-    loop {
+    let mut left = size;
+    while left > 0 {
         run.check()?;
-        let read = file.read(&mut buffer).map_err(|e| e.to_string())?;
+        let want = left.min(buffer.len() as u64) as usize;
+        let read = file.read(&mut buffer[..want]).map_err(|e| e.to_string())?;
         if read == 0 {
-            break;
+            return Err("올리는 사이 파일이 줄었습니다. 다 쓰인 뒤에 다시 올려 주세요.".into());
         }
         hasher.update(&buffer[..read]);
+        left -= read as u64;
     }
     file.seek(SeekFrom::Start(0)).map_err(|e| e.to_string())?;
     Ok(api::hex(&hasher.finalize()))
 }
 
-/// 파일 하나를 올린다. 크면 조각으로 나눠 올린다.
-fn upload_file(client: &Client, bucket: &str, local: &Local, run: &mut Run) -> Result<(), String> {
-    let mut file = std::fs::File::open(&local.path).map_err(|e| format!("파일을 열지 못했습니다: {e}"))?;
+/// 연 파일 하나를 올린다. 크면 조각으로 나눠 올린다.
+fn upload_file(client: &Client, bucket: &str, local: &Local, mut file: std::fs::File, run: &mut Run) -> Result<(), String> {
     let size = file.metadata().map_err(|e| e.to_string())?.len();
     let kind = content_type_of(&local.key);
     if size <= SINGLE_PUT_MAX {
@@ -1424,7 +1481,7 @@ fn upload_file(client: &Client, bucket: &str, local: &Local, run: &mut Run) -> R
         request.headers.push(("content-type".into(), kind.into()));
         // 서명에 본문의 해시가 들어가므로 먼저 한 번 읽어 해시를 낸다.
         if client.signature == Signature::V4 {
-            request.payload_sha256 = file_sha256(&mut file, run)?;
+            request.payload_sha256 = file_sha256(&mut file, size, run)?;
         }
         // 연 때의 크기만큼만 보낸다(올리는 사이 파일이 커져도 적어 보낸 길이와 어긋나지 않게).
         let mut feed = Feed { inner: file.take(size), run: &mut *run };
@@ -1463,6 +1520,12 @@ fn upload_file(client: &Client, bucket: &str, local: &Local, run: &mut Run) -> R
 
 fn upload(client: &Client, bucket: &str, prefix: &str, paths: &[String], run: &mut Run) -> Result<(), String> {
     let (locals, folders, files) = scan_local(paths, prefix, run)?;
+    // 다른 폴더의 같은 이름 파일을 함께 올리면(탐색기의 검색 결과에서 끌어다 놓기 등) 같은 키가 된다. 저장소에는 없던 키라
+    // 겹침을 묻지 않고 뒤의 것이 앞의 것을 덮으므로, 아무것도 올리지 않고 알린다.
+    let mut seen: HashSet<&str> = HashSet::new();
+    if let Some(twice) = locals.iter().find(|local| !seen.insert(local.key.as_str())) {
+        return Err(format!("같은 이름으로 올라가게 되는 것이 둘 이상 있어 올리지 않았습니다: {} (다른 폴더의 같은 이름 파일은 따로 올려 주세요)", twice.key));
+    }
     let keys: Vec<&String> = locals.iter().map(|local| &local.key).collect();
     let present = existing(client, bucket, &scopes_of(prefix, &folders, &files, &keys), run)?;
     let mut conflicts: Vec<String> = locals.iter().filter(|local| !local.folder && present.contains(&local.key)).map(|local| local.key.clone()).collect();
@@ -1483,7 +1546,15 @@ fn upload(client: &Client, bucket: &str, prefix: &str, paths: &[String], run: &m
         let result = if local.folder {
             client.put_bytes(bucket, &local.key, &[], "application/x-directory", &[]).map_err(|fail| fail.text)
         } else {
-            upload_file(client, bucket, local, run)
+            match std::fs::File::open(&local.path) {
+                Ok(file) => upload_file(client, bucket, local, file, run),
+                Err(error) => {
+                    // 그 사이 지워졌거나 다른 프로그램이 잠근 파일: 그 하나만 실패로 적고 다음 것을 올린다.
+                    run.event.bytes = before + local.size;
+                    run.local_fail(&local.key, &format!("파일을 열지 못했습니다: {error}"));
+                    continue;
+                }
+            }
         };
         run.event.bytes = before + local.size;
         match result {
@@ -1574,19 +1645,25 @@ fn plan_download(remotes: Vec<Remote>, base: &str, dest: &Path) -> Vec<Target> {
     targets
 }
 
-fn download_one(client: &Client, bucket: &str, target: &Target, run: &mut Run) -> Result<(), String> {
+/// 받을 자리를 마련한다: 위 폴더를 만들고, 받는 동안 쓸 파일을 새로 만든다. 이 PC 쪽 일이라 저장소에는 아직 아무것도 보내지 않는다.
+/// 다 받은 뒤에 이름을 바꿔 넣는다(받다 만 파일이 제 이름으로 남지 않게). 받는 동안의 이름은 이 작업만의 것으로 하고
+/// (프로그램 번호와 작업 번호: 앞서 끊긴 실행이 남긴 파일과도 겹치지 않게), 같은 이름의 파일이 이미 있으면 건드리지 않고 그만둔다
+/// (받을 폴더에 있던 다른 파일을 비우거나 바꿔치기하지 않게).
+fn prepare_download(target: &Target, job: u32) -> Result<(std::fs::File, PathBuf), String> {
     if let Some(dir) = target.path.parent() {
         std::fs::create_dir_all(dir).map_err(|e| format!("폴더를 만들지 못했습니다({}): {e}", dir.display()))?;
     }
-    let response = client.send(&client.object("GET", bucket, &target.remote.key), Body::None).map_err(|fail| fail.text)?;
-    // 다 받은 뒤에 이름을 바꿔 넣는다(받다 만 파일이 제 이름으로 남지 않게).
-    // 받는 동안의 이름은 이 작업만의 것으로 하고, 같은 이름의 파일이 이미 있으면 건드리지 않고 그만둔다
-    // (받을 폴더에 있던 다른 파일을 비우거나 바꿔치기하지 않게).
     let mut name = target.path.file_name().unwrap_or_default().to_os_string();
-    name.push(format!(".cypher-part-{}", run.event.job));
+    name.push(format!(".cypher-part-{}-{job}", std::process::id()));
     let temp = target.path.with_file_name(name);
-    let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp).map_err(|e| format!("받는 동안 쓸 파일을 만들지 못했습니다({}): {e}", temp.display()))?;
+    let file = std::fs::OpenOptions::new().write(true).create_new(true).open(&temp).map_err(|e| format!("받는 동안 쓸 파일을 만들지 못했습니다({}): {e}", temp.display()))?;
+    Ok((file, temp))
+}
+
+/// 객체 하나를 마련해 둔 파일(`temp`)에 받은 뒤 제 이름으로 넣는다. 실패하면 받던 파일을 지운다.
+fn download_one(client: &Client, bucket: &str, target: &Target, mut file: std::fs::File, temp: &Path, run: &mut Run) -> Result<(), String> {
     let result = (|| -> Result<(), String> {
+        let response = client.send(&client.object("GET", bucket, &target.remote.key), Body::None).map_err(|fail| fail.text)?;
         let mut reader = response.into_reader();
         let mut buffer = vec![0u8; 256 << 10];
         loop {
@@ -1600,10 +1677,11 @@ fn download_one(client: &Client, bucket: &str, target: &Target, run: &mut Run) -
             run.tick();
         }
         file.flush().map_err(|e| e.to_string())?;
-        std::fs::rename(&temp, &target.path).map_err(|e| format!("파일을 제자리에 놓지 못했습니다({}): {e}", target.path.display()))
+        std::fs::rename(temp, &target.path).map_err(|e| format!("파일을 제자리에 놓지 못했습니다({}): {e}", target.path.display()))
     })();
     if result.is_err() {
-        let _ = std::fs::remove_file(&temp);
+        drop(file);
+        let _ = std::fs::remove_file(temp);
     }
     result
 }
@@ -1619,6 +1697,10 @@ fn download(client: &Client, bucket: &str, base: &str, items: &[Item], dest: &Pa
     for target in &targets {
         if target.folder {
             let _ = std::fs::create_dir_all(&target.path);
+            if target.remote.size > 0 {
+                // 이름이 `/`로 끝나는데 내용이 든 객체(드물다): 이 PC에서는 폴더가 되므로 내용은 받지 못한다.
+                run.note(&target.remote.key, "이름이 `/`로 끝나는 객체에 내용이 있어, 폴더만 만들고 내용은 받지 않았습니다.");
+            }
             run.event.done += 1;
             continue;
         }
@@ -1630,7 +1712,16 @@ fn download(client: &Client, bucket: &str, base: &str, items: &[Item], dest: &Pa
         }
         run.step(&target.remote.key)?;
         let before = run.event.bytes;
-        let result = download_one(client, bucket, target, run);
+        let (file, temp) = match prepare_download(target, run.event.job) {
+            Ok(ready) => ready,
+            Err(error) => {
+                // 이 PC 쪽 실패(같은 이름의 파일이 폴더 자리에 있음, 쓸 수 없는 폴더 등): 그 하나만 적고 다음 것을 받는다.
+                run.event.bytes = before + target.remote.size;
+                run.local_fail(&target.remote.key, &error);
+                continue;
+            }
+        };
+        let result = download_one(client, bucket, target, file, &temp, run);
         run.event.bytes = before + target.remote.size;
         match result {
             Ok(()) => run.ok(),
@@ -1766,9 +1857,21 @@ fn copy_with(client: &Client, plan: &CopyPlan, run: &mut Run, single_max: u64, p
         }
         run.event.total = pairs.len() as u64;
     }
+    // 같은 버킷에서 놓일 키가 옮기거나 복사할 원본이기도 하면(예: `a/`에 `a/x`와 `a/a/x`가 있을 때 `a/a/`를 맨 위로 옮기기:
+    // `a/a/a/x`가 아직 복사하지 않은 원본 `a/a/x`를 덮고, 옮기기면 덮인 그것을 원본으로 알고 지운다) 아무것도 하지 않고 그만둔다.
+    if same_bucket {
+        let sources: HashSet<&str> = pairs.iter().map(|(from, _, _)| from.as_str()).collect();
+        if let Some((_, _, to)) = pairs.iter().find(|(_, _, to)| sources.contains(to.as_str())) {
+            return Err(format!("놓일 자리가 옮기거나 복사할 것과 겹쳐 그만두었습니다({to}). 다른 폴더에 놓아 주세요."));
+        }
+    }
+    // 폴더 자리만 나타내는 빈 객체(`이름/`, 크기 0). 내용이 든 것은 여느 객체처럼 다룬다(이미 있으면 묻고, 건너뛰면 원본을 남긴다).
+    fn marker(to: &str, size: u64) -> bool {
+        to.ends_with('/') && size == 0
+    }
     let keys: Vec<&String> = pairs.iter().map(|(_, _, to)| to).collect();
     let present = existing(client, &plan.to_bucket, &scopes_of(&plan.to_prefix, &folders, &files, &keys), run)?;
-    let mut conflicts: Vec<String> = pairs.iter().filter(|(_, _, to)| present.contains(to) && !to.ends_with('/')).map(|(_, _, to)| to.clone()).collect();
+    let mut conflicts: Vec<String> = pairs.iter().filter(|(_, size, to)| present.contains(to) && !marker(to, *size)).map(|(_, _, to)| to.clone()).collect();
     conflicts.sort();
     let overwrite = run.ask(&conflicts)?;
     run.event.bytes_total = pairs.iter().map(|(_, size, _)| size).sum();
@@ -1789,9 +1892,9 @@ fn copy_with(client: &Client, plan: &CopyPlan, run: &mut Run, single_max: u64, p
         Ok(())
     };
     for (from, size, to) in &pairs {
-        if present.contains(to) && (!overwrite || to.ends_with('/')) {
+        if present.contains(to) && (!overwrite || marker(to, *size)) {
             // 폴더 자리만 나타내는 빈 객체는 이미 있으면 그대로 둔다(옮기기면 원본은 지운다).
-            if to.ends_with('/') {
+            if marker(to, *size) {
                 if plan.remove {
                     moved.push(from.clone());
                 }
@@ -2071,7 +2174,7 @@ mod tests {
         assert!(dir.join("sub/빈").is_dir());
         assert_eq!(std::fs::read_to_string(dir.join("혼자.txt")).unwrap(), "있던 것");
         // 받다 만 파일이 남지 않는다.
-        assert!(!std::fs::read_dir(&dir).unwrap().flatten().any(|e| e.file_name().to_string_lossy().ends_with(".cypher-part")));
+        assert!(!std::fs::read_dir(&dir).unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains(".cypher-part")));
 
         let (c, d) = (client.clone(), dir.clone());
         let events = run_job("overwrite", move |run| download(&c, "b", "data/", &[item("data/혼자.txt")], &d, run));
@@ -2212,7 +2315,7 @@ mod tests {
     fn 한_번에_복사할_수_없는_큰_객체는_조각으로_나눠_복사한다() {
         let fake = Fake::start();
         let data: Vec<u8> = (0..2500u32).map(|i| (i % 251) as u8).collect();
-        fake.put_with("b", "src/큰 것.bin", &data, "application/x-thing", &[("x-amz-meta-owner", "kim")]);
+        fake.put_with("b", "src/큰 것.bin", &data, "application/x-thing", &[("content-encoding", "gzip"), ("x-amz-meta-owner", "kim")]);
         fake.put("b", "src/작은 것.txt", b"small");
         let client = client_for(&fake, Signature::V4);
         let plan = CopyPlan {
@@ -2225,7 +2328,10 @@ mod tests {
         assert_eq!((last.state, last.failed_count), ("done", 0), "{last:?}");
         assert!(fake.get("b", "dst/큰 것.bin").unwrap() == data);
         assert_eq!(fake.content_type("b", "dst/큰 것.bin"), "application/x-thing");
-        assert_eq!(fake.meta("b", "dst/큰 것.bin"), vec![("x-amz-meta-owner".to_string(), "kim".to_string())]);
+        // 한 번에 하는 복사처럼 표준 헤더(Content-Encoding 등)도 옮긴다.
+        let mut meta = fake.meta("b", "dst/큰 것.bin");
+        meta.sort();
+        assert_eq!(meta, vec![("content-encoding".to_string(), "gzip".to_string()), ("x-amz-meta-owner".to_string(), "kim".to_string())]);
         assert_eq!(fake.get("b", "dst/작은 것.txt").unwrap(), b"small");
         // 2,500바이트를 1,000바이트씩: 조각 셋. 작은 것은 한 번에.
         assert_eq!(fake.log().iter().filter(|line| line.contains("partNumber=")).count(), 3, "{:?}", fake.log());
@@ -2284,6 +2390,11 @@ mod tests {
         CLIENTS.lock().unwrap().insert(987_654, client.clone());
         let stale = tauri::async_runtime::block_on(s3_put_text(987_654, "b".into(), "page.html".into(), "x".into(), "UTF-8".into(), "LF".into(), "text/html".into(), vec![], Some(etag)));
         assert!(stale.unwrap_err().contains("바뀌었습니다"));
+        // 값을 읽을 수 없는(ASCII 밖의 글자가 든) 메타데이터가 붙은 객체는 고쳐 저장하지 않는다(그 값이 말없이 사라지므로).
+        fake.put_with("b", "korean.txt", b"old", "text/plain", &[("x-amz-meta-who", "김철수")]);
+        let refused = tauri::async_runtime::block_on(s3_put_text(987_654, "b".into(), "korean.txt".into(), "new".into(), "UTF-8".into(), "LF".into(), "text/plain".into(), vec![], None));
+        assert!(refused.unwrap_err().contains("x-amz-meta-who"));
+        assert_eq!(fake.get("b", "korean.txt").unwrap(), b"old");
         // 폴더 만들기는 같은 이름이 있으면 덮어쓰지 않는다.
         fake.put_with("b", "dir/", b"marker", "application/x-directory", &[("x-amz-meta-owner", "kim")]);
         assert!(tauri::async_runtime::block_on(s3_mkdir(987_654, "b".into(), "dir/".into())).unwrap_err().contains("이미 있습니다"));
@@ -2303,6 +2414,127 @@ mod tests {
         let last = events.last().unwrap();
         assert_eq!(last.failed_count, 1, "{last:?}");
         assert_eq!(fake.get("b", "src/a.txt").unwrap(), b"A", "복사가 되지 않았는데 원본을 지웠다");
+    }
+
+    #[test]
+    fn 놓일_자리가_원본과_겹치면_아무것도_하지_않는다() {
+        let fake = Fake::start();
+        fake.put("b", "a/x", b"1");
+        fake.put("b", "a/a/x", b"2");
+        fake.put("b", "a/a/a/x", b"3");
+        let client = client_for(&fake, Signature::V4);
+        // `a/`에서 `a/a/`를 맨 위로: `a/a/a/x`가 놓일 `a/a/x`는 아직 옮기지 않은 원본이다.
+        for remove in [true, false] {
+            let plan = CopyPlan { bucket: "b".into(), base: "a/".into(), items: vec![item("a/a/")], to_bucket: "b".into(), to_prefix: "".into(), remove, rename: None };
+            let c = client.clone();
+            let last = run_job("overwrite", move |run| copy(&c, &plan, run)).pop().unwrap();
+            assert_eq!(last.state, "failed", "{last:?}");
+            assert!(last.error.contains("겹쳐"), "{}", last.error);
+            assert_eq!((fake.get("b", "a/x").unwrap(), fake.get("b", "a/a/x").unwrap(), fake.get("b", "a/a/a/x").unwrap()), (b"1".to_vec(), b"2".to_vec(), b"3".to_vec()));
+        }
+        // 겹치지 않으면 위 폴더로도 옮긴다.
+        fake.put("b", "p/q/r.txt", b"R");
+        let plan = CopyPlan { bucket: "b".into(), base: "p/".into(), items: vec![item("p/q/")], to_bucket: "b".into(), to_prefix: "".into(), remove: true, rename: None };
+        let c = client.clone();
+        assert_eq!(run_job("cancel", move |run| copy(&c, &plan, run)).last().unwrap().state, "done");
+        assert_eq!(fake.get("b", "q/r.txt").unwrap(), b"R");
+        assert!(fake.get("b", "p/q/r.txt").is_none());
+
+        // 이름이 `/`로 끝나는데 내용이 든 객체는 빈 폴더 표시로 보지 않는다: 이미 있으면 묻고, 건너뛰면 원본을 남긴다.
+        fake.put("b", "s/d/", b"content");
+        fake.put("b", "t/d/", b"");
+        let plan = CopyPlan { bucket: "b".into(), base: "s/".into(), items: vec![item("s/d/")], to_bucket: "b".into(), to_prefix: "t/".into(), remove: true, rename: None };
+        let c = client.clone();
+        let events = run_job("skip", move |run| copy(&c, &plan, run));
+        assert_eq!(events.iter().find(|e| e.state == "conflict").expect("겹침을 물어야 한다").conflicts, vec!["t/d/"]);
+        assert_eq!(events.last().unwrap().state, "done");
+        assert_eq!(fake.get("b", "s/d/").unwrap(), b"content", "건너뛴 원본을 지웠다");
+        assert_eq!(fake.get("b", "t/d/").unwrap(), b"");
+    }
+
+    #[test]
+    fn 올리기는_같은_이름이_둘이면_그만두고_열지_못한_파일은_그것만_빼고_올린다() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let fake = Fake::start();
+        fake.put("b", "seed", b"");
+        let dir = test_dir("s3-upload-local");
+        for (folder, text) in [("x", "x"), ("y", "y")] {
+            std::fs::create_dir_all(dir.join(folder)).unwrap();
+            std::fs::write(dir.join(folder).join("보고서.txt"), text).unwrap();
+        }
+        let client = client_for(&fake, Signature::V4);
+        let (c, p) = (client.clone(), vec![dir.join("x/보고서.txt").to_string_lossy().into_owned(), dir.join("y/보고서.txt").to_string_lossy().into_owned()]);
+        let last = run_job("cancel", move |run| upload(&c, "b", "up/", &p, run)).pop().unwrap();
+        assert_eq!(last.state, "failed", "{last:?}");
+        assert!(last.error.contains("둘 이상"), "{}", last.error);
+        assert!(fake.get("b", "up/보고서.txt").is_none());
+
+        // 다른 프로그램이 잠근 파일 셋이 이어져도 작업을 멈추지 않고 그것만 실패로 적는다(저장소의 실패가 아니다).
+        std::fs::create_dir_all(dir.join("many")).unwrap();
+        let mut locks = Vec::new();
+        for name in ["1.txt", "2.txt", "3.txt"] {
+            std::fs::write(dir.join("many").join(name), "locked").unwrap();
+            locks.push(std::fs::OpenOptions::new().read(true).share_mode(0).open(dir.join("many").join(name)).unwrap());
+        }
+        std::fs::write(dir.join("many/4.txt"), "ok").unwrap();
+        let (c, p) = (client.clone(), vec![dir.join("many").to_string_lossy().into_owned()]);
+        let last = run_job("cancel", move |run| upload(&c, "b", "", &p, run)).pop().unwrap();
+        assert_eq!((last.state, last.failed_count), ("done", 3), "{last:?}");
+        assert_eq!(fake.get("b", "many/4.txt").unwrap(), b"ok");
+        assert!(fake.get("b", "many/1.txt").is_none());
+        drop(locks);
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn 올릴_파일의_해시는_보낼_길이만큼만_센다() {
+        // 연 뒤에 커지는 파일(쓰이는 중인 기록 파일)도 연 때의 길이만큼 서명하고 보낸다. 줄었으면 보내지 않는다.
+        let dir = test_dir("s3-hash");
+        let path = dir.join("growing.log");
+        std::fs::write(&path, "abcdefghij").unwrap();
+        let p = path.clone();
+        let last = run_job("cancel", move |run| {
+            let mut file = std::fs::File::open(&p).unwrap();
+            assert_eq!(file_sha256(&mut file, 4, run)?, api::sha256_hex(b"abcd"));
+            assert!(file_sha256(&mut file, 20, run).unwrap_err().contains("줄었"));
+            Ok(())
+        })
+        .pop()
+        .unwrap();
+        assert_eq!(last.state, "done", "{last:?}");
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn 내려받기는_이_pc에서_만들_수_없는_자리만_빼고_받는다() {
+        // 저장소에 `x`라는 객체와 `x/…`가 함께 있으면 이 PC에서는 `x` 파일 때문에 `x` 폴더를 만들 수 없다. 그것만 실패로 적는다.
+        let fake = Fake::start();
+        fake.put("b", "x", b"file");
+        for name in ["x/1", "x/2", "x/3"] {
+            fake.put("b", name, b"n");
+        }
+        fake.put("b", "y.txt", b"Y");
+        let dir = test_dir("s3-download-local");
+        let client = client_for(&fake, Signature::V4);
+        let d = dir.clone();
+        let last = run_job("cancel", move |run| download(&client, "b", "", &[item("x"), item("x/"), item("y.txt")], &d, run)).pop().unwrap();
+        assert_eq!((last.state, last.failed_count), ("done", 3), "{last:?}");
+        assert_eq!(std::fs::read(dir.join("x")).unwrap(), b"file");
+        assert_eq!(std::fs::read(dir.join("y.txt")).unwrap(), b"Y");
+        assert!(!std::fs::read_dir(&dir).unwrap().flatten().any(|e| e.file_name().to_string_lossy().contains(".cypher-part")));
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn 주소로_적을_수_없는_키_하나가_지우기_전체를_멈추지_않는다() {
+        let fake = Fake::start();
+        fake.set_no_multi_delete(true);
+        fake.put("b", "d/./x", b"1");
+        fake.put("b", "d/y", b"2");
+        let client = client_for(&fake, Signature::V4);
+        let last = run_job("cancel", move |run| delete(&client, "b", &[item("d/")], run)).pop().unwrap();
+        assert_eq!((last.state, last.failed_count), ("done", 1), "{last:?}");
+        assert_eq!(fake.keys("b"), vec!["d/./x"]);
     }
 
     #[test]

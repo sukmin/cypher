@@ -242,12 +242,16 @@ export function showConnForm(fill, done) {
   const save = async (thenConnect) => {
     const conn = read();
     if (!conn || saving) return;
+    // 잠금 암호로 잠근 것을 고치며 키를 다시 적고 잠금 암호 칸을 비워 두면, 잠금 암호 없이 저장된다: 한 번 묻는다.
+    if (editing && fill.locked && (conn.access || conn.secret) && !conn.password
+      && !confirm('잠금 암호 칸이 비어 있어, 잠금 암호 없이(Windows 계정으로만 잠가) 저장됩니다. 그렇게 할까요?\n\n계속 잠금 암호로 잠가 두려면 [취소]를 누르고 잠금 암호를 다시 적어 주세요.')) return;
     saving = true;
     try {
       const info = await invoke('s3_conn_save', { conn });
       // 칸에 남은 키와 암호를 지운다.
       for (const input of [access.input, secret.input, lock.input, lockAgain.input]) input.value = '';
-      close();
+      // 저장하는 사이(잠금 암호를 쓰면 시간이 걸린다) 이 창을 닫았으면, 그 자리에 뜬 다른 창(겹침 물음 등)을 닫지 않는다.
+      if (form.isConnected) close();
       setStatus(`S3 접속 정보를 저장했습니다: ${info.name} (키는 암호화해 저장${info.locked ? ' · 잠금 암호로도 잠금' : ''})`);
       done?.(info, thenConnect);
     } catch (err) {
@@ -589,6 +593,8 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
     const hit = fresh ? null : cache.get(cacheKey(at));
     listError = '';
     if (hit) {
+      // 다시 본 폴더는 기억의 맨 뒤로 옮긴다(오래된 것부터 버릴 때 지금 보는 폴더가 먼저 버려지지 않게).
+      remember(at, hit);
       ({ rows, next } = hit);
       loadedAt = hit.at;
       draw();
@@ -635,8 +641,10 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
       return go({ bucket: parsed.bucket, prefix: key.slice(0, cut), starts: key.slice(cut) }, opts);
     }
     let isObject = false;
-    try { isObject = await invoke('s3_exists', { handle, bucket: parsed.bucket, key: parsed.key }); } catch { /* 물어볼 수 없으면 폴더로 본다 */ }
-    if (disposed || !connected()) return false;
+    const own = handle, from = at;
+    try { isObject = await invoke('s3_exists', { handle: own, bucket: parsed.bucket, key: parsed.key }); } catch { /* 물어볼 수 없으면 폴더로 본다 */ }
+    // 묻는 사이 접속이 바뀌었거나(다른 저장소에 옛 버킷 이름으로 묻지 않게) 다른 곳으로 갔으면 그만둔다.
+    if (disposed || handle !== own || !same(from, at)) return false;
     if (!isObject) return go({ bucket: parsed.bucket, prefix: `${parsed.key}/` }, opts);
     const folder = parsed.key.slice(0, parsed.key.lastIndexOf('/') + 1);
     if (!go({ bucket: parsed.bucket, prefix: folder }, { ...opts, select: parsed.key })) return false;
@@ -770,6 +778,8 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
   $address.addEventListener('blur', doneAddress);
   $address.addEventListener('keydown', (ev) => {
     ev.stopPropagation();
+    // 한글을 조합하는 중의 Enter는 조합을 끝내는 것이다(조합이 끝난 뒤의 Enter만 받는다).
+    if (ev.isComposing || ev.keyCode === 229) return;
     if (ev.key === 'Enter') {
       ev.preventDefault();
       const text = $address.value;
@@ -784,8 +794,10 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
   });
 
   function ordered() {
-    const words = filter.toLowerCase().split(/\s+/).filter(Boolean);
-    const list = words.length ? rows.filter((row) => words.every((word) => row.name.toLowerCase().includes(word))) : rows.slice();
+    // 한글은 맞춰 견준다(Mac에서 올린 파일의 이름은 자모가 풀린 모양(NFD)이라, 입력기로 친 글자와 그대로는 같지 않다).
+    const plain = (text) => text.normalize('NFC').toLowerCase();
+    const words = plain(filter).split(/\s+/).filter(Boolean);
+    const list = words.length ? rows.filter((row) => words.every((word) => plain(row.name).includes(word))) : rows.slice();
     const byName = (a, b) => a.name.localeCompare(b.name, 'ko', { numeric: true });
     const by = sort.by === 'size' ? (a, b) => a.size - b.size
       : sort.by === 'modified' ? (a, b) => String(a.modified || '').localeCompare(String(b.modified || ''))
@@ -944,7 +956,9 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
     const tr = ev.target.closest('tbody tr');
     if (tr && !selected.has(tr.dataset.key)) { anchor = cursor = tr.dataset.key; setSelection([tr.dataset.key]); }
     if (!tr) setSelection([]);
-    showMenu(ev, menuItems());
+    // 메뉴를 띄워 둔 채 다른 곳으로 갔으면(키로 뒤로 가기 등) 그 메뉴의 일은 하지 않는다(옛 자리의 줄로 지금 자리에 일하지 않게).
+    const own = handle, place = at;
+    showMenu(ev, menuItems().map((entry) => (entry.action ? { ...entry, action: () => (still(own, place) ? entry.action() : moved()) } : entry)));
   });
   // 마우스의 뒤로·앞으로 단추
   root.addEventListener('mouseup', (ev) => {
@@ -1015,7 +1029,7 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
     else if (key === 'Enter') { handled(); open(rowOf(cursor) || picked()[0]); }
     else if (key === 'Backspace') { handled(); goUp(); }
     else if (key === 'Delete') { handled(); removeSelected(); }
-    else if (key === 'F2') { handled(); renameSelected(); }
+    else if (key === 'F2') { handled(); if (picked().length === 1) renameSelected(); else setStatus('이름은 하나씩 바꿉니다. 하나만 골라 주세요.'); }
     else if (key === 'Escape') { if (shown) { handled(); closePreview(); } else if (selected.size) { handled(); setSelection([]); } }
     else if (ev.ctrlKey && !ev.shiftKey && !ev.altKey) {
       const letter = key.toLowerCase();
@@ -1031,6 +1045,7 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
   $filter.addEventListener('input', () => { filter = $filter.value.trim(); draw(); });
   $filter.addEventListener('keydown', (ev) => {
     ev.stopPropagation();
+    if (ev.isComposing || ev.keyCode === 229) return;
     if (ev.key === 'Escape') { ev.preventDefault(); $filter.value = ''; filter = ''; draw(); $list.focus({ preventScroll: true }); }
     // Enter: 그 글로 시작하는 것만 서버에서 읽는다(요청 하나). 큰 폴더에서 다 불러오지 않고 찾는 길이다.
     if (ev.key === 'Enter' && at.bucket) {
@@ -1219,7 +1234,14 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
           if (b === bucket && p === place.prefix) entry.rows = entry.rows.filter((row) => !keys.has(row.key));
         }
         if (at.bucket === bucket && at.prefix === place.prefix) { rows = cache.get(cacheKey(at))?.rows ?? rows.filter((row) => !keys.has(row.key)); draw(); }
-        if (shown && shown.bucket === bucket && (keys.has(shown.key) || folders.some((row) => shown.key.startsWith(row.key)))) { shown = null; drawPreview(); }
+        if (shown && shown.bucket === bucket && (keys.has(shown.key) || folders.some((row) => shown.key.startsWith(row.key)))) {
+          // 지우는 동안 그 안의 글을 열어 고치고 있었으면 고친 글은 남겨 둔다(저장하려 하면 앱이 지워졌다고 알리고 쓰지 않는다).
+          if (shown.editing && shown.area && shown.area.value !== shown.data?.text) setStatus(`보던 "${shown.name}"이(가) 지워졌습니다. 고친 글은 보기 창에 남겨 두었으니 필요하면 복사해 두세요.`);
+          else { shown = null; drawPreview(); }
+        }
+        // 지운 폴더 안을 보고 있었으면(뒤로 가기 등으로 들어가 있었으면) 다시 읽는다(요청 하나): 지운 줄이 남아 보이거나,
+        // 기억이 버려져 다음 쪽을 읽지 못하는 일이 없게.
+        if (connected() && handle === own && at.bucket === bucket && folders.some((row) => at.prefix.startsWith(row.key))) go(at, { record: false, fresh: true });
       } else if (event.changed) {
         touched([bucket, place.prefix]);
       }
@@ -1335,13 +1357,24 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
     }, `놓을 곳: s3://${toBucket}/${prefix}`);
   }
 
-  /** 창에 끌어다 놓은 파일·폴더를 올린다. 폴더 줄 위에 놓으면 그 폴더 안에 올린다. */
-  function dropFiles(paths, target = null) {
-    if (!connected()) { setStatus('S3 저장소에 접속한 뒤에 올릴 수 있습니다.'); return null; }
-    if (!at.bucket) { setStatus('버킷 안으로 들어간 뒤에 올릴 수 있습니다.'); return null; }
+  /**
+   * 끌어다 놓은 자리(놓는 순간의 접속·버킷·폴더). 폴더 줄 위에 놓았으면 그 폴더다. 놓은 파일의 경로를 받아 오는 사이
+   * 목록이 다시 그려지거나 다른 곳으로 가도 놓은 그 자리에 올리도록, 경로를 받기 전에 정해 둔다.
+   */
+  function dropPlace(target = null) {
+    if (!connected() || !at.bucket) return null;
     const tr = target?.closest?.('.s3-table tbody tr');
     const row = tr ? rowOf(tr.dataset.key) : null;
-    return upload(paths, row?.folder && !row.bucket ? row.key : at.prefix);
+    return { own: handle, bucket: at.bucket, prefix: row?.folder && !row.bucket ? row.key : at.prefix };
+  }
+
+  /** 창에 끌어다 놓은 파일·폴더를 올린다. `place`는 놓는 순간에 `dropPlace`로 정해 둔 자리(주지 않으면 지금 정한다). */
+  function dropFiles(paths, target = null, place = undefined) {
+    if (!connected()) { setStatus('S3 저장소에 접속한 뒤에 올릴 수 있습니다.'); return null; }
+    const where = place === undefined ? dropPlace(target) : place;
+    if (!where) { setStatus('버킷 안으로 들어간 뒤에 올릴 수 있습니다.'); return null; }
+    if (where.own !== handle) { setStatus('놓는 사이 접속이 바뀌어 올리지 않았습니다.'); return null; }
+    return upload(paths, where.prefix, where.bucket);
   }
 
   // ── 객체 하나 보기 ──
@@ -1468,7 +1501,8 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
     await preview(own);
     // 목록의 크기·날짜를 맞춘다(다시 읽지 않고 그 줄만).
     const row = same({ bucket: own.bucket, prefix: own.key.slice(0, own.key.lastIndexOf('/') + 1), starts: at.starts }, at) && rowOf(own.key);
-    if (row && shown?.data) { row.size = shown.data.info.size; row.modified = shown.data.info.modified; draw(); }
+    // 다시 읽는 사이 다른 객체를 열었으면 그 객체의 크기·날짜를 이 줄에 적지 않는다.
+    if (row && shown?.data && shown.bucket === own.bucket && shown.key === own.key) { row.size = shown.data.info.size; row.modified = shown.data.info.modified; draw(); }
     return true;
   }
 
@@ -1593,7 +1627,8 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
       if (handle != null) { invoke('s3_disconnect', { handle }).catch(() => {}); live.delete(handle); handle = null; }
     },
     conn: () => conn?.id || '',
-    /** 창에 끌어다 놓은 파일·폴더를 받는다(drop.js). */
+    /** 창에 끌어다 놓은 파일·폴더를 받는다(drop.js): 놓는 순간에 `dropPlace`로 자리를 정하고, 경로를 받은 뒤 `dropFiles`. */
+    dropPlace,
     dropFiles,
     // 아래는 자동 검증·다른 화면에서 쓰는 창구다.
     connected,

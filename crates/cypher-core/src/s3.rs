@@ -278,6 +278,21 @@ pub fn mask_url(url: &str) -> String {
     format!("{front}?{}", pairs.join("&"))
 }
 
+/// 이력에 남길 실패한 답의 본문. 서명이 틀렸을 때 저장소가 본문에 되돌려 적는 값을 가린다: 접근 키는 본문 어디에 있든
+/// 앞 네 글자만 남기고(`<AWSAccessKeyId>` 등), 받은 서명(`<SignatureProvided>`)은 통째로 가린다.
+pub fn mask_body(body: &str, access: &str) -> String {
+    let access = access.trim();
+    let mut text = if access.is_empty() { body.to_string() } else { body.replace(access, &mask_key(access)) };
+    let (open, close) = ("<SignatureProvided>", "</SignatureProvided>");
+    let mut from = 0;
+    while let Some(start) = text[from..].find(open).map(|at| from + at + open.len()) {
+        let Some(end) = text[start..].find(close).map(|at| start + at) else { break };
+        text.replace_range(start..end, MASK);
+        from = start + MASK.len() + close.len();
+    }
+    text
+}
+
 /// 키의 한 마디가 `.`이나 `..`뿐인지. 그런 키는 주소로 적으면 "지금 폴더"·"위 폴더"로 풀려 다른 객체를 가리킨다.
 pub fn has_dot_segment(key: &str) -> bool {
     key.split('/').any(|part| part == "." || part == "..")
@@ -877,6 +892,14 @@ mod tests {
             mask_url("https://h/b/k?X-Amz-Credential=AKIA%2F2013&X-Amz-Signature=abcd&X-Amz-Date=2013&AWSAccessKeyId=AK&Signature=zz&delete"),
             "https://h/b/k?X-Amz-Credential=****&X-Amz-Signature=****&X-Amz-Date=2013&AWSAccessKeyId=****&Signature=****&delete"
         );
+        // 서명이 틀렸다는 답의 본문에 되돌아온 접근 키와 서명도 가린다(비밀 키는 애초에 오지 않는다).
+        let body = format!("<Error><Code>SignatureDoesNotMatch</Code><AWSAccessKeyId>{ACCESS}</AWSAccessKeyId><StringToSign>AWS4-HMAC-SHA256\n20130524T000000Z</StringToSign><SignatureProvided>abc123</SignatureProvided><SignatureProvided></SignatureProvided></Error>");
+        assert_eq!(
+            mask_body(&body, ACCESS),
+            "<Error><Code>SignatureDoesNotMatch</Code><AWSAccessKeyId>AKIA****</AWSAccessKeyId><StringToSign>AWS4-HMAC-SHA256\n20130524T000000Z</StringToSign><SignatureProvided>****</SignatureProvided><SignatureProvided>****</SignatureProvided></Error>"
+        );
+        assert_eq!(mask_body("<Error><Code>NoSuchKey</Code></Error>", ""), "<Error><Code>NoSuchKey</Code></Error>");
+        assert_eq!(mask_body("<SignatureProvided>끝이 없음", ACCESS), "<SignatureProvided>끝이 없음");
     }
 
     #[test]

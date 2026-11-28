@@ -383,7 +383,10 @@ fn handle(state: &mut State, incoming: &Incoming) -> Reply {
         state.counter += 1;
         let id = format!("upload-{}", state.counter);
         state.uploads.insert(id.clone(), (bucket.to_string(), key.to_string(), incoming.header("content-type").to_string(), BTreeMap::new()));
-        state.upload_meta.insert(id.clone(), incoming.headers.iter().filter(|(name, _)| name.starts_with("x-amz-meta-")).cloned().collect());
+        state.upload_meta.insert(
+            id.clone(),
+            incoming.headers.iter().filter(|(name, _)| name.starts_with("x-amz-meta-") || matches!(name.as_str(), "cache-control" | "content-disposition" | "content-language" | "content-encoding")).cloned().collect(),
+        );
         return xml(200, format!("<InitiateMultipartUploadResult><Bucket>{}</Bucket><Key>{}</Key><UploadId>{id}</UploadId></InitiateMultipartUploadResult>", api::xml_escape(bucket), api::xml_escape(key)));
     }
     if let Some(id) = params.get("uploadId") {
