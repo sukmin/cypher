@@ -217,6 +217,67 @@ pub struct Signed {
     pub headers: Vec<(String, String)>,
 }
 
+/// 이력에 남길 때 값을 가린 자리에 적는 글.
+pub const MASK: &str = "****";
+
+/// 키의 앞 네 글자만 남기고 가린다(어느 키였는지 알아볼 만큼만). 짧은 글은 통째로 가린다.
+fn mask_key(key: &str) -> String {
+    if key.chars().count() > 8 { format!("{}{MASK}", key.chars().take(4).collect::<String>()) } else { MASK.to_string() }
+}
+
+/// 요청·응답 이력에 남길 헤더 값. 키·서명·토큰처럼 남기면 안 되는 값은 가린다(그 헤더가 있었다는 것만 남는다).
+///
+/// - `Authorization`: 서명은 통째로, 접근 키는 앞 네 글자만 남기고 가린다. 날짜·지역·서명한 헤더 이름은 그대로 둔다.
+/// - 임시 토큰, 쿠키, 고객 암호화 키(SSE-C)처럼 이름에 `token`·`secret`·`password`·`credential`·`signature`·
+///   `customer-key`·`cookie`·`authorization`이 든 헤더: 값을 통째로 가린다.
+pub fn mask_header(name: &str, value: &str) -> String {
+    let name = name.to_ascii_lowercase();
+    if name == "authorization" {
+        if let Some(rest) = value.strip_prefix("AWS4-HMAC-SHA256") {
+            let parts: Vec<String> = rest
+                .split(',')
+                .map(|part| {
+                    let part = part.trim();
+                    if let Some(credential) = part.strip_prefix("Credential=") {
+                        let (key, scope) = credential.split_once('/').unwrap_or((credential, ""));
+                        format!("Credential={}/{scope}", mask_key(key))
+                    } else if part.starts_with("Signature=") {
+                        format!("Signature={MASK}")
+                    } else if part.starts_with("SignedHeaders=") {
+                        part.to_string()
+                    } else {
+                        MASK.to_string()
+                    }
+                })
+                .collect();
+            return format!("AWS4-HMAC-SHA256 {}", parts.join(", "));
+        }
+        if let Some(rest) = value.strip_prefix("AWS ") {
+            return format!("AWS {}:{MASK}", mask_key(rest.split(':').next().unwrap_or("")));
+        }
+        return MASK.to_string();
+    }
+    const SECRET: [&str; 8] = ["token", "secret", "password", "credential", "signature", "customer-key", "cookie", "authorization"];
+    if SECRET.iter().any(|word| name.contains(word)) { MASK.to_string() } else { value.to_string() }
+}
+
+/// 이력에 남길 주소. 주소에 서명을 싣는 방식(미리 서명한 주소)의 값은 가린다. Cypher는 서명을 헤더로만 보내지만,
+/// 그런 값이 든 주소가 남는 일이 없게 해 둔다.
+pub fn mask_url(url: &str) -> String {
+    let Some((front, query)) = url.split_once('?') else {
+        return url.to_string();
+    };
+    const SECRET: [&str; 5] = ["x-amz-signature", "x-amz-credential", "x-amz-security-token", "signature", "awsaccesskeyid"];
+    let pairs: Vec<String> = query
+        .split('&')
+        .map(|pair| match pair.split_once('=') {
+            Some((name, _)) if SECRET.contains(&name.to_ascii_lowercase().as_str()) => format!("{name}={MASK}"),
+            _ => pair.to_string(),
+        })
+        .collect();
+    format!("{front}?{}", pairs.join("&"))
+}
+
 /// 키의 한 마디가 `.`이나 `..`뿐인지. 그런 키는 주소로 적으면 "지금 폴더"·"위 폴더"로 풀려 다른 객체를 가리킨다.
 pub fn has_dot_segment(key: &str) -> bool {
     key.split('/').any(|part| part == "." || part == "..")
@@ -714,13 +775,13 @@ pub fn error_text(code: &str, message: &str) -> String {
     let hint = match code {
         "AccessDenied" | "AllAccessDisabled" => "권한이 없습니다",
         "InvalidAccessKeyId" => "접근 키가 올바르지 않습니다",
-        "SignatureDoesNotMatch" => "서명이 맞지 않습니다(비밀 키, 지역, 서명 방식, 주소 방식을 확인하세요)",
+        "SignatureDoesNotMatch" => "서명이 맞지 않습니다(Secret key, 저장소 주소, 서명 방식, 주소 방식을 확인하세요)",
         "NoSuchBucket" => "그런 버킷이 없습니다",
         "NoSuchKey" => "그런 객체가 없습니다",
         "RequestTimeTooSkewed" => "이 컴퓨터의 시계가 서버와 너무 다릅니다",
         "BucketNotEmpty" => "버킷이 비어 있지 않습니다",
         "BucketAlreadyExists" | "BucketAlreadyOwnedByYou" => "같은 이름의 버킷이 이미 있습니다",
-        "PermanentRedirect" | "AuthorizationHeaderMalformed" => "지역이나 주소가 맞지 않습니다",
+        "PermanentRedirect" | "AuthorizationHeaderMalformed" => "저장소 주소가 맞지 않습니다(서명에 넣는 지역은 주소를 보고 정합니다)",
         "EntityTooLarge" => "한 번에 다룰 수 있는 크기를 넘었습니다",
         "SlowDown" | "ServiceUnavailable" => "저장소가 바쁩니다. 잠시 뒤에 다시 해 보세요",
         "InvalidObjectState" => "보관 등급(Deep Archive 등)에 있는 객체라 먼저 복원해야 읽을 수 있습니다",
@@ -782,6 +843,40 @@ mod tests {
 
     fn header<'a>(signed: &'a Signed, name: &str) -> &'a str {
         signed.headers.iter().find(|(key, _)| key == name).map(|(_, value)| value.as_str()).unwrap_or("")
+    }
+
+    #[test]
+    fn 이력에_남길_때_키와_서명을_가린다() {
+        let request = Request { method: "GET", bucket: Some("b".into()), ..Request::default() };
+        for signature in [Signature::V4, Signature::V2] {
+            let signed = sign(&aws(), ACCESS, SECRET, "us-east-1", signature, &request, doc_time()).unwrap();
+            let raw = header(&signed, "authorization");
+            let masked = mask_header("Authorization", raw);
+            // 서명 값(맨 뒤의 것)과 접근 키는 남지 않는다. 접근 키는 앞 네 글자만 남는다.
+            let secret_part = raw.rsplit_once("Signature=").or_else(|| raw.rsplit_once(':')).map(|(_, value)| value).unwrap();
+            assert!(secret_part.len() >= 20 && !masked.contains(secret_part), "{masked}");
+            assert!(!masked.contains(ACCESS) && masked.contains("AKIA****"), "{masked}");
+        }
+        let signed = sign(&aws(), ACCESS, SECRET, "us-east-1", Signature::V4, &request, doc_time()).unwrap();
+        assert_eq!(
+            mask_header("authorization", header(&signed, "authorization")),
+            "AWS4-HMAC-SHA256 Credential=AKIA****/20130524/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-content-sha256;x-amz-date, Signature=****"
+        );
+        assert_eq!(mask_header("authorization", "Bearer abc.def"), "****");
+        assert_eq!(mask_header("authorization", "AWS short:sig"), "AWS ****:****");
+        for name in ["X-Amz-Security-Token", "set-cookie", "Cookie", "x-amz-server-side-encryption-customer-key", "x-amz-server-side-encryption-customer-key-MD5", "Proxy-Authorization"] {
+            assert_eq!(mask_header(name, "값"), "****", "{name}");
+        }
+        // 그 밖의 헤더는 그대로 남는다.
+        for (name, value) in [("x-amz-date", "20130524T000000Z"), ("x-amz-copy-source", "b/a.txt"), ("x-amz-meta-owner", "kim"), ("etag", "\"abc\""), ("x-amz-server-side-encryption", "AES256")] {
+            assert_eq!(mask_header(name, value), value);
+        }
+        assert_eq!(mask_url("https://h/b/k?uploadId=abc&partNumber=2"), "https://h/b/k?uploadId=abc&partNumber=2");
+        assert_eq!(mask_url("https://h/b/k"), "https://h/b/k");
+        assert_eq!(
+            mask_url("https://h/b/k?X-Amz-Credential=AKIA%2F2013&X-Amz-Signature=abcd&X-Amz-Date=2013&AWSAccessKeyId=AK&Signature=zz&delete"),
+            "https://h/b/k?X-Amz-Credential=****&X-Amz-Signature=****&X-Amz-Date=2013&AWSAccessKeyId=****&Signature=****&delete"
+        );
     }
 
     #[test]

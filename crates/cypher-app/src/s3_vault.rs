@@ -20,7 +20,7 @@
 //! 화면에는 키를 돌려주지 않는다. 화면은 키를 저장할 때 한 번 넘겨줄 뿐이고, 고칠 때는 비워 두면 그대로 둔다.
 
 use base64::Engine;
-use cypher_core::s3::{parse_location, Endpoint, Signature};
+use cypher_core::s3::{Endpoint, Signature};
 use ring::rand::SecureRandom;
 use serde::{Deserialize, Serialize};
 use std::ffi::c_void;
@@ -64,15 +64,13 @@ struct Stored {
     id: String,
     name: String,
     endpoint: String,
+    /// 서명에 넣는 지역 이름. 사용자가 적지 않는다: 저장할 때 주소를 보고 정한다(`default_region`).
     #[serde(default)]
     region: String,
     #[serde(default = "yes")]
     path_style: bool,
     #[serde(default)]
     signature: String,
-    /// 접속하면 처음 열 곳(`s3://버킷/폴더/`). 비어 있으면 버킷 목록.
-    #[serde(default)]
-    start: String,
     /// 서버 인증서를 확인하지 않을지(스스로 서명한 인증서를 쓰는 저장소).
     #[serde(default)]
     insecure: bool,
@@ -105,7 +103,6 @@ pub struct ConnInfo {
     pub region: String,
     pub path_style: bool,
     pub signature: String,
-    pub start: String,
     pub insecure: bool,
     pub locked: bool,
 }
@@ -119,7 +116,6 @@ impl From<&Stored> for ConnInfo {
             region: stored.region.clone(),
             path_style: stored.path_style,
             signature: stored.signature.clone(),
-            start: stored.start.clone(),
             insecure: stored.insecure,
             locked: stored.locked,
         }
@@ -134,14 +130,10 @@ pub struct ConnInput {
     #[serde(default)]
     pub name: String,
     pub endpoint: String,
-    #[serde(default)]
-    pub region: String,
     #[serde(default = "yes")]
     pub path_style: bool,
     #[serde(default)]
     pub signature: String,
-    #[serde(default)]
-    pub start: String,
     #[serde(default)]
     pub insecure: bool,
     /// 접근 키와 비밀 키. 고칠 때 둘 다 비워 두면 저장해 둔 것을 그대로 둔다.
@@ -330,7 +322,7 @@ fn store(path: &Path, vault: &Vault) -> Result<(), String> {
     std::fs::rename(&temp, path).map_err(fail)
 }
 
-/// 지역을 적지 않았을 때 서명에 넣을 지역 이름. Ncloud Storage(`kr.ncloudstorage.com`, 사설망은 `kr-private.…`)는
+/// 서명에 넣을 지역 이름(사용자에게 묻지 않고 주소를 보고 정한다). Ncloud Storage(`kr.ncloudstorage.com`, 사설망은 `kr-private.…`)는
 /// 주소의 지역 코드(`kr`)를 쓰고, 그 밖의 저장소는 S3 도구들의 기본값(`us-east-1`)을 쓴다.
 fn default_region(host: &str) -> &str {
     let name = host.split(':').next().unwrap_or(host);
@@ -351,19 +343,6 @@ fn signature_of(text: &str) -> Signature {
     if text.eq_ignore_ascii_case("v2") { Signature::V2 } else { Signature::V4 }
 }
 
-/// 처음 열 곳을 `s3://버킷/폴더/` 모양으로 다듬는다(비어 있으면 빈 글).
-fn clean_start(text: &str) -> Result<String, String> {
-    let at = parse_location(text)?;
-    if at.bucket.is_empty() {
-        return Ok(String::new());
-    }
-    let mut key = at.key;
-    if !key.is_empty() && !key.ends_with('/') {
-        key.push('/');
-    }
-    Ok(format!("s3://{}/{}", at.bucket, key))
-}
-
 pub fn list_at(path: &Path) -> Result<Vec<ConnInfo>, String> {
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
     Ok(load(path)?.connections.iter().map(ConnInfo::from).collect())
@@ -372,7 +351,6 @@ pub fn list_at(path: &Path) -> Result<Vec<ConnInfo>, String> {
 /// 접속 정보를 더하거나 고친다.
 pub fn save_at(path: &Path, input: &ConnInput) -> Result<ConnInfo, String> {
     let endpoint = Endpoint::parse(&input.endpoint, input.path_style)?;
-    let start = clean_start(&input.start)?;
     let access = input.access.trim();
     let secret = input.secret.trim();
     if access.is_empty() != secret.is_empty() {
@@ -382,10 +360,7 @@ pub fn save_at(path: &Path, input: &ConnInput) -> Result<ConnInfo, String> {
         "" => endpoint.host.clone(),
         name => name.chars().take(80).collect(),
     };
-    let region = match input.region.trim() {
-        "" => default_region(&endpoint.host).to_string(),
-        region => region.to_string(),
-    };
+    let region = default_region(&endpoint.host).to_string();
     let signature = if signature_of(&input.signature) == Signature::V2 { "v2" } else { "v4" }.to_string();
 
     let _guard = LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -416,7 +391,7 @@ pub fn save_at(path: &Path, input: &ConnInput) -> Result<ConnInfo, String> {
         }
         (seal(&id, &keys, password)?, password.is_some())
     };
-    let stored = Stored { id, name, endpoint: endpoint.display(), region, path_style: input.path_style, signature, start, insecure: input.insecure, locked, secret: sealed };
+    let stored = Stored { id, name, endpoint: endpoint.display(), region, path_style: input.path_style, signature, insecure: input.insecure, locked, secret: sealed };
     let info = ConnInfo::from(&stored);
     match at {
         Some(at) => vault.connections[at] = stored,
@@ -467,8 +442,8 @@ mod tests {
 
     fn input(access: &str, secret: &str, password: &str) -> ConnInput {
         ConnInput {
-            id: None, name: " 사내 저장소 ".into(), endpoint: "http://10.0.0.5:9000/".into(), region: String::new(), path_style: true,
-            signature: "V4".into(), start: "logs/2024".into(), insecure: false,
+            id: None, name: " 사내 저장소 ".into(), endpoint: "http://10.0.0.5:9000/".into(), path_style: true,
+            signature: "V4".into(), insecure: false,
             access: access.into(), secret: secret.into(), password: password.into(),
         }
     }
@@ -480,7 +455,6 @@ mod tests {
         assert_eq!(saved.name, "사내 저장소");
         assert_eq!(saved.endpoint, "http://10.0.0.5:9000");
         assert_eq!(saved.region, "us-east-1");
-        assert_eq!(saved.start, "s3://logs/2024/");
         assert!(!saved.locked);
         let text = std::fs::read_to_string(&path).unwrap();
         assert!(!text.contains("AKIDEXAMPLE") && !text.contains("s3cr3t"), "키가 파일에 그대로 적혔다");
@@ -530,9 +504,8 @@ mod tests {
         edit.name = "새 이름".into();
         edit.endpoint = "https://s3.example.com".into();
         edit.signature = "v2".into();
-        edit.start = String::new();
         let edited = save_at(&path, &edit).unwrap();
-        assert_eq!((edited.id.as_str(), edited.name.as_str(), edited.endpoint.as_str(), edited.signature.as_str(), edited.start.as_str()), (saved.id.as_str(), "새 이름", "https://s3.example.com", "v2", ""));
+        assert_eq!((edited.id.as_str(), edited.name.as_str(), edited.endpoint.as_str(), edited.signature.as_str()), (saved.id.as_str(), "새 이름", "https://s3.example.com", "v2"));
         assert!(edited.locked);
         assert_eq!(open_at(&path, &saved.id, Some("pw-12345")).unwrap().keys.access, "access");
         assert_eq!(list_at(&path).unwrap().len(), 1);
@@ -566,9 +539,16 @@ mod tests {
         let path = test_file("s3-vault-region");
         let mut ncloud = input("a", "b", "");
         ncloud.endpoint = "https://kr.ncloudstorage.com".into();
-        assert_eq!(save_at(&path, &ncloud).unwrap().region, "kr");
-        ncloud.region = "kr-standard".into();
+        let saved = save_at(&path, &ncloud).unwrap();
+        assert_eq!(saved.region, "kr");
+        // 주소를 바꿔 저장하면 지역도 그 주소에 맞춰 다시 정한다.
+        ncloud.id = Some(saved.id);
+        ncloud.endpoint = "https://kr.object.ncloudstorage.com".into();
+        (ncloud.access, ncloud.secret) = (String::new(), String::new());
         assert_eq!(save_at(&path, &ncloud).unwrap().region, "kr-standard");
+        // 예전 판이 적어 둔 것(지역, 처음 열 곳)이 든 요청과 파일도 읽힌다(모르는 칸은 버린다).
+        let old: ConnInput = serde_json::from_str(r#"{"name":"x","endpoint":"http://h","region":"zz","start":"s3://b/","access":"a","secret":"b"}"#).unwrap();
+        assert_eq!(save_at(&path, &old).unwrap().region, "us-east-1");
         std::fs::remove_dir_all(path.parent().unwrap()).unwrap();
     }
 

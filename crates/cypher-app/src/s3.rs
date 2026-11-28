@@ -59,6 +59,10 @@ const COPY_SINGLE_MAX: u64 = 5 << 30;
 /// 나눠 복사할 때 조각 하나의 크기.
 const COPY_PART: u64 = 512 << 20;
 const CANCELED: &str = "취소했습니다.";
+/// 이력에 남겨 두는 요청의 수(넘으면 오래된 것부터 버린다).
+const HISTORY_MAX: usize = 100;
+/// 이력에 남기는 본문(보낸 XML, 실패한 답)의 가장 큰 길이.
+const HISTORY_BODY: usize = 4 << 10;
 
 // ───────────────────────── 저장소에 보내는 요청 ─────────────────────────
 
@@ -89,8 +93,50 @@ enum Body<'a> {
     Reader(&'a mut dyn Read, u64),
 }
 
+/// 저장소와 주고받은 요청 하나(이력의 한 줄). 화면의 [요청 이력]이 보여 준다.
+///
+/// 키·서명·토큰 같은 값은 가려서 적는다(`api::mask_header`). 객체의 내용과 성공한 답의 본문(목록 등)은 적지 않는다:
+/// 보낸 본문은 저장소에 시키는 XML(여러 개 지우기, 나눠 올리기 맺기)만, 받은 본문은 실패한 답만 앞부분을 적는다.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct Exchange {
+    /// 이 접속에서 몇 번째 요청인지(1부터).
+    seq: u64,
+    /// 보낸 때(1970년부터의 밀리초).
+    at: u64,
+    method: String,
+    url: String,
+    request_headers: Vec<(String, String)>,
+    /// 보낸 본문의 크기(바이트)와, 저장소에 시키는 XML이면 그 글(앞부분).
+    sent: u64,
+    request_body: String,
+    /// 받은 답의 상태(닿지 못했으면 0)와 헤더.
+    status: u16,
+    reason: String,
+    response_headers: Vec<(String, String)>,
+    /// 실패한 답의 본문(앞부분).
+    response_body: String,
+    /// 닿지 못한 까닭(연결 실패, 인증서 등).
+    problem: String,
+    /// 답의 헤더를 받을 때까지 걸린 시간(밀리초). 본문을 받는 시간은 들지 않는다.
+    millis: u64,
+}
+
+/// 이력에 남길 본문: 길면 앞부분만.
+fn clip(text: &str) -> String {
+    if text.len() <= HISTORY_BODY {
+        return text.to_string();
+    }
+    let mut end = HISTORY_BODY;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}\n… (뒤는 잘랐습니다. 전체 {}바이트)", &text[..end], text.len())
+}
+
 /// 접속 하나: 저장소 주소와 풀어 둔 키. 화면의 S3 항목 하나가 접속해 있는 동안 든다.
 struct Client {
+    /// 이 접속으로 보낸 요청의 이력(지금까지 보낸 수, 최근 `HISTORY_MAX`건). 메모리에만 있고 접속을 끊으면 사라진다.
+    history: Mutex<(u64, std::collections::VecDeque<Exchange>)>,
     endpoint: Endpoint,
     region: String,
     signature: Signature,
@@ -202,7 +248,7 @@ fn build_tls(insecure: bool) -> Result<Arc<rustls::ClientConfig>, String> {
 
 fn status_text(status: u16, reason: &str) -> String {
     match status {
-        301 | 302 | 307 | 308 => format!("저장소가 다른 주소로 가라고 답했습니다(HTTP {status}). 저장소 주소·지역·주소 방식을 확인하세요."),
+        301 | 302 | 307 | 308 => format!("저장소가 다른 주소로 가라고 답했습니다(HTTP {status}). 저장소 주소와 주소 방식을 확인하세요."),
         // 본문 없이 온 거절(HEAD 등)은 까닭을 알 수 없다: 권한이 없을 수도, 키·서명·시계가 틀렸을 수도 있다.
         401 | 403 => format!("저장소가 거절했습니다 (HTTP {status}: 권한이 없거나 키·서명·시계가 맞지 않습니다)"),
         404 => "찾을 수 없습니다 (HTTP 404)".to_string(),
@@ -210,15 +256,18 @@ fn status_text(status: u16, reason: &str) -> String {
     }
 }
 
-fn fail_of(response: ureq::Response) -> Fail {
+/// 실패한 답을 읽는다: 실패한 까닭과, 저장소가 보낸 본문(이력에 남긴다).
+fn fail_of(response: ureq::Response) -> (Fail, String) {
     let status = response.status();
     let reason = response.status_text().to_string();
-    let mut body = String::new();
-    let _ = response.into_reader().take(64 << 10).read_to_string(&mut body);
-    match api::parse_error(&body) {
+    let mut bytes = Vec::new();
+    let _ = response.into_reader().take(64 << 10).read_to_end(&mut bytes);
+    let body = String::from_utf8_lossy(&bytes).into_owned();
+    let fail = match api::parse_error(&body) {
         Some((code, message)) => Fail { status, text: api::error_text(&code, &message), code },
         None => Fail { status, code: String::new(), text: status_text(status, &reason) },
-    }
+    };
+    (fail, body)
 }
 
 fn transport_text(error: &ureq::Transport) -> String {
@@ -259,6 +308,7 @@ impl Client {
             builder.build()
         };
         Ok(Client {
+            history: Mutex::default(),
             endpoint: opened.endpoint,
             region: opened.info.region.clone(),
             signature: opened.signature,
@@ -281,25 +331,75 @@ impl Client {
     }
 
     fn send_on(&self, agent: &ureq::Agent, request: &Request, body: Body<'_>) -> Result<ureq::Response, Fail> {
-        let signed = api::sign(&self.endpoint, &self.keys.access, &self.keys.secret, &self.region, self.signature, request, SystemTime::now())
-            .map_err(Fail::local)?;
+        let now = SystemTime::now();
+        let started = Instant::now();
+        let signed = api::sign(&self.endpoint, &self.keys.access, &self.keys.secret, &self.region, self.signature, request, now).map_err(Fail::local)?;
         // 내려받는 내용을 서버가 줄여 보내지 않게 한다(범위 요청과 크기 계산이 어긋난다). 객체가 줄인 채(`Content-Encoding: gzip`)
         // 저장돼 있으면 저장소는 그대로 보내고, 여기서도 풀지 않는다: 저장소에 든 바이트를 그대로 다룬다.
         let mut call = agent.request(signed.method, &signed.url).set("accept-encoding", "identity");
         for (name, value) in &signed.headers {
             call = call.set(name, value);
         }
+        // 이력에 남길 것: 헤더의 키·서명은 가리고, 본문은 저장소에 시키는 XML일 때만(객체의 내용은 남기지 않는다).
+        // (XML 파일을 고쳐 저장하는 PUT도 종류가 XML이지만 그것은 객체의 내용이다: POST로 보내는 것만 남긴다.)
+        let orders = signed.method == "POST" && signed.headers.iter().any(|(name, value)| name == "content-type" && value == "application/xml");
+        let mut entry = Exchange {
+            at: now.duration_since(SystemTime::UNIX_EPOCH).map(|since| since.as_millis() as u64).unwrap_or(0),
+            method: signed.method.to_string(),
+            url: api::mask_url(&signed.url),
+            request_headers: signed.headers.iter().map(|(name, value)| (name.clone(), api::mask_header(name, value))).collect(),
+            sent: match &body {
+                Body::None => 0,
+                Body::Bytes(bytes) => bytes.len() as u64,
+                Body::Reader(_, length) => *length,
+            },
+            request_body: match &body {
+                Body::Bytes(bytes) if orders => clip(&String::from_utf8_lossy(bytes)),
+                _ => String::new(),
+            },
+            ..Exchange::default()
+        };
         let result = match body {
             Body::None if matches!(signed.method, "PUT" | "POST") => call.send_bytes(&[]),
             Body::None => call.call(),
             Body::Bytes(bytes) => call.send_bytes(bytes),
             Body::Reader(reader, length) => call.set("content-length", &length.to_string()).send(reader),
         };
-        match result {
-            Ok(response) if response.status() < 300 => Ok(response),
-            Ok(response) | Err(ureq::Error::Status(_, response)) => Err(fail_of(response)),
-            Err(ureq::Error::Transport(error)) => Err(Fail::local(transport_text(&error))),
+        let answered = |entry: &mut Exchange, response: &ureq::Response| {
+            entry.status = response.status();
+            entry.reason = response.status_text().to_string();
+            let mut names = response.headers_names();
+            names.sort();
+            names.dedup();
+            entry.response_headers = names.into_iter().map(|name| { let value = api::mask_header(&name, response.header(&name).unwrap_or("")); (name, value) }).collect();
+        };
+        let outcome = match result {
+            Ok(response) if response.status() < 300 => {
+                answered(&mut entry, &response);
+                Ok(response)
+            }
+            Ok(response) | Err(ureq::Error::Status(_, response)) => {
+                answered(&mut entry, &response);
+                let (fail, raw) = fail_of(response);
+                entry.response_body = clip(&raw);
+                Err(fail)
+            }
+            Err(ureq::Error::Transport(error)) => {
+                let text = transport_text(&error);
+                entry.problem = text.clone();
+                Err(Fail::local(text))
+            }
+        };
+        entry.millis = started.elapsed().as_millis() as u64;
+        let mut history = self.history.lock().unwrap_or_else(|e| e.into_inner());
+        history.0 += 1;
+        entry.seq = history.0;
+        if history.1.len() >= HISTORY_MAX {
+            history.1.pop_front();
         }
+        history.1.push_back(entry);
+        drop(history);
+        outcome
     }
 
     /// 본문의 해시: SigV4에서만 쓴다.
@@ -537,6 +637,7 @@ fn copy_source(bucket: &str, key: &str) -> Result<String, Fail> {
 impl Client {
     fn for_test(endpoint: Endpoint, signature: Signature, access: &str, secret: &str) -> Client {
         Client {
+            history: Mutex::default(),
             endpoint,
             region: "us-east-1".into(),
             signature,
@@ -614,6 +715,23 @@ pub fn s3_disconnect(handle: u32) {
     for job in JOBS.lock().unwrap_or_else(|e| e.into_inner()).values().filter(|job| job.handle == handle) {
         job.stop();
     }
+}
+
+/// 이 접속으로 저장소와 주고받은 요청의 이력(최근 100건, 새것부터). 앱이 메모리에 적어 둔 것을 돌려줄 뿐
+/// 저장소에는 아무것도 보내지 않는다. 키와 서명은 가려져 있고, 파일로 남기지 않으며, 접속을 끊으면 사라진다.
+#[tauri::command]
+pub fn s3_history(handle: u32) -> Result<Vec<Exchange>, String> {
+    let client = client(handle)?;
+    let history = client.history.lock().unwrap_or_else(|e| e.into_inner());
+    Ok(history.1.iter().rev().cloned().collect())
+}
+
+/// 이 접속의 요청 이력을 비운다(화면의 [지우기]). 차례 번호는 이어 센다. 저장소에는 아무것도 보내지 않는다.
+#[tauri::command]
+pub fn s3_history_clear(handle: u32) -> Result<(), String> {
+    let client = client(handle)?;
+    client.history.lock().unwrap_or_else(|e| e.into_inner()).1.clear();
+    Ok(())
 }
 
 // ───────────────────────── 목록과 객체 하나 ─────────────────────────
@@ -2267,6 +2385,66 @@ mod tests {
     }
 
     #[test]
+    fn 요청_이력은_최근_100건을_키와_서명을_가려_남긴다() {
+        let fake = Fake::start();
+        fake.put("b", "a.xml", b"<old/>");
+        fake.put("b", "one", b"1");
+        fake.put("b", "two", b"2");
+        let client = client_for(&fake, Signature::V4);
+        client.list("b", "", true, 10, None).unwrap();
+        assert!(client.head("b", "없는 것").unwrap_err().missing());
+        assert!(client.list("nope", "", true, 10, None).is_err());
+        client.put_bytes("b", "a.xml", "<비밀 내용/>".as_bytes(), "application/xml", &[("x-amz-meta-owner".into(), "kim".into())]).unwrap();
+        assert!(client.delete_many("b", &["one".to_string(), "two".to_string()]).unwrap().is_empty());
+
+        let history = client.history.lock().unwrap().1.iter().rev().cloned().collect::<Vec<_>>();
+        // 새것부터: 지우기, 쓰기, 없는 버킷의 목록, 없는 객체, 목록.
+        assert_eq!(history.iter().map(|e| (e.seq, e.method.as_str(), e.status)).collect::<Vec<_>>(), vec![(5, "POST", 200), (4, "PUT", 200), (3, "GET", 404), (2, "HEAD", 404), (1, "GET", 200)]);
+        let all = format!("{history:?}");
+        assert!(!all.contains(SECRET) && !all.contains(ACCESS), "키가 이력에 남았다");
+        for entry in &history {
+            let authorization = &entry.request_headers.iter().find(|(name, _)| name == "authorization").expect("Authorization 줄은 남는다").1;
+            assert!(authorization.ends_with("Signature=****") && authorization.contains(&format!("Credential={}****/", &ACCESS[..4])), "{authorization}");
+            assert!(entry.at > 0 && entry.url.starts_with("http://127.0.0.1:"));
+        }
+        // 저장소에 시킨 XML과 실패한 답은 남고, 객체의 내용은 남지 않는다.
+        assert!(history[0].request_body.contains("<Key>one</Key>") && history[0].url.ends_with("/b/?delete="), "{:?}", history[0]);
+        assert_eq!((history[1].sent, history[1].request_body.as_str()), ("<비밀 내용/>".len() as u64, ""));
+        assert!(history[1].request_headers.contains(&("x-amz-meta-owner".to_string(), "kim".to_string())));
+        assert!(history[2].response_body.contains("NoSuchBucket"), "{:?}", history[2]);
+        assert!(!all.contains("비밀 내용"));
+        assert!(history[4].response_headers.iter().any(|(name, _)| name == "content-type") && history[4].response_body.is_empty());
+
+        // 닿지 못한 요청도 남는다.
+        let gone = Client::for_test(Endpoint::parse("http://127.0.0.1:1", true).unwrap(), Signature::V2, ACCESS, SECRET);
+        assert!(gone.buckets().is_err());
+        let entry = gone.history.lock().unwrap().1[0].clone();
+        assert!(entry.status == 0 && entry.problem.contains("닿지 못했습니다"), "{entry:?}");
+        assert_eq!(entry.request_headers.iter().find(|(name, _)| name == "authorization").unwrap().1, format!("AWS {}****:****", &ACCESS[..4]));
+
+        // 100건을 넘으면 오래된 것부터 버린다.
+        for _ in 0..HISTORY_MAX {
+            client.exists("b", "a.xml").unwrap();
+        }
+        let history = client.history.lock().unwrap();
+        assert_eq!((history.1.len(), history.1[0].seq, history.1[HISTORY_MAX - 1].seq), (HISTORY_MAX, 6, 105));
+        drop(history);
+
+        // 화면이 부르는 명령: 새것부터 돌려주고, 지우면 비며, 그 뒤의 요청은 번호를 이어 센다.
+        let handle = NEXT.fetch_add(1, Ordering::Relaxed);
+        CLIENTS.lock().unwrap().insert(handle, client.clone());
+        let listed = s3_history(handle).unwrap();
+        assert_eq!((listed.len(), listed[0].seq, listed[HISTORY_MAX - 1].seq), (HISTORY_MAX, 105, 6));
+        s3_history_clear(handle).unwrap();
+        assert!(s3_history(handle).unwrap().is_empty());
+        client.exists("b", "a.xml").unwrap();
+        assert_eq!(s3_history(handle).unwrap().iter().map(|e| e.seq).collect::<Vec<_>>(), vec![106]);
+        s3_disconnect(handle);
+        assert!(s3_history(handle).is_err() && s3_history_clear(handle).is_err());
+        assert_eq!(clip(&"가".repeat(HISTORY_BODY)).lines().next().unwrap().chars().count(), HISTORY_BODY / 3);
+    }
+
+    #[test]
     fn 이_pc의_파일_이름으로_쓸_수_없는_키를_다듬는다() {
         assert_eq!(safe_name("a:b*c?.txt"), "a_b_c_.txt");
         assert_eq!(safe_name("끝에 점. . "), "끝에 점");
@@ -2283,5 +2461,243 @@ mod tests {
         assert_eq!(content_type_of("a/b.JSON"), "application/json");
         assert_eq!(content_type_of("이름없음"), "application/octet-stream");
         assert_eq!(trim_partial_utf8(&"가나".as_bytes()[..5]), "가".as_bytes());
+    }
+
+    /// 실제 저장소로 기본 동작을 한 번씩 확인한다(평소에는 돌지 않는다). 요금이 드는 저장소일 수 있어 요청은 쉰 번 안팎,
+    /// 올리는 양은 5MB 남짓, 받는 양은 몇 KB로 묶었다.
+    ///
+    /// 환경 변수 `CYPHER_S3_LIVE_ENDPOINT`(저장소의 전체 주소)·`CYPHER_S3_LIVE_ACCESS`·`CYPHER_S3_LIVE_SECRET`·
+    /// `CYPHER_S3_LIVE_BUCKET`을 주고 `cargo test -p cypher -- --ignored 실제_저장소 --nocapture`로 돌린다
+    /// (`CYPHER_S3_LIVE_VHOST=1`이면 경로 방식 대신 가상 호스트 방식 주소로). 키는 어디에도 적지 않는다.
+    /// 버킷 안에 `cypher-live-…/` 폴더를 만들어 그 안에서만 쓰고, 끝나면(중간에 실패해도) 그 폴더를 지운다.
+    /// 버킷에 원래 있던 것은 고치지 않는다(맨 위 층을 다섯 줄 읽어 수만 센다).
+    #[test]
+    #[ignore]
+    fn 실제_저장소로_기본_동작을_확인한다() {
+        fn note(bad: &mut Vec<String>, name: &str, result: Result<String, String>) {
+            match result {
+                Ok(text) => eprintln!("[통과] {name}: {text}"),
+                Err(why) => {
+                    eprintln!("[실패] {name}: {why}");
+                    bad.push(name.to_string());
+                }
+            }
+        }
+        fn finished(events: &[JobEvent]) -> Result<String, String> {
+            let last = events.last().unwrap();
+            if last.state == "done" && last.failed_count == 0 {
+                Ok(format!("{}개, {}바이트", last.done, last.bytes))
+            } else {
+                Err(format!("{} {} {:?}", last.state, last.error, last.failed))
+            }
+        }
+        let env = |name: &str| std::env::var(format!("CYPHER_S3_LIVE_{name}")).unwrap_or_else(|_| panic!("환경 변수 CYPHER_S3_LIVE_{name}이 없다"));
+        let (endpoint, access, secret, bucket) = (env("ENDPOINT"), env("ACCESS"), env("SECRET"), env("BUCKET"));
+        let path_style = std::env::var("CYPHER_S3_LIVE_VHOST").is_err();
+        let dir = test_dir("s3-live");
+        // 접속 정보를 앱이 하는 그대로 저장했다가(키 암호화) 풀어 접속한다. 저장한 파일은 바로 지운다.
+        let connect = |secret: &str| -> Client {
+            let path = dir.join("connections.json");
+            let input: vault::ConnInput =
+                serde_json::from_value(serde_json::json!({ "name": "실제", "endpoint": endpoint, "path_style": path_style, "access": access, "secret": secret })).unwrap();
+            let saved = vault::save_at(&path, &input).unwrap();
+            let opened = vault::open_at(&path, &saved.id, None).unwrap();
+            std::fs::remove_file(&path).unwrap();
+            Client::new(opened).unwrap()
+        };
+        let client = Arc::new(connect(&secret));
+        let stamp = SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).unwrap().as_secs();
+        let root = format!("cypher-live-{stamp}/");
+        eprintln!("주소 {endpoint} · 지역 {} · 버킷 {bucket} · 쓰는 폴더 {root}", client.region);
+        let mut bad: Vec<String> = Vec::new();
+        let text = |fail: Fail| format!("{} {} {}", fail.status, fail.code, fail.text);
+
+        // 틀린 Secret key는 서명 오류로 거절된다.
+        let wrong = connect("틀린-Secret-key");
+        note(&mut bad, "틀린 Secret key", match wrong.list(&bucket, &root, true, 1, None) {
+            Ok(_) => Err("거절되지 않았다".into()),
+            Err(fail) if fail.status == 403 => Ok(format!("{} {} — {}", fail.status, fail.code, fail.text)),
+            Err(fail) => Err(text(fail)),
+        });
+        note(&mut bad, "버킷 목록", client.buckets().map_err(text).map(|all| format!("{}개, 이 버킷이 보이는지: {}", all.len(), all.iter().any(|b| b.name == bucket))));
+        note(&mut bad, "맨 위 층 목록", client.list(&bucket, "", true, 5, None).map_err(text).map(|page| {
+            format!(
+                "폴더 {} · 객체 {} · 더 있음 {} · 키를 %XX로 받기 {} · 구분자 {}",
+                page.prefixes.len(), page.objects.len(), page.next.is_some(),
+                !client.plain_keys.load(Ordering::Relaxed), !client.no_delimiter.load(Ordering::Relaxed)
+            )
+        }));
+
+        let steps = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let bad = &mut bad;
+            let local = dir.join("올릴 것");
+            std::fs::create_dir_all(local.join("폴더/하위")).unwrap();
+            std::fs::create_dir_all(local.join("폴더/빈 폴더")).unwrap();
+            std::fs::write(local.join("폴더/a.txt"), "A").unwrap();
+            std::fs::write(local.join("폴더/하위/b 1.txt"), "B1").unwrap();
+            std::fs::write(local.join("가.txt"), "가나다").unwrap();
+            std::fs::write(local.join("메모 +&=#.txt"), "첫 줄\r\n둘째 줄\r\n").unwrap();
+            let paths: Vec<String> = ["폴더", "가.txt", "메모 +&=#.txt"].iter().map(|name| local.join(name).to_string_lossy().into_owned()).collect();
+            let (c, b, r) = (client.clone(), bucket.clone(), root.clone());
+            note(bad, "올리기(폴더째)", finished(&run_job("cancel", move |run| upload(&c, &b, &r, &paths, run))));
+
+            note(bad, "목록(두 줄씩 이어 읽기)", (|| {
+                let mut names = Vec::new();
+                let mut tokens = Vec::new();
+                let mut next: Option<String> = None;
+                for _ in 0..5 {
+                    let page = page_of(client.list(&bucket, &root, true, 2, next.as_deref()).map_err(text)?, &root);
+                    names.extend(page.entries.into_iter().map(|entry| (entry.name, entry.folder)));
+                    match page.next {
+                        Some(token) => {
+                            tokens.push(token.chars().take(2).collect::<String>());
+                            next = Some(token);
+                        }
+                        None => break,
+                    }
+                }
+                names.sort();
+                let wanted = vec![("가.txt".to_string(), false), ("메모 +&=#.txt".to_string(), false), ("폴더".to_string(), true)];
+                if names == wanted { Ok(format!("이어 읽기 표의 종류 {tokens:?}")) } else { Err(format!("{names:?}")) }
+            })());
+
+            let memo = format!("{root}메모 +&=#.txt");
+            note(bad, "글 미리보기(범위 읽기)", preview(&client, &bucket, &memo).map_err(text).and_then(|shown| {
+                let line = format!("{} {:?} {} 크기 {} 종류 {:?} etag {:?}", shown.kind, shown.text, shown.eol, shown.info.size, shown.info.content_type, shown.info.etag);
+                if (shown.kind, shown.text.as_str(), shown.eol.as_str(), shown.info.size) == ("text", "첫 줄\n둘째 줄\n", "CRLF", 21) { Ok(line) } else { Err(line) }
+            }));
+            note(bad, "고쳐 쓰기(종류·메타데이터)", (|| {
+                client.put_bytes(&bucket, &memo, "고친 글\n".as_bytes(), "text/plain; charset=utf-8", &[("x-amz-meta-owner".into(), "cypher".into())]).map_err(text)?;
+                let info = info_of(&memo, &client.head(&bucket, &memo).map_err(text)?);
+                let line = format!("크기 {} 종류 {:?} 메타 {:?}", info.size, info.content_type, info.meta);
+                if info.size == 11 && info.content_type.starts_with("text/plain") && info.meta.contains(&("x-amz-meta-owner".to_string(), "cypher".to_string())) { Ok(line) } else { Err(line) }
+            })());
+            note(bad, "빈 객체 미리보기", preview(&client, &bucket, &format!("{root}폴더/빈 폴더/")).map_err(text).and_then(|shown| {
+                let line = format!("{} 크기 {} 종류 {:?}", shown.kind, shown.info.size, shown.info.content_type);
+                if shown.kind == "text" && shown.info.size == 0 { Ok(line) } else { Err(line) }
+            }));
+
+            let plan = |key: &str, to: &str, remove: bool, rename: Option<&str>| CopyPlan {
+                bucket: bucket.clone(), base: root.clone(), items: vec![item(key)], to_bucket: bucket.clone(), to_prefix: to.into(), remove, rename: rename.map(str::to_string),
+            };
+            let (c, p) = (client.clone(), plan(&format!("{root}폴더/"), &format!("{root}복사/"), false, None));
+            note(bad, "폴더 복사", finished(&run_job("cancel", move |run| copy(&c, &p, run))).and_then(|line| {
+                if client.exists(&bucket, &format!("{root}복사/폴더/하위/b 1.txt")).map_err(text)? { Ok(line) } else { Err("복사한 것이 없다".into()) }
+            }));
+            let (c, p) = (client.clone(), plan(&format!("{root}가.txt"), &root, true, Some("나 +.txt")));
+            note(bad, "이름 바꾸기", finished(&run_job("cancel", move |run| copy(&c, &p, run))).and_then(|line| {
+                let (new, old) = (client.exists(&bucket, &format!("{root}나 +.txt")).map_err(text)?, client.exists(&bucket, &format!("{root}가.txt")).map_err(text)?);
+                if new && !old { Ok(line) } else { Err(format!("새 이름 {new}, 옛 이름 {old}")) }
+            }));
+
+            // 나눠 올리기: 5MB 조각 하나와 1,000바이트 조각 하나(저장소가 받는 가장 작은 모양).
+            let big = format!("{root}큰 파일.bin");
+            note(bad, "나눠 올리기", (|| {
+                let data: Vec<u8> = (0..(5usize << 20) + 1000).map(|i| (i % 251) as u8).collect();
+                let upload = client.begin_multipart(&bucket, &big, vec![("content-type".into(), "application/octet-stream".into())])?;
+                let sent = (|| {
+                    let mut parts = Vec::new();
+                    for (index, chunk) in data.chunks(5 << 20).enumerate() {
+                        let mut request = client.object("PUT", &bucket, &big);
+                        request.query = Client::part_query(&upload, Some(index as u32 + 1));
+                        request.payload_sha256 = client.hash(chunk);
+                        let response = client.send(&request, Body::Bytes(chunk)).map_err(text)?;
+                        parts.push((index as u32 + 1, response.header("etag").unwrap_or("").to_string()));
+                    }
+                    client.complete_multipart(&bucket, &big, &upload, &parts)
+                })();
+                sent.map_err(|why| client.abort_multipart(&bucket, &big, &upload, why))?;
+                // 뒤 조각이 제자리에 붙었는지: 끝 1,000바이트만 읽어 견준다.
+                let mut request = client.object("GET", &bucket, &big);
+                request.headers.push(("range".into(), format!("bytes={}-", 5usize << 20)));
+                let response = client.send(&request, Body::None).map_err(text)?;
+                let info = info_of(&big, &response);
+                let mut tail = Vec::new();
+                response.into_reader().take(4096).read_to_end(&mut tail).map_err(|e| e.to_string())?;
+                let line = format!("크기 {} etag {:?}", info.size, info.etag);
+                if info.size == data.len() as u64 && tail == data[5 << 20..] { Ok(line) } else { Err(format!("{line}, 끝 {}바이트", tail.len())) }
+            })());
+
+            let dest = dir.join("받은 것");
+            std::fs::create_dir_all(&dest).unwrap();
+            let (c, b, r, d) = (client.clone(), bucket.clone(), root.clone(), dest.clone());
+            let events = run_job("cancel", move |run| download(&c, &b, &r, &[item(&format!("{r}복사/")), item(&format!("{r}나 +.txt"))], &d, run));
+            note(bad, "내려받기(폴더째)", finished(&events).and_then(|line| {
+                let read = |name: &str| std::fs::read_to_string(dest.join(name)).unwrap_or_else(|e| format!("<{e}>"));
+                let got = (read("복사/폴더/a.txt"), read("복사/폴더/하위/b 1.txt"), read("나 +.txt"), dest.join("복사/폴더/빈 폴더").is_dir());
+                if got == ("A".to_string(), "B1".to_string(), "가나다".to_string(), true) { Ok(line) } else { Err(format!("{got:?}")) }
+            }));
+            note(bad, "없는 객체", client.exists(&bucket, &format!("{root}없는 것")).map_err(text).and_then(|found| if found { Err("있다고 답했다".into()) } else { Ok("없다고 답했다".into()) }));
+        }));
+
+        // 치우기: 중간에 실패했어도 만든 폴더는 지운다.
+        let (c, b, r) = (client.clone(), bucket.clone(), root.clone());
+        let events = run_job("cancel", move |run| delete(&c, &b, &[item(&r)], run));
+        note(&mut bad, "폴더째 지우기", finished(&events).map(|line| format!("{line} · 한 번에 지우기 {}", !client.single_delete.load(Ordering::Relaxed))));
+        let left = client.list(&bucket, &root, false, 1000, None).map_err(text).map(|page| page.objects.into_iter().map(|object| object.key).collect::<Vec<_>>());
+        note(&mut bad, "지운 뒤 남은 것", match left {
+            Ok(keys) if keys.is_empty() => Ok("없음".into()),
+            Ok(keys) => {
+                // 묶어 지우기가 남긴 것이 있으면 하나씩 지워 본다(남으면 요금이 든다).
+                let stuck: Vec<String> = keys.iter().filter(|key| client.delete_one(&bucket, key).is_err()).cloned().collect();
+                Err(format!("{}개가 남아 있었다. 하나씩 지운 뒤에도 남은 것: {stuck:?}", keys.len()))
+            }
+            Err(why) => Err(why),
+        });
+        // 버전 관리가 켜진 버킷이면 지운 것도 옛 판으로 남아 자리를 차지한다: 이 시험이 만든 것의 판까지 지운다.
+        note(&mut bad, "남은 옛 판 치우기", sweep_versions(&client, &bucket, &root));
+        let _ = std::fs::remove_dir_all(&dir);
+        if let Err(panic) = steps {
+            std::panic::resume_unwind(panic);
+        }
+        assert!(bad.is_empty(), "실패한 것: {bad:?}");
+    }
+
+    /// `prefix`로 시작하는 키의 판(버전)과 지움 표시를 모두 지운다(시험이 만든 것을 치울 때만 쓴다).
+    /// 버전 관리를 모르는 저장소(판 목록을 거절한다)에서는 아무것도 하지 않는다.
+    fn sweep_versions(client: &Client, bucket: &str, prefix: &str) -> Result<String, String> {
+        assert!(prefix.starts_with("cypher-live-"), "시험이 만든 것만 치운다");
+        let request = Request {
+            method: "GET",
+            bucket: Some(bucket.to_string()),
+            query: vec![("prefix".into(), prefix.to_string()), ("versions".into(), String::new())],
+            ..Request::default()
+        };
+        let body = match client.send(&request, Body::None) {
+            Ok(response) => text_of(response).map_err(|fail| fail.text)?,
+            Err(fail) if matches!(fail.status, 400 | 404 | 405 | 501) => return Ok(format!("판 목록을 모르는 저장소({} {})", fail.status, fail.code)),
+            Err(fail) => return Err(fail.text),
+        };
+        // 판 목록의 뿌리 이름은 저장소마다 다르다(AWS는 `ListVersionsResult`, Ncloud Storage는 `ListBucketResult`).
+        let root = api::expect_root(&body, "ListVersionsResult").or_else(|_| api::expect_root(&body, "ListBucketResult"))?;
+        let found: Vec<(String, String)> = root
+            .children
+            .iter()
+            .filter(|node| matches!(node.name.as_str(), "Version" | "DeleteMarker"))
+            .map(|node| (node.value("Key").to_string(), node.value("VersionId").to_string()))
+            .filter(|(key, id)| key.starts_with(prefix) && !id.is_empty())
+            .collect();
+        let mut stuck = Vec::new();
+        for (key, id) in &found {
+            let mut request = client.object("DELETE", bucket, key);
+            request.query.push(("versionId".into(), id.clone()));
+            if let Err(fail) = client.send(&request, Body::None) {
+                stuck.push(format!("{key} ({})", fail.text));
+            }
+        }
+        if stuck.is_empty() { Ok(format!("판 {}개를 지웠다(더 있음: {})", found.len(), root.value("IsTruncated"))) } else { Err(format!("지우지 못한 판: {stuck:?}")) }
+    }
+
+    /// 앞선 실제 저장소 시험이 남긴 옛 판을 치운다(버전 관리가 켜진 버킷에서만 남는다. 시험이 도중에 죽었을 때 쓴다).
+    /// 환경 변수는 위 시험과 같고, 서명에 넣을 지역을 `CYPHER_S3_LIVE_REGION`으로 더 준다.
+    #[test]
+    #[ignore]
+    fn 실제_저장소에_남은_시험의_옛_판을_치운다() {
+        let env = |name: &str| std::env::var(format!("CYPHER_S3_LIVE_{name}")).unwrap_or_else(|_| panic!("환경 변수 CYPHER_S3_LIVE_{name}이 없다"));
+        let endpoint = Endpoint::parse(&env("ENDPOINT"), std::env::var("CYPHER_S3_LIVE_VHOST").is_err()).unwrap();
+        let info = vault::ConnInfo { id: String::new(), name: String::new(), endpoint: env("ENDPOINT"), region: env("REGION"), path_style: true, signature: "v4".into(), insecure: false, locked: false };
+        let opened = vault::Opened { info, endpoint, signature: Signature::V4, keys: vault::Keys { access: env("ACCESS"), secret: env("SECRET") } };
+        let client = Client::new(opened).unwrap();
+        eprintln!("{}", sweep_versions(&client, &env("BUCKET"), "cypher-live-").unwrap());
     }
 }

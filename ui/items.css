@@ -1216,3 +1216,21 @@ textarea.s3-text { resize: none; background: var(--field); border: none; outline
 .s3-conflicts .dim { color: var(--dim); }
 .ssh-buttons .s3-danger { color: var(--dead); border-color: var(--dead); }
 .s3-value { flex: 1; min-width: 0; overflow-wrap: anywhere; user-select: text; }
+
+/* 요청 이력 창: 한 줄에 요청 하나, 누르면 헤더가 펴진다. */
+#popup.s3-wide { width: 920px; }
+.s3-history { margin: 0 2px; font: 12px/1.5 var(--mono-font); background: var(--field); border: 1px solid var(--line); border-radius: 4px; }
+.s3-history > .dim { padding: 10px; color: var(--dim); }
+.s3-ex + .s3-ex { border-top: 1px solid var(--line); }
+.s3-ex summary { display: flex; gap: 10px; padding: 3px 8px; white-space: nowrap; cursor: pointer; list-style: none; }
+.s3-ex summary::-webkit-details-marker { display: none; }
+.s3-ex summary:hover, .s3-ex[open] summary { background: var(--panel); }
+.s3-ex summary span { flex: none; }
+.s3-ex-seq { width: 36px; text-align: right; color: var(--dim); }
+.s3-ex-time { color: var(--dim); }
+.s3-ex-method { width: 44px; font-weight: 600; }
+.s3-ex-status { width: 28px; }
+.s3-ex summary.bad .s3-ex-status { color: var(--dead); }
+.s3-ex-ms { width: 62px; text-align: right; color: var(--dim); }
+.s3-ex summary .s3-ex-path { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
+.s3-ex-text { margin: 0; padding: 6px 10px 8px 54px; font: inherit; white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; border-top: 1px dashed var(--line); }

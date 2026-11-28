@@ -137,6 +137,57 @@ const kindText = (row) => {
   return row.class && row.class !== 'STANDARD' ? `${kind} · ${row.class}` : kind;
 };
 
+// ───────────────────────── 요청 이력 ─────────────────────────
+//
+// 앱은 접속마다 저장소와 주고받은 요청을 최근 100건까지 메모리에 적어 둔다(파일로 남기지 않는다). 키와 서명은 앱이
+// 가려서 주므로 화면에는 원래 값이 오지 않는다. 객체의 내용과 성공한 답의 본문(목록 등)은 적혀 있지 않다.
+
+const two = (n) => String(n).padStart(2, '0');
+const clockText = (date) => `${two(date.getHours())}:${two(date.getMinutes())}:${two(date.getSeconds())}`;
+const plainText = (text) => { try { return decodeURIComponent(text); } catch { return text; } };
+
+/** 요청 하나를 글로 적는다: 보낸 것, 빈 줄, 받은 것. */
+export function exchangeText(e) {
+  const date = new Date(e.at);
+  const lines = [
+    `#${e.seq}  ${date.getFullYear()}-${two(date.getMonth() + 1)}-${two(date.getDate())} ${clockText(date)}.${String(date.getMilliseconds()).padStart(3, '0')}  (${count(e.millis)}ms)`,
+    `${e.method} ${e.url}`,
+  ];
+  for (const [name, value] of e.request_headers) lines.push(`${name}: ${value}`);
+  if (e.sent) lines.push(`(본문 ${count(e.sent)}바이트${e.request_body ? '' : ' · 내용은 적어 두지 않습니다'})`);
+  if (e.request_body) lines.push('', e.request_body);
+  lines.push('');
+  if (e.status) {
+    lines.push(`HTTP ${e.status} ${e.reason}`.trim());
+    for (const [name, value] of e.response_headers) lines.push(`${name}: ${value}`);
+    if (e.response_body) lines.push('', e.response_body);
+  } else {
+    lines.push(`(답을 받지 못했습니다) ${e.problem}`);
+  }
+  return lines.join('\n');
+}
+
+/** 이력의 한 줄: 누르면 보낸 헤더와 받은 헤더가 펴진다. */
+function exchangeNode(e) {
+  const { make } = api;
+  const node = make('details', 's3-ex');
+  const ok = e.status >= 200 && e.status < 300;
+  const head = make('summary', ok ? '' : 'bad');
+  let path = e.url;
+  try { const url = new URL(e.url); path = plainText(url.pathname) + plainText(url.search); } catch { /* 주소로 읽을 수 없으면 그대로 */ }
+  head.append(
+    make('span', 's3-ex-seq', `#${e.seq}`),
+    make('span', 's3-ex-time', clockText(new Date(e.at))),
+    make('span', 's3-ex-method', e.method),
+    make('span', 's3-ex-status', e.status ? String(e.status) : '실패'),
+    make('span', 's3-ex-ms', `${count(e.millis)}ms`),
+    make('span', 's3-ex-path', path),
+  );
+  head.title = `${e.method} ${path}`;
+  node.append(head, make('pre', 's3-ex-text', exchangeText(e)));
+  return node;
+}
+
 // ───────────────────────── 접속 정보 창 ─────────────────────────
 
 /**
@@ -165,8 +216,6 @@ export function showConnForm(fill, done) {
   const endpoint = field('주소', '전체 주소를 적습니다 · 예: https://kr.ncloudstorage.com', fill?.endpoint, '저장소의 주소(엔드포인트). http://나 https://를 적지 않으면 https로 봅니다.\nNcloud Storage: https://kr.ncloudstorage.com · VPC의 사설망에서는 https://kr-private.ncloudstorage.com\n버킷 이름은 적지 않습니다.');
   const access = field('Access key', editing ? '(그대로 두려면 비움)' : '접근 키', '', '접근 키(Access key). 저장할 때 암호화합니다.', 'password');
   const secret = field('Secret key', editing ? '(그대로 두려면 비움)' : '비밀 키', '', '비밀 키(Secret key). 저장할 때 암호화합니다.', 'password');
-  const region = field('지역', '(선택) 비우면 주소에 맞춤: Ncloud Storage는 kr', fill?.region || '', '서명에 넣는 지역 이름. 비워 두면 주소를 보고 정합니다(Ncloud Storage는 kr, 그 밖에는 us-east-1).');
-  const start = field('처음 열 곳', '(선택) 예: s3://버킷/폴더/ · 비우면 버킷 목록', fill?.start, '접속하면 처음 보여 줄 곳. 버킷 목록을 볼 권한이 없는 키라면 여기에 버킷을 적어 두세요.');
   const lock = field('잠금 암호', editing ? '(선택) 8자 이상 · 키를 다시 적을 때만 정할 수 있음' : '(선택) 8자 이상 · 정하면 접속할 때마다 묻습니다', '', '키를 한 번 더 잠그는 암호. 어디에도 저장하지 않고 접속할 때마다 묻습니다.\n정해 두면 이 PC와 Windows 계정이 통째로 넘어가도 이 암호 없이는 키를 풀 수 없습니다.', 'password');
   const lockAgain = field('암호 확인', '잠금 암호를 한 번 더', '', '', 'password');
   const pathStyle = check('경로 방식 주소 (서버/버킷/키)', fill ? fill.path_style !== false : true, '켜면 https://서버/버킷/키, 끄면 https://버킷.서버/키로 부릅니다.\nNcloud Storage는 둘 다 됩니다(이름에 점이 든 버킷은 경로 방식만 됩니다). 켜 두면 됩니다.');
@@ -184,7 +233,7 @@ export function showConnForm(fill, done) {
     if (lock.input.value !== lockAgain.input.value) { problem.textContent = '잠금 암호와 암호 확인이 다릅니다.'; lockAgain.input.focus(); return null; }
     return {
       id: fill?.id || null,
-      name: name.input.value, endpoint: endpoint.input.value, region: region.input.value, start: start.input.value,
+      name: name.input.value, endpoint: endpoint.input.value,
       path_style: pathStyle.input.checked, signature: v2.input.checked ? 'v2' : 'v4', insecure: insecure.input.checked,
       access: access.input.value, secret: secret.input.value, password: lock.input.value,
     };
@@ -216,13 +265,13 @@ export function showConnForm(fill, done) {
   const checks = make('div', 's3-checks');
   checks.append(pathStyle.row, v2.row, insecure.row);
   const form = make('div', 'ssh-form');
-  form.append(name.row, endpoint.row, access.row, secret.row, region.row, start.row, checks, lock.row, lockAgain.row, problem, buttons);
+  form.append(name.row, endpoint.row, access.row, secret.row, checks, lock.row, lockAgain.row, problem, buttons);
   form.addEventListener('keydown', (ev) => {
     if (ev.key === 'Enter' && ev.target.tagName === 'INPUT' && ev.target.type !== 'checkbox') { ev.preventDefault(); go.click(); }
   });
   const close = openPopup(editing ? `S3 접속 정보 고치기 — ${fill.name}` : 'S3 접속 정보 더하기', [
     form,
-    make('p', 'note', '접근 키와 비밀 키는 암호화해서 이 PC에 저장합니다(%APPDATA%\\cypher\\s3). 파일에는 원문이 적히지 않고, 저장한 뒤에는 이 창에도 다시 보이지 않습니다. '
+    make('p', 'note', 'Access key와 Secret key는 암호화해서 이 PC에 저장합니다(%APPDATA%\\cypher\\s3). 파일에는 원문이 적히지 않고, 저장한 뒤에는 이 창에도 다시 보이지 않습니다. '
       + '기본은 Windows 계정으로 잠급니다: 파일만 가져가서는(다른 PC, 다른 계정) 풀 수 없습니다. '
       + '잠금 암호를 정하면 그 암호로 한 번 더 잠급니다: 암호는 저장하지 않고 접속할 때마다 묻으며, 이 PC에서 같은 계정으로 도는 다른 프로그램도, 사용자 폴더를 통째로 가져간 사람도 암호 없이는 풀 수 없습니다(짧은 암호는 대입해 보면 뚫리므로 길게 정하세요). '
       + '다만 키는 요청에 서명할 때 원문이 필요해서 "되돌릴 수 없는" 모양으로는 저장할 수 없고, 접속해 있는 동안에는 Cypher의 메모리에 풀린 채로 있습니다. '
@@ -243,14 +292,15 @@ export function showConnForm(fill, done) {
 
 export function createS3(item, host, saved = {}, onChange = () => {}) {
   const { invoke, make, setStatus, showMenu } = api;
-  /** 고른 접속 정보 { id, name, endpoint, locked, start … }. 아직 고르지 않았으면 null. */
+  /** 고른 접속 정보 { id, name, endpoint, locked … }. 아직 고르지 않았으면 null. */
   let conn = typeof saved.conn === 'string' && saved.conn ? { id: saved.conn, name: typeof saved.name === 'string' ? saved.name : '' } : null;
   let known = [];                 // 저장해 둔 접속 정보들
   let knownError = '';
   let handle = null;              // 접속해 있으면 접속 번호
   let connecting = false;
   let gateProblem = '';
-  let resume = typeof saved.path === 'string' ? saved.path : ''; // 접속하면 열 곳(지난번에 보던 곳)
+  let past = null;                // 끊기 전 접속의 요청 이력 { name, list }(끊을 때 받아 둔 것. 키와 서명은 가려져 있다)
+  let resume =typeof saved.path === 'string' ? saved.path : ''; // 접속하면 열 곳(지난번에 보던 곳)
   let resumeConn = conn?.id || '';                               // 그 자리가 어느 접속 정보의 것인지(다른 저장소를 고르면 쓰지 않는다)
   let at = { bucket: '', prefix: '', starts: '' };
   let rows = [], next = null, loadedAt = 0, listError = '';
@@ -286,8 +336,9 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
   $where.append($crumbs, $address);
   const $conn = button('', '접속 정보 · 접속 끊기', (ev) => connMenu(ev));
   $conn.classList.add('s3-conn');
+  const $history = button('요청 이력', '저장소에 보낸 요청과 받은 답 보기 (최근 100건 · 키와 서명은 가려서 보여 줍니다 · 저장소에는 요청을 보내지 않습니다)', () => showHistory());
   const nav = make('div', 'doc-bar s3-nav');
-  nav.append($back, $forward, $up, $refresh, $where, $conn);
+  nav.append($back, $forward, $up, $refresh, $where, $history, $conn);
 
   const $filter = make('input', 'tbl-filter s3-filter');
   Object.assign($filter, { placeholder: '거르기 (불러온 줄에서 · Enter: 이 글로 시작하는 것을 서버에서 찾기)', spellcheck: false, autocomplete: 'off' });
@@ -433,7 +484,7 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
     $gate.replaceChildren(box);
   }
 
-  /** 접속한다(사용자가 눌렀을 때만 부른다). 키를 푼 뒤 지난번에 보던 곳(없으면 처음 열 곳, 버킷 목록)을 연다. */
+  /** 접속한다(사용자가 눌렀을 때만 부른다). 키를 푼 뒤 지난번에 보던 곳(없으면 버킷 목록)을 연다. */
   async function connect(password = null) {
     if (!conn || connected() || connecting) return false;
     connecting = true;
@@ -449,8 +500,8 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
       drawGate();
       drawBar();
       onChange();
-      // 같은 저장소에 다시 접속하면 보던 곳을, 처음이거나 다른 저장소면 그 접속 정보의 "처음 열 곳"을 연다.
-      const first = (resumeConn === conn.id && resume) || conn.start || 's3://';
+      // 같은 저장소에 다시 접속하면 보던 곳을, 처음이거나 다른 저장소면 버킷 목록을 연다.
+      const first = (resumeConn === conn.id && resume) || 's3://';
       resumeConn = conn.id;
       await openAddress(first, { record: false });
       focus();
@@ -473,7 +524,12 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
     resume = addressOf(at);
     resumeConn = conn.id;
     dropAsks(view);
-    invoke('s3_disconnect', { handle }).catch(() => {});
+    // 요청 이력은 끊은 뒤에도 볼 수 있게 받아 둔다(가려진 채로 온다). 받고 나면(받지 못해도) 앱의 접속을 버린다.
+    const own = handle, name = conn.name;
+    invoke('s3_history', { handle: own })
+      .then((list) => { past = { name, list }; if (!disposed) drawBar(); })
+      .catch(() => {})
+      .finally(() => invoke('s3_disconnect', { handle: own }).catch(() => {}));
     live.delete(handle);
     handle = null;
     cache.clear();
@@ -673,6 +729,7 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
     $refresh.disabled = !on;
     $conn.textContent = conn ? `⛁ ${conn.name || 'S3'}${on ? '' : ' (접속 안 함)'}` : '⛁ S3';
     $conn.disabled = !on;
+    $history.disabled = !on && !past;
     $crumbs.replaceChildren();
     const crumb = (text, place, tip) => {
       const b = make('button', 's3-crumb', text);
@@ -766,7 +823,7 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
     const total = rows.length;
     $message.className = `s3-message${listError ? ' fail' : ''}`;
     if (listError) {
-      $message.textContent = `${listError}${!at.bucket ? '\n버킷 목록을 볼 권한이 없는 키라면 주소 줄(Ctrl+L)에 s3://버킷이름/ 을 적어 이동하세요. 접속 정보의 "처음 열 곳"에 적어 두면 접속하자마자 그곳을 엽니다.' : ''}`;
+      $message.textContent = `${listError}${!at.bucket ? '\n버킷 목록을 볼 권한이 없는 키라면 주소 줄(Ctrl+L)에 s3://버킷이름/ 을 적어 이동하세요(이 항목은 보던 곳을 기억해, 다음에 접속하면 그곳을 엽니다).' : ''}`;
     } else if (busy && !total) {
       $message.textContent = '목록을 읽는 중…';
     } else if (!total) {
@@ -1438,6 +1495,67 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
     ]);
   }
 
+  /**
+   * 요청 이력 창: 이 접속으로 저장소와 주고받은 요청과 답(최근 100건, 새것부터). 앱이 메모리에 적어 둔 것을 읽을 뿐
+   * 저장소에는 아무것도 보내지 않는다. 접속을 끊은 뒤에는 끊기 직전까지의 것을 보여 준다.
+   */
+  async function showHistory() {
+    const { openPopup } = api;
+    const read = async () => (connected() ? { name: conn.name, list: await invoke('s3_history', { handle }), now: true } : past && { ...past, now: false });
+    let got;
+    try { got = await read(); } catch (err) { setStatus(String(err)); return false; }
+    if (!got) { setStatus('접속한 뒤에 보낸 요청이 여기에 남습니다.'); return false; }
+    const $note = make('p', 'note', '');
+    const $rows = make('div', 's3-history');
+    const fill = () => {
+      $note.textContent = `${got.now ? '이 접속으로' : '끊기 전 접속에서'} 저장소에 보낸 요청과 받은 답입니다(최근 100건까지, 새것부터 ${count(got.list.length)}건). 줄을 누르면 헤더가 펴집니다. `
+        + '키와 서명은 가려서 적고, 객체의 내용은 적지 않습니다. 파일로 남기지 않으며, 다시 접속하면 새로 적기 시작합니다.';
+      $rows.replaceChildren(...got.list.map(exchangeNode));
+      if (!got.list.length) $rows.append(make('div', 'dim', '아직 보낸 요청이 없습니다.'));
+    };
+    const buttons = make('div', 'ssh-buttons');
+    const again = make('button', '', '다시 읽기');
+    again.title = '이력을 다시 읽기 (저장소에는 요청을 보내지 않습니다)';
+    again.onclick = async () => {
+      try { const fresh = await read(); if (fresh) { got = fresh; fill(); } } catch (err) { setStatus(String(err)); }
+    };
+    const copy = make('button', '', '모두 복사');
+    copy.title = '보이는 이력을 글로 복사 (키와 서명은 가려진 채로)';
+    copy.onclick = () => invoke('clipboard_write', { text: got.list.map(exchangeText).join('\n\n────────────────\n\n') })
+      .then(() => setStatus(`요청 이력 ${count(got.list.length)}건을 복사했습니다.`))
+      .catch((err) => setStatus(String(err)));
+    // 지우기: 적어 둔 이력을 비운다(이 PC의 메모리에 든 것만. 저장소에는 아무것도 보내지 않는다).
+    const clear = make('button', '', '지우기');
+    clear.title = '이력을 모두 지우기 (저장소에는 요청을 보내지 않습니다)';
+    clear.onclick = async () => {
+      if (!got.list.length || !confirm(`요청 이력 ${count(got.list.length)}건을 지울까요?`)) return;
+      try {
+        if (got.now) {
+          // 창을 띄워 둔 사이 접속이 끊겼거나 바뀌었으면 지울 것이 없다(끊기 전의 것은 화면이 든 것만 버린다).
+          if (connected()) await invoke('s3_history_clear', { handle });
+        } else {
+          past = null;
+          if (!disposed) drawBar();
+        }
+        got = { ...got, list: [] };
+        fill();
+        setStatus('요청 이력을 지웠습니다.');
+      } catch (err) { setStatus(String(err)); }
+    };
+    buttons.append(again, copy, clear);
+    fill();
+    const dialog = document.getElementById('popup');
+    openPopup(`요청 이력 — ${got.name || 'S3'}${got.now ? '' : ' (끊기 전 접속)'}`, [$note, buttons, $rows]);
+    // 줄이 길어 창을 넓게 쓴다. 닫히면 원래 너비로(닫힘 알림은 늦게 올 수 있어, 이 창이 아직 떠 있으면 다음 알림을 기다린다).
+    dialog.classList.add('s3-wide');
+    const narrow = () => {
+      if (dialog.open && $rows.isConnected) { dialog.addEventListener('close', narrow, { once: true }); return; }
+      dialog.classList.remove('s3-wide');
+    };
+    dialog.addEventListener('close', narrow, { once: true });
+    return true;
+  }
+
   // ── 항목으로서 ──
 
   function focus() {
@@ -1507,6 +1625,8 @@ export function createS3(item, host, saved = {}, onChange = () => {}) {
     paste,
     jobs: () => [...jobs].map(([id, job]) => ({ id, ...(job.event || {}) })),
     answer: (job, value) => invoke('s3_job_answer', { job, answer: value }),
+    history: () => (connected() ? invoke('s3_history', { handle }) : Promise.resolve(past?.list || [])),
+    showHistory,
     busy: () => busy,
     problem: () => listError || gateProblem,
     more: () => !!next,

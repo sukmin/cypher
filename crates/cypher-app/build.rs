@@ -34,7 +34,7 @@ const MAIN: &[&str] = &[
     "code_index_touch", "code_index_state", "code_index_close",
     "s3_conns", "s3_conn_save", "s3_conn_remove", "s3_connect", "s3_disconnect", "s3_buckets", "s3_list", "s3_head", "s3_exists",
     "s3_preview", "s3_put_text", "s3_mkdir", "s3_bucket_create", "s3_bucket_remove", "s3_upload", "s3_download", "s3_delete", "s3_copy",
-    "s3_job_cancel", "s3_job_answer", "s3_pick_files",
+    "s3_job_cancel", "s3_job_answer", "s3_pick_files", "s3_history", "s3_history_clear",
 ];
 
 fn permissions(commands: &[&str]) -> String {

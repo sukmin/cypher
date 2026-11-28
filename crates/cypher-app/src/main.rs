@@ -415,6 +415,8 @@ fn main() {
             s3::s3_job_cancel,
             s3::s3_job_answer,
             s3::s3_pick_files,
+            s3::s3_history,
+            s3::s3_history_clear,
             commands::ssh_hosts,
             commands::wake_after,
             commands::link_detect,
