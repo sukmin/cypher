@@ -437,6 +437,7 @@ fn main() {
             template::template_folder,
             template::dirs_exist,
             created::created_final,
+            created::created_gone,
             code::code_list,
             code::code_files,
             code::code_outline,

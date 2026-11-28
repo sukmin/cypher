@@ -189,6 +189,7 @@ pub const DEFAULT_TEXT: &str = r#"# Cypher 설정. 고친 뒤 Cypher를 다시 �
 # utf8 = true          # PowerShell·cmd 세션의 글자 인코딩을 UTF-8로 (Claude 세션은 해당 없음)
 # Claude 세션이 새로 만든 파일을 그 세션의 워크스페이스에 항목으로 놓기.
 #   "known": 문서(.md, .txt)·이미지·HTTP 요청(.http)·표(.csv, .tsv)·HTML(.html)만 / "all": 그 밖의 글자 파일도 문서로 / "off": 놓지 않음
+#   git이 무시하는 파일(.gitignore)과 Cargo·Maven·Gradle의 소스 폴더(src, tests 등)에 든 파일은 놓지 않습니다("all"이면 소스 폴더의 파일도 놓음).
 # show_created = "known"
 # Claude 세션이 지금 쓰는 도구(Edit · main.js, Bash · cargo build)를 사이드바의 그 줄에 표시.
 #   도구를 쓸 때마다 전달 프로그램이 한 번씩 떠서 도구마다 수십 ms가 더 듭니다. 새로 여는 세션부터 적용됩니다.

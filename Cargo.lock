@@ -1004,7 +1004,7 @@ dependencies = [
 
 [[package]]
 name = "cypher"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
@@ -1035,11 +1035,11 @@ dependencies = [
 
 [[package]]
 name = "cypher-bridge"
-version = "0.23.0"
+version = "0.24.0"
 
 [[package]]
 name = "cypher-core"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "base64 0.22.1",
  "encoding_rs",
@@ -1055,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-pty"
-version = "0.23.0"
+version = "0.24.0"
 dependencies = [
  "anyhow",
  "portable-pty",

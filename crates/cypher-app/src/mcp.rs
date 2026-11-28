@@ -41,15 +41,19 @@ notify_user로 알릴 수 있습니다(응답이 끝날 때의 알림은 Cypher�
 const CREATED_NOTE: &str = " Write 도구로 새로 만든 문서(.md, .txt)·SVG 그림·요청 파일(.http)·표 파일(.csv, .tsv)·HTML 파일(.html)은 Cypher가 알아서 이 세션의 워크스페이스에 \
 항목으로 놓으므로 doc_show나 image_add, table_show를 다시 부를 필요가 없습니다(응답이 끝날 때 한꺼번에 놓습니다). 그 파일을 Edit·Write 도구로 고치면 \
 같은 워크스페이스에서 그 파일을 보여 주는 항목(문서, 표, HTML 페이지를 연 사이트, 그림)이 스스로 새 내용을 읽으므로, 고친 뒤에 다시 놓거나 새로 고칠 필요도 없습니다. 다만 숨김 폴더(.git 등)나 빌드 폴더 안의 파일, \
-임시 폴더의 파일, 한 요청에서 8개를 넘는 파일, 명령(Bash 등)이나 스크립트로 만든 파일, 그리고 중간 파일(응답이 끝나기 전에 지운 파일, `tmp_…`·`….bak`처럼 잠깐 쓰는 이름의 파일, 같은 요청에서 만든 문서·HTML에 넣은 그림)은 놓이지 않으니, 사용자에게 보여 줄 것이면 doc_show·image_add·table_show로 놓고, \
+임시 폴더의 파일, git이 무시하는 파일(.gitignore에 걸리는 산출물), Cargo·Maven·Gradle 프로젝트의 소스 폴더(src, tests 등)에 든 파일, 한 요청에서 8개를 넘는 파일, 명령(Bash 등)이나 스크립트로 만든 파일, 그리고 중간 파일(응답이 끝나기 전에 지운 파일, `tmp_…`·`….bak`처럼 잠깐 쓰는 이름의 파일, 같은 요청에서 만든 문서·HTML에 넣은 그림)은 놓이지 않으니, 사용자에게 보여 줄 것이면 doc_show·image_add·table_show로 놓고, \
 HTML 파일은 browser_navigate에 그 파일의 전체 경로를 주어 여세요.";
+
+/// 위 안내에서 "소스 폴더의 파일은 놓이지 않는다"는 대목(코드 파일도 놓는 설정에서는 뺀다).
+const SOURCE_NOTE: &str = " Cargo·Maven·Gradle 프로젝트의 소스 폴더(src, tests 등)에 든 파일,";
 
 /// 세션에 알려 줄 안내 글. `show_created`는 설정의 `[session] show_created`.
 fn instructions(show_created: &str) -> String {
-    if show_created == "off" {
-        INSTRUCTIONS.to_string()
-    } else {
-        format!("{INSTRUCTIONS}{CREATED_NOTE}")
+    match show_created {
+        "off" => INSTRUCTIONS.to_string(),
+        // 모든 글자 파일을 놓는 설정에서는 소스 폴더의 파일도 놓는다.
+        "all" => format!("{INSTRUCTIONS}{}", CREATED_NOTE.replace(SOURCE_NOTE, "")),
+        _ => format!("{INSTRUCTIONS}{CREATED_NOTE}"),
     }
 }
 
@@ -393,6 +397,9 @@ mod tests {
     fn 만든_파일_안내는_설정이_켜져_있을_때만() {
         assert!(instructions("known").contains("알아서 이 세션의 워크스페이스에"));
         assert!(instructions("all").contains("doc_show·image_add·table_show로 놓고"));
+        // 소스 폴더의 파일은 놓이지 않는다는 말은 코드 파일도 놓는 설정에서는 뺀다(git이 무시하는 파일 이야기는 남는다).
+        assert!(instructions("known").contains("소스 폴더") && instructions("known").contains("git이 무시하는 파일"));
+        assert!(!instructions("all").contains("소스 폴더") && instructions("all").contains("git이 무시하는 파일"));
         // 명령으로 만든 HTML 파일을 여는 길도 알려 준다. 여는 길 자체는 설정과 상관없이 알려 준다.
         assert!(instructions("known").contains("HTML 파일은 browser_navigate에 그 파일의 전체 경로를 주어 여세요"));
         assert!(instructions("off").contains("browser_navigate에 그 파일의 전체 경로를 주면"));

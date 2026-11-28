@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 use std::io::Read;
-use crate::paths::{is_within, parts, strip_root};
+use crate::paths::{is_within, parts, same_place, strip_root};
 use std::path::{Path, PathBuf};
 use std::sync::{LazyLock, Mutex};
 
@@ -188,9 +188,140 @@ pub fn final_files(paths: &[PathBuf]) -> Vec<bool> {
         .collect()
 }
 
+/// 그 파일들 가운데 git이 무시하는 것(같은 순서의 참·거짓). 프로젝트의 `.gitignore`(와 git의 다른 무시 규칙)에
+/// 걸리는 파일은 그 프로젝트가 스스로 "저장소에 두지 않는 산출물"이라고 적어 둔 것이다: 빌드 폴더의 이름이 무엇이든
+/// (`out`, `bin`, `generated`, 따로 정한 출력 폴더) 빌드 도구를 몰라도 가려진다.
+///
+/// 파일이 든 폴더마다 `git check-ignore`를 한 번 부른다(보기만 하는 명령). 저장소가 아니거나 git을 실행할 수 없으면
+/// 무시하지 않는 것으로 친다. 요청 파일을 두는 자리(`.cypher\http`)는 숨김 폴더라 무시해 두는 일이 많지만 HTTP 항목이
+/// 보는 곳이므로 묻지 않는다.
+fn git_ignored(paths: &[&Path]) -> Vec<bool> {
+    use std::io::Write;
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    /// 한 번에 묻는 이름 수(입력과 출력이 한꺼번에 차서 서로 기다리는 일이 없게 작게 나눈다).
+    const AT_ONCE: usize = 100;
+
+    let mut ignored = vec![false; paths.len()];
+    // 폴더 → 그 폴더에 든 파일들의 (자리, 이름)
+    let mut by_dir: Vec<(&Path, Vec<(usize, String)>)> = Vec::new();
+    for (index, path) in paths.iter().enumerate() {
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else { continue };
+        if parts(dir).is_some_and(|names| matches!(names.as_slice(), [.., a, b] if a == ".cypher" && b == "http")) {
+            continue;
+        }
+        let name = name.to_string_lossy().into_owned();
+        match by_dir.iter_mut().find(|(known, _)| *known == dir) {
+            Some((_, list)) => list.push((index, name)),
+            None => by_dir.push((dir, vec![(index, name)])),
+        }
+    }
+    for (dir, list) in by_dir {
+        for chunk in list.chunks(AT_ONCE) {
+            let spawned = Command::new("git")
+                .arg("-C")
+                .arg(dir)
+                .args(["check-ignore", "-z", "--stdin"])
+                .env("GIT_OPTIONAL_LOCKS", "0")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .creation_flags(CREATE_NO_WINDOW)
+                .spawn();
+            let Ok(mut child) = spawned else { return ignored }; // git이 없다.
+            if let Some(mut stdin) = child.stdin.take() {
+                let asked: Vec<u8> = chunk.iter().flat_map(|(_, name)| name.bytes().chain(std::iter::once(0))).collect();
+                let _ = stdin.write_all(&asked);
+            }
+            let Ok(output) = child.wait_with_output() else { continue };
+            // 0: 무시하는 것이 있다, 1: 없다, 그 밖(128 등): 저장소가 아니다.
+            if output.status.code() != Some(0) {
+                continue;
+            }
+            let said = String::from_utf8_lossy(&output.stdout);
+            let said: HashSet<&str> = said.split('\0').filter(|name| !name.is_empty()).collect();
+            for (index, name) in chunk {
+                ignored[*index] = said.contains(name.as_str());
+            }
+        }
+    }
+    ignored
+}
+
+/// 빌드 도구가 정한 소스 폴더에 든 파일인지: 그 파일에서 위로 올라가며 처음 만나는 프로젝트 파일(`Cargo.toml`,
+/// `pom.xml`, `build.gradle`·`build.gradle.kts`)이 있는 폴더를 그 프로젝트(모듈)의 뿌리로 보고, 그 바로 아래의
+/// 소스 폴더(Cargo: `src`·`tests`·`benches`·`examples`, Maven·Gradle: `src`) 안에 있으면 참.
+/// Maven·Gradle은 빌드 파일 없이 뿌리의 설정만으로 꾸린 하위 프로젝트가 있으므로, 뿌리 아래 어디든 표준 소스 자리
+/// (`…/src/main/…`, `…/src/test/…`)에 든 파일도 친다.
+///
+/// 그런 파일(`src/main/resources/templates/*.html`, `src/test/resources/*.csv`, `tests/data/*.txt` …)은 프로그램의
+/// 일부(자원·시험 자료)이지 사람이 볼 결과물이 아니다. `base`(세션이 일하는 폴더) 위로는 올라가지 않는다. 세션 폴더
+/// 밖에 만든 파일이거나 세션 폴더를 모르면 몇 층만 올라가 본다.
+fn in_source_tree(path: &Path, base: Option<&Path>) -> bool {
+    const CARGO: [&str; 4] = ["src", "tests", "benches", "examples"];
+    const JVM: [&str; 1] = ["src"];
+    /// 세션 폴더로 끝을 정할 수 없을 때 올라가 보는 층 수.
+    const LEVELS: usize = 6;
+    let base = base.filter(|base| is_within(path, base));
+    let mut trail: Vec<String> = Vec::new(); // 지금 보는 폴더에서 파일까지 가는 폴더 이름들(아래에서 위로 쌓는다)
+    for (level, dir) in path.ancestors().skip(1).enumerate() {
+        let has = |name: &str| dir.join(name).is_file();
+        let roots: Option<&[&str]> = if has("Cargo.toml") {
+            Some(&CARGO)
+        } else if has("pom.xml") || has("build.gradle") || has("build.gradle.kts") {
+            Some(&JVM)
+        } else {
+            None
+        };
+        // 가장 가까운 프로젝트 파일이 정한다(그 위의 것은 보지 않는다). 프로젝트 파일과 같은 폴더에 바로 놓인 파일
+        // (README 등)은 소스 폴더 안이 아니다.
+        if let Some(roots) = roots {
+            let first = trail.last().is_some_and(|first| roots.iter().any(|root| first.eq_ignore_ascii_case(root)));
+            // trail은 아래에서 위로 쌓였다: [.., "main", "src", ..]이면 `src/main`이다.
+            let standard = roots.len() == JVM.len()
+                && trail.windows(2).any(|pair| pair[1].eq_ignore_ascii_case("src") && ["main", "test"].iter().any(|set| pair[0].eq_ignore_ascii_case(set)));
+            return first || standard;
+        }
+        match base {
+            Some(base) if same_place(dir, base) => break,
+            None if level >= LEVELS => break,
+            _ => {}
+        }
+        match dir.file_name() {
+            Some(name) => trail.push(name.to_string_lossy().into_owned()),
+            None => break, // 드라이브의 뿌리
+        }
+    }
+    false
+}
+
+/// 그 폴더가 속한 git 저장소의 뿌리(작업 폴더의 맨 위). 저장소가 아니거나 git을 실행할 수 없으면 None.
+fn git_top(dir: &Path) -> Option<PathBuf> {
+    use std::os::windows::process::CommandExt;
+    use std::process::{Command, Stdio};
+    const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+    let output = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--show-toplevel"])
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .creation_flags(CREATE_NO_WINDOW)
+        .output()
+        .ok()?;
+    let top = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    (output.status.success() && !top.is_empty()).then(|| PathBuf::from(top))
+}
+
 /// 파일마다의 판정: "final"(사이드바에 놓을 최종 파일), "later"(있지만 아직 빈 파일 — 다음에 다시 본다), "skip"(놓지 않는다).
-pub fn verdicts(paths: &[PathBuf]) -> Vec<&'static str> {
-    final_files(paths)
+///
+/// 중간 파일(`final_files`)에 더해, git이 무시하는 파일과 (`keep_sources`가 아니면) 소스 폴더에 든 파일도 놓지 않는다.
+/// `base`는 그 세션이 일하는 폴더, `keep_sources`는 설정이 "모든 글자 파일을 놓기"(`show_created = "all"`)일 때 참이다:
+/// 그때는 코드 파일도 놓아 달라는 것이므로 소스 폴더라고 가리지 않는다.
+pub fn verdicts(paths: &[PathBuf], base: Option<&Path>, keep_sources: bool) -> Vec<&'static str> {
+    let mut said: Vec<&'static str> = final_files(paths)
         .into_iter()
         .zip(paths)
         .map(|(is_final, path)| {
@@ -203,17 +334,85 @@ pub fn verdicts(paths: &[PathBuf]) -> Vec<&'static str> {
                 "skip"
             }
         })
-        .collect()
+        .collect();
+    // 놓을 것과 나중에 다시 볼 것만 더 가린다(이미 놓지 않기로 한 것 때문에 git을 부르지 않는다).
+    let open: Vec<usize> = (0..paths.len()).filter(|index| said[*index] != "skip").collect();
+    if open.is_empty() {
+        return said;
+    }
+    // 세션 폴더 안의 파일은 그 파일이 속한 저장소가 어디서 시작하는지를 보고 git 규칙을 쓸지 정한다
+    // (숨김·빌드 폴더 규칙을 세션 폴더 아래에만 거는 것과 같은 까닭):
+    // - 저장소의 뿌리가 세션 폴더이거나 그 안이면 이 프로젝트의 저장소다: 그 규칙을 쓴다.
+    // - 저장소의 뿌리가 세션 폴더보다 위면, 세션 폴더 자체가 그 저장소에서 무시되는 곳인지 본다. 무시되는 곳이면
+    //   (위쪽 저장소가 무시하는 폴더 안의 프로젝트, 홈 폴더를 `*`로 무시하는 저장소 아래의 폴더 등) 그 규칙은 이
+    //   프로젝트의 산출물을 가리는 것이 아니므로 쓰지 않는다.
+    // 세션 폴더 밖의 파일(이나 세션 폴더를 모를 때)은 그대로 묻는다.
+    let mut tops: Vec<(&Path, Option<PathBuf>)> = Vec::new(); // 폴더 → 저장소의 뿌리(같은 폴더는 한 번만 묻는다)
+    let mut base_ignored: Option<bool> = None;
+    let asked: Vec<usize> = open
+        .iter()
+        .copied()
+        .filter(|index| {
+            let path = &paths[*index];
+            let (Some(base), Some(dir)) = (base.filter(|base| is_within(path, base)), path.parent()) else { return true };
+            let top = match tops.iter().find(|(known, _)| *known == dir) {
+                Some((_, top)) => top.clone(),
+                None => {
+                    let top = git_top(dir);
+                    tops.push((dir, top.clone()));
+                    top
+                }
+            };
+            match top {
+                None => false, // 저장소가 아니다: 물어볼 것이 없다.
+                Some(top) if is_within(&top, base) => true,
+                Some(_) => !*base_ignored.get_or_insert_with(|| git_ignored(&[base])[0]),
+            }
+        })
+        .collect();
+    let ignored = git_ignored(&asked.iter().map(|index| paths[*index].as_path()).collect::<Vec<_>>());
+    for (index, ignored) in asked.into_iter().zip(ignored) {
+        if ignored {
+            said[index] = "skip";
+        }
+    }
+    for index in open {
+        if !keep_sources && in_source_tree(&paths[index], base) {
+            said[index] = "skip";
+        }
+    }
+    said
 }
 
 /// 화면이 묻는다: 요청이 끝났을 때, 그동안 만든 파일 가운데 어느 것이 사이드바에 놓을 최종 파일인지.
 #[tauri::command]
-pub async fn created_final(paths: Vec<String>) -> Vec<&'static str> {
-    // 파일을 읽는 일이라 작업 스레드에서 한다. 가리지 못하면 모두 놓는다.
+pub async fn created_final(paths: Vec<String>, base: Option<String>, keep_sources: Option<bool>) -> Vec<&'static str> {
+    // 파일을 읽고 git을 부르는 일이라 작업 스레드에서 한다. 가리지 못하면 모두 놓는다.
     let count = paths.len();
-    tauri::async_runtime::spawn_blocking(move || verdicts(&paths.iter().map(PathBuf::from).collect::<Vec<_>>()))
+    tauri::async_runtime::spawn_blocking(move || {
+        let base = base.filter(|base| !base.is_empty()).map(PathBuf::from);
+        verdicts(&paths.iter().map(PathBuf::from).collect::<Vec<_>>(), base.as_deref(), keep_sources.unwrap_or(false))
+    })
+    .await
+    .unwrap_or_else(|_| vec!["final"; count])
+}
+
+/// 화면이 묻는다: 앞서 사이드바에 놓아 준 파일들 가운데 지금은 없는 것(같은 순서의 참·거짓). 없어진 파일의 항목은
+/// 화면이 걷는다. 그 파일은 없는데 그 위의 폴더는 보일 때만 참이다: 드라이브가 빠졌거나(외장 디스크, 끊긴 네트워크
+/// 드라이브) 읽을 권한이 없는 것은 없어진 것이 아니다. Windows는 드라이브가 없을 때도 "찾을 수 없음"이라고 답하므로,
+/// 그 드라이브(공유 폴더)의 뿌리가 보이는지를 함께 본다(끊긴 네트워크 드라이브에서 층마다 기다리지 않게 뿌리만 본다).
+#[tauri::command]
+pub async fn created_gone(paths: Vec<String>) -> Vec<bool> {
+    let count = paths.len();
+    tauri::async_runtime::spawn_blocking(move || paths.iter().map(|path| gone(Path::new(path))).collect())
         .await
-        .unwrap_or_else(|_| vec!["final"; count])
+        .unwrap_or_else(|_| vec![false; count])
+}
+
+fn gone(path: &Path) -> bool {
+    path.is_absolute()
+        && matches!(std::fs::metadata(path), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        && path.ancestors().last().is_some_and(|drive| drive != path && drive.is_dir())
 }
 
 /// 앞부분에 0 바이트가 없으면 글자 파일로 본다.
@@ -301,7 +500,7 @@ mod tests {
         ];
         assert_eq!(final_files(&paths), [true, true, false, false, false, true, true, true, false, false, false, false]);
         // 빈 파일은 "나중에 다시 보기", 그 밖의 놓지 않는 것은 "건너뛰기"로 알려 준다.
-        let said = verdicts(&paths);
+        let said = verdicts(&paths, Some(&dir), false);
         assert_eq!(said[0], "final");
         assert_eq!(said[paths.len() - 2], "later"); // 빈 파일.md
         assert_eq!(said[paths.len() - 1], "skip"); // 지운 파일.md
@@ -317,6 +516,166 @@ mod tests {
         for name in ["temperature.md", "template.html", "oldest.csv", "bold.md", "draft.md", "중간보고.md", "old.md", "scratchpad.md", "wip.md", "header-partial.html"] {
             assert!(!looks_temporary(Path::new(name)), "{name}");
         }
+    }
+
+    #[test]
+    fn git이_무시하는_파일은_놓지_않는다() {
+        let dir = test_dir("cypher-created-ignore-test");
+        let git = |args: &[&str]| std::process::Command::new("git").arg("-C").arg(&dir).args(args).output().is_ok_and(|output| output.status.success());
+        let file = |name: &str| {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "내용").unwrap();
+            path
+        };
+        let paths = vec![
+            file("out/report.html"),         // 이름이 낯선 빌드 폴더
+            file("notes.md"),
+            file("docs/a.gen.md"),           // 이름 규칙으로 무시한 것
+            file("docs/guide.md"),
+            file(".cypher/http/req.http"),   // 숨김 폴더를 무시해 두었어도 요청 파일 자리는 놓는다
+            file("generated/표 1.csv"),
+            dir.join("docs").join("없는 파일.md"),
+        ];
+        // 저장소가 아니면 아무것도 가리지 않는다.
+        assert_eq!(verdicts(&paths, Some(&dir), false), ["final", "final", "final", "final", "final", "final", "skip"]);
+        if !git(&["init", "-q"]) {
+            return; // git이 없는 곳에서는 여기까지만 본다.
+        }
+        std::fs::write(dir.join(".gitignore"), "out/\n*.gen.md\n.cypher/\n/generated/\n").unwrap();
+        assert_eq!(verdicts(&paths, Some(&dir), false), ["skip", "final", "skip", "final", "final", "skip", "skip"]);
+        // 놓지 않기로 한 것만 물어도, 폴더가 달라도 자리가 어긋나지 않는다.
+        let refs: Vec<&Path> = paths.iter().map(PathBuf::as_path).collect();
+        assert_eq!(git_ignored(&refs[..6]), [true, false, true, false, false, true]);
+        // 모든 글자 파일을 놓는 설정이어도 무시하는 파일은 놓지 않는다.
+        assert_eq!(verdicts(&paths[..2], Some(&dir), true), ["skip", "final"]);
+        // 한 폴더에 한 번에 묻는 수보다 많아도, 이름에 특별한 글자가 있어도 자리가 어긋나지 않는다.
+        std::fs::create_dir_all(dir.join("many")).unwrap();
+        let many: Vec<PathBuf> = (0..230).map(|n| dir.join("many").join(if n % 7 == 0 { format!("표 [{n}] #!;.gen.md") } else { format!(" 문서 {n}.md") })).collect();
+        let many_refs: Vec<&Path> = many.iter().map(PathBuf::as_path).collect();
+        assert_eq!(git_ignored(&many_refs), (0..230).map(|n| n % 7 == 0).collect::<Vec<_>>());
+        // 세션 폴더가 통째로 무시되는 곳이면(위쪽 저장소가 무시하는 폴더 안에서 일한다) 그 규칙으로 가리지 않는다.
+        // 세션 폴더 밖의 파일은 그대로 가린다.
+        let inside = file("out/sub/보고서.md");
+        assert_eq!(verdicts(&[inside.clone(), paths[2].clone()], Some(&dir.join("out")), false), ["final", "skip"]);
+        assert_eq!(verdicts(std::slice::from_ref(&inside), Some(&dir), false), ["skip"]);
+        // 그 안에 따로 있는 저장소(여러 저장소를 담은 폴더에서 일할 때)의 규칙은 쓴다.
+        let inner = dir.join("out").join("inner");
+        std::fs::create_dir_all(&inner).unwrap();
+        assert!(std::process::Command::new("git").arg("-C").arg(&inner).args(["init", "-q"]).output().is_ok_and(|output| output.status.success()));
+        std::fs::write(inner.join(".gitignore"), "build2/
+").unwrap();
+        let (made, doc) = (file("out/inner/build2/r.md"), file("out/inner/doc.md"));
+        assert_eq!(verdicts(&[made.clone(), doc.clone(), inside.clone()], Some(&dir.join("out")), false), ["skip", "final", "final"]);
+        assert_eq!(verdicts(&[made, doc], Some(&inner), false), ["skip", "final"]);
+        // 프로젝트 자신의 규칙이 넓어도(허용한 것만 두는 꼴, 확장자 없는 파일을 무시하는 꼴) 그 규칙을 그대로 쓴다.
+        std::fs::write(inner.join(".gitignore"), "/*
+!/docs/
+").unwrap();
+        assert_eq!(verdicts(&[file("out/inner/x.md"), file("out/inner/docs/y.md")], Some(&inner), false), ["skip", "final"]);
+        std::fs::write(inner.join(".gitignore"), "*
+!*.*
+!*/
+bin2/
+").unwrap();
+        assert_eq!(verdicts(&[file("out/inner/bin2/r.md"), file("out/inner/z.md")], Some(&inner), false), ["skip", "final"]);
+        // 무시되는 곳의 빈 파일은 나중에 다시 보지도 않는다.
+        std::fs::write(dir.join("out").join("빈.md"), "").unwrap();
+        assert_eq!(verdicts(&[dir.join("out").join("빈.md"), dir.join("빈.md")], Some(&dir), false), ["skip", "skip"]);
+        std::fs::write(dir.join("빈.md"), "").unwrap();
+        assert_eq!(verdicts(&[dir.join("빈.md")], Some(&dir), false), ["later"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 소스_폴더에_든_파일은_놓지_않는다() {
+        let dir = test_dir("cypher-created-source-test");
+        let file = |name: &str| {
+            let path = dir.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "내용").unwrap();
+            path
+        };
+        // Rust: 뿌리에 Cargo.toml, 그 안에 딸린 프로젝트(examples/demo)와 워크스페이스의 크레이트(crates/core).
+        file("rust/Cargo.toml");
+        file("rust/examples/demo/Cargo.toml");
+        file("rust/crates/core/Cargo.toml");
+        let rust = dir.join("rust");
+        for (name, source) in [
+            ("rust/src/templates/page.html", true),
+            ("rust/tests/data/rows.csv", true),
+            ("rust/benches/input.txt", true),
+            ("rust/examples/notes.md", true),
+            ("rust/README.md", false),
+            ("rust/docs/guide.md", false),
+            ("rust/SRC2/x.md", false),
+            // 딸린 프로젝트의 뿌리에 놓인 파일은 그 프로젝트의 문서다(위 프로젝트의 examples 안이어도).
+            ("rust/examples/demo/README.md", false),
+            ("rust/examples/demo/src/x.txt", true),
+            ("rust/crates/core/src/fixture.md", true),
+            ("rust/crates/core/CHANGELOG.md", false),
+            ("rust/crates/notes.md", false),
+        ] {
+            assert_eq!(in_source_tree(&file(name), Some(&rust)), source, "{name}");
+        }
+        // Java: Maven 모듈과 Gradle 모듈. `tests`·`examples`는 소스 폴더로 치지 않는다.
+        file("java/pom.xml");
+        file("java/web/pom.xml");
+        file("java/app/build.gradle.kts");
+        file("java/lib/build.gradle");
+        let java = dir.join("java");
+        for (name, source) in [
+            ("java/web/src/main/resources/templates/index.html", true),
+            ("java/web/src/test/resources/data.csv", true),
+            ("java/app/src/main/resources/static/logo.svg", true),
+            ("java/lib/Src/test/x.txt", true),
+            ("java/src/site/markdown/intro.md", true),
+            ("java/web/README.md", false),
+            ("java/docs/설계.md", false),
+            ("java/web/tests/x.md", false),
+            ("java/examples/x.md", false),
+            // 빌드 파일 없이 뿌리의 설정만으로 꾸린 하위 프로젝트: 표준 소스 자리면 소스다.
+            ("java/batch/src/main/resources/job.html", true),
+            ("java/batch/SRC/Test/resources/rows.csv", true),
+            ("java/batch/src/docs/guide.md", false),
+            ("java/batch/main/src/x.md", false),
+        ] {
+            assert_eq!(in_source_tree(&file(name), Some(&java)), source, "{name}");
+        }
+        // 세션 폴더 위의 프로젝트 파일은 보지 않는다(세션 폴더가 남의 프로젝트 안의 한 폴더일 때).
+        let inner = file("rust/docs/src/a.md");
+        assert!(!in_source_tree(&inner, Some(&rust.join("docs"))));
+        assert!(in_source_tree(&inner.with_file_name("b.md"), Some(&dir)) == false && in_source_tree(&file("rust/src/a.md"), Some(&dir)));
+        // 세션 폴더를 모르거나 그 밖의 파일이면 몇 층만 올라가 본다.
+        assert!(in_source_tree(&file("rust/src/a/b/c.md"), None));
+        assert!(in_source_tree(&file("rust/src/a/b/c.md"), Some(&dir.join("다른 곳"))));
+        assert!(!in_source_tree(&file("rust/src/1/2/3/4/5/6/7/8/deep.md"), None));
+        // 프로젝트 파일이 없으면 `src` 안이어도 가리지 않는다.
+        assert!(!in_source_tree(&file("plain/src/notes.md"), Some(&dir.join("plain"))));
+
+        // 판정: 소스 폴더의 파일은 놓지 않되, 모든 글자 파일을 놓는 설정이면 놓는다.
+        let paths = vec![file("rust/src/templates/page.html"), file("rust/docs/guide.md")];
+        assert_eq!(verdicts(&paths, Some(&rust), false), ["skip", "final"]);
+        assert_eq!(verdicts(&paths, Some(&rust), true), ["final", "final"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn 없어진_파일만_없어졌다고_답한다() {
+        let dir = test_dir("cypher-created-gone-test");
+        let there = dir.join("있는 파일.md");
+        std::fs::write(&there, "x").unwrap();
+        assert!(!gone(&there));
+        assert!(gone(&dir.join("지운 파일.md")));
+        assert!(gone(&dir.join("없는 폴더").join("a.md")));
+        // 폴더가 된 것은 없어진 것이 아니고, 상대 경로는 판단하지 않는다.
+        assert!(!gone(&dir));
+        assert!(!gone(Path::new("상대.md")));
+        // 드라이브가 빠진 것은 없어진 것이 아니다(없는 드라이브 글자를 찾아 물어본다).
+        if let Some(letter) = ('D'..='Z').rev().find(|letter| !Path::new(&format!("{letter}:\\")).exists()) {
+            assert!(!gone(Path::new(&format!("{letter}:\\work\\a.md"))), "{letter}:");
+        }
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

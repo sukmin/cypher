@@ -29,7 +29,7 @@ const MAIN: &[&str] = &[
     "store_dirs", "ui_zoom", "closed_restore", "history_save", "history_list", "history_read", "history_remove",
     "update_current", "update_check", "update_install", "update_restart", "app_ready",
     "http_files", "http_read", "http_save", "http_run_at",
-    "created_final", "ssh_hosts", "wake_after",
+    "created_final", "created_gone", "ssh_hosts", "wake_after",
     "code_list", "code_files", "code_outline", "code_defs", "code_usages", "code_search", "code_symbols", "code_index", "code_index_rebuild", "code_subtypes",
     "code_index_touch", "code_index_state", "code_index_close",
     "s3_conns", "s3_conn_save", "s3_conn_remove", "s3_connect", "s3_disconnect", "s3_buckets", "s3_list", "s3_head", "s3_exists",

@@ -1698,8 +1698,12 @@ function closedRecord(s) {
   }
 }
 
-/** 항목을 닫는다. `forget`이면 닫은 항목 목록에 남기지 않는다(다시 시작하려고 닫을 때). */
-async function closeSession(s, { forget = false } = {}) {
+/**
+ * 항목을 닫는다. `forget`이면 닫은 항목 목록에 남기지 않는다(다시 시작하려고 닫을 때).
+ * `still`이면 화면에 없던 항목을 닫을 때 나란히 보기의 배치를 다시 짓지 않는다(앱이 스스로 걷는 항목 때문에
+ * 사용자가 보던 창이 떼였다 붙어 초점과 문서의 스크롤 자리가 날아가지 않게. 숨겨서 만들 때와 같은 까닭이다).
+ */
+async function closeSession(s, { forget = false, still = false } = {}) {
   // 처음 읽기가 끝난 뒤의 내용으로 기록을 만든다(읽는 중에 닫으면 빈 화면을 보고 "다시 열 것이 없다"고 하게 된다).
   if (s.view) await Promise.resolve(s.view.ready).catch(() => {});
   if (!sessions.has(s.key)) return; // 기다리는 사이 이미 닫혔다.
@@ -1720,6 +1724,7 @@ async function closeSession(s, { forget = false } = {}) {
     rememberClosed(record);
     setStatus(`닫았습니다: ${record.label} · 다시 열기: Ctrl+Shift+R`);
   }
+  const shown = visible.includes(s);
   s.pane.remove();
   s.shots.forEach((shot) => URL.revokeObjectURL(shot.url));
   // 창에 보이던 SSH 탭이면 그 창에 옆 탭을 대신 보인다(브라우저의 탭처럼). 그다음 탭 묶음에서 뺀다.
@@ -1738,7 +1743,7 @@ async function closeSession(s, { forget = false } = {}) {
     const next = (heir && !heir.dormant && visible.includes(heir) ? heir : null) || stageFallback() || awake.filter((other) => other.group === s.group).pop() || awake.pop();
     if (next) activate(next);
   }
-  layout();
+  if (!still || shown || visible.length < 2) layout();
   renderShots();
   render();
   saveState();
@@ -4527,15 +4532,59 @@ function placeHeld(s) {
   // 지금까지 적어 둔 것만 한 묶음으로 놓는다(차례를 기다리는 사이 다음 요청이 만든 파일이 이 묶음의 한도에 세어지지 않게).
   const held = [...(s.heldFiles?.values() || [])];
   s.heldFiles?.clear();
-  if (!held.length) return s.placing || Promise.resolve();
-  // 잇달아 불러도 차례대로 놓는다(앞의 것을 놓는 중이면 그 뒤에 잇는다).
-  s.placing = (s.placing || Promise.resolve()).then(() => placeHeldNow(s, held)).catch(() => {});
+  if (!held.length && !s.autoPlaced?.length) return s.placing || Promise.resolve();
+  // 잇달아 불러도 차례대로 놓는다(앞의 것을 놓는 중이면 그 뒤에 잇는다). 놓기 전에, 앞서 놓아 준 파일 가운데
+  // 그사이 지워진 것의 항목을 먼저 걷는다.
+  // (걷는 일이 실패해도 이번에 만든 파일은 놓는다.)
+  s.placing = (s.placing || Promise.resolve())
+    .then(() => sweepPlaced(s).catch(() => {}))
+    .then(() => (held.length ? placeHeldNow(s, held) : undefined))
+    .catch(() => {});
   return s.placing;
 }
 
+/**
+ * 이 세션이 만든 파일이라 놓아 준 항목 가운데, 그 파일이 그사이 지워진 것을 사이드바에서 걷는다(응답이 끝날 때마다 본다).
+ * 앞선 응답에서 만든 작업 메모·초안을 뒤 응답에서 지우면 그 항목은 열어도 볼 것이 없는 중간 파일의 흔적이다.
+ *
+ * 걷는 것은 그 파일을 읽어 보여 주는 항목(문서, 표, HTML을 연 사이트)뿐이다. 이미지 항목은 그림을 Cypher의 저장소로
+ * 가져와 두므로 원본이 없어져도 볼 수 있어 그대로 둔다. 사용자가 손댄 흔적이 있는 항목도 두고(이름·색·북마크를 붙였다,
+ * 다른 워크스페이스로 옮겼다, 지금 화면에 띄워 보고 있거나 마지막에 보던 것이다 — 다음에 다시 본다), 다른 것을 보게 된 항목
+ * (사이트가 다른 주소로 갔다)은 잊는다. 화면에 없는 항목만 걷으므로 보던 창의 배치는 건드리지 않는다.
+ */
+async function sweepPlaced(s) {
+  if (!s.autoPlaced?.length) return;
+  const alive = () => s.autoPlaced.filter(({ item, path }) => sessions.has(item.key) && showsFile(item, path));
+  s.autoPlaced = alive();
+  const list = [...s.autoPlaced];
+  if (!list.length) return;
+  let gone;
+  try { gone = await invoke('created_gone', { paths: list.map((entry) => entry.path) }); } catch { return; }
+  const removed = [];
+  for (const [index, { item, path }] of list.entries()) {
+    if (!gone[index] || !sessions.has(item.key) || !showsFile(item, path)) continue;
+    // (화면을 비워 두어도 마지막에 보던 항목은 활성으로 남아 있다: 그것을 닫으면 다른 항목이 대신 화면에 뜬다.)
+    if (item.name || item.color || item.mark || groupKey(item) !== groupKey(s) || visible.includes(item) || item === active) continue;
+    const name = label(item);
+    // 다시 열 것이 없으므로 닫은 항목 목록에는 남기지 않는다.
+    await closeSession(item, { forget: true, still: true });
+    if (sessions.has(item.key)) continue; // 닫히지 않았다.
+    removed.push(name);
+    // 같은 이름으로 다시 만들면 다시 놓을 수 있게 한다.
+    s.placedFiles?.delete(pathKey(path));
+  }
+  s.autoPlaced = alive();
+  if (!removed.length || !sessions.has(s.key)) return;
+  const body = `만든 뒤에 지워진 파일의 항목 ${removed.length}개를 사이드바에서 걷었습니다: ${removed.slice(0, 5).join(', ')}${removed.length > 5 ? ' …' : ''}`;
+  logNotice(s, 'item', label(s), body, false);
+  setStatus(body);
+}
+
 async function placeHeldNow(s, held) {
-  // 가려 주지 못하면(오류) 지금까지처럼 모두 놓는다.
-  const keep = await invoke('created_final', { paths: held.map((file) => file.path) }).catch(() => held.map(() => 'final'));
+  // 가려 주지 못하면(오류) 지금까지처럼 모두 놓는다. 앱은 중간 파일에 더해 git이 무시하는 파일과 소스 폴더의 파일도 가린다
+  // (모든 글자 파일을 놓는 설정이면 소스 폴더의 파일은 가리지 않는다).
+  const keepSources = (config.session.show_created || 'known') === 'all';
+  const keep = await invoke('created_final', { paths: held.map((file) => file.path), base: s.startCwd || null, keepSources }).catch(() => held.map(() => 'final'));
   if (!sessions.has(s.key)) return; // 기다리는 사이 세션을 닫았다.
   const batch = { placed: 0, unplaced: 0 }; // 이번에(응답 하나에서) 놓은 수와 넘쳐서 놓지 않은 수
   for (const [index, file] of held.entries()) {
@@ -4550,6 +4599,8 @@ async function placeHeldNow(s, held) {
     try {
       if (!sessions.has(s.key)) return;
       const item = await placeCreated(s, path, kind);
+      // 그 파일을 읽어 보여 주는 항목은 적어 둔다: 파일이 나중에 지워지면 걷는다(sweepPlaced).
+      if (item && ['reader', 'table', 'site'].includes(item.kind)) (s.autoPlaced ??= []).push({ item, path });
       if (item && sessions.has(s.key)) announce(item, s, '파일을 만들었습니다');
     } catch (err) {
       setStatus(`만든 파일을 사이드바에 놓지 못했습니다(${baseName(path)}): ${err}`);
