@@ -25,6 +25,7 @@ import { initTimer, showTimers, nextTimer, addTimer, removeTimer, timers } from 
 import { initCode, createCode } from './code.js';
 import { initHex, createHex } from './hex.js';
 import { initHistory, keepHistory, dropHistory, showHistory } from './history.js';
+import { initS3, createS3 } from './s3.js';
 
 const { invoke, Channel } = window.__TAURI__.core;
 const { listen } = window.__TAURI__.event;
@@ -79,6 +80,9 @@ const KINDS = {
   code: { label: '코드', icon: '❮❯', hint: '프로젝트의 코드 보기 · 문법 강조 · 정의로 가기 · 쓰는 곳 찾기 · 바뀐 파일과 줄 표시', create: createCode },
   // 헥사 에디터: 왼쪽 절반은 바이트, 오른쪽 절반은 파일 형식(매직 넘버)·구조·값 해석. 덮어쓰기로 고쳐 저장한다.
   hex: { label: '헥사', icon: '⬡', hint: '바이트 보기·고치기 · 매직 넘버로 형식을 알아보고 구조(머리·덩어리)를 해석', create: createHex },
+  // S3 호환 저장소 탐색기: 워크스페이스에 몇 개든 둘 수 있다. 접속 정보(주소·키)는 앱이 암호화해 저장하고,
+  // 접속은 사용자가 [접속]을 눌렀을 때만 한다(다시 켠 뒤에는 접속하지 않은 채로 되살아난다).
+  s3: { label: 'S3 저장소', icon: '⛁', hint: 'S3 호환 저장소(Ncloud Storage 등)를 탐색기처럼 보기 · 올리기·내려받기·복사·이름 바꾸기·삭제 · 글은 바로 보기', create: createS3 },
 };
 
 /**
@@ -244,6 +248,10 @@ async function init() {
   });
   initTable({ invoke, make, setStatus, showMenu, baseName, toClaude: imageToClaude, openMemo });
   initHex({ invoke, make, setStatus, showMenu, baseName, toClaude: imageToClaude, ask });
+  initS3({
+    invoke, listen, make, openPopup, ask, setStatus, showMenu,
+    pickFolder: (title) => invoke('pick_folder', { start: startFolderHint(), title }).catch(() => null),
+  });
   initCode({ invoke, make, setStatus, showMenu, baseName, toClaude: textToClaude });
   initNotices({ make, openPopup, setStatus, jump: jumpToNotice, onChange: renderNoticeButton });
   // SSH 접속 창에서 고르거나 적은 곳으로 세션을 연다.
@@ -1682,6 +1690,7 @@ function closedRecord(s) {
   if (s.kind === 'run' && !s.view.command()) return null;
   if (s.kind === 'table' && !s.view.path()) return null;
   if (s.kind === 'hex' && !s.view.path()) return null;
+  if (s.kind === 's3' && !s.view.conn()) return null;
   try {
     return { ...describe(s), label: label(s) };
   } catch {
@@ -3088,6 +3097,8 @@ function templateItem(s) {
     case 'run': return state.command ? { ...base, saved: { command: state.command } } : null;
     case 'table': return state.path ? { ...base, saved: { path: state.path } } : null;
     case 'hex': return state.path ? { ...base, saved: { path: state.path } } : null;
+    // S3 저장소는 접속 정보의 번호와 이름, 보던 곳만 담는다(키는 화면에 없고, 주소도 담지 않는다).
+    case 's3': return state.conn ? { ...base, saved: { conn: state.conn, name: state.name, path: state.path } } : null;
     // 코드 보기는 프로젝트 폴더만 담는다(열어 둔 파일은 담지 않는다).
     case 'code': return { ...base, saved: { root: state.root } };
     default: return null;
@@ -3127,6 +3138,9 @@ function templateSaved(kind, saved) {
     case 'run': return { ...text('command') };
     case 'table': return { ...text('path') };
     case 'hex': return { ...text('path') };
+    // 접속 정보의 번호는 이 PC의 금고에 있는 것만 통한다(없는 번호면 그 항목이 접속 정보를 고르라고 한다).
+    // 어느 쪽이든 펼치기만 해서는 접속하지 않는다.
+    case 's3': return typeof from.conn === 'string' && /^c[0-9a-f]{1,32}$/.test(from.conn) ? { ...text('conn'), ...text('name'), ...(typeof from.path === 'string' && from.path.startsWith('s3://') ? text('path') : {}) } : null;
     case 'code': return { ...text('root') };
     default: return null;
   }
@@ -4194,6 +4208,7 @@ function groupItemsText(s) {
     }
     if (other.kind === 'run') return `- ${head} 명령 ${name} — 명령: ${other.view.command() || '(없음)'} · 폴더: ${other.cwd} · 상태: ${other.view.stateText()} (출력은 run_output에 id ${other.key}. 실행·멈춤은 사용자가 한다)`;
     if (other.kind === 'table') return `- ${head} 표 ${name} — 파일: ${other.view.path() || '(아직 파일 없음)'} (표로 보여 주는 화면. 파일을 고치면 스스로 다시 읽는다)`;
+    if (other.kind === 's3') return `- ${head} S3 저장소 탐색기 ${name} — ${other.view.connected() ? `보고 있는 곳: ${other.view.address()}` : '접속하지 않음'} (사용자가 직접 다루는 화면. Cypher 도구로는 다룰 수 없고, 접속·올리기·삭제는 사용자가 한다)`;
     if (other.kind === 'hex') return `- ${head} 헥사 에디터 ${name} — 파일: ${other.view.path() || '(아직 파일 없음)'} (바이트를 보고 고치는 화면. 사용자가 저장하기 전에는 파일이 바뀌지 않는다)`;
     return `- ${head} ${KINDS[other.kind]?.label || other.kind} ${name}`;
   });
@@ -6099,7 +6114,12 @@ window.addEventListener('keydown', (ev) => {
   else if (ev.ctrlKey && key === 'tab') cycle(ev.shiftKey ? -1 : 1);
   // 터미널 밖에서 새로 고침이 눌리면 세션 화면이 날아가므로 막는다.
   // (메모에서는 F5가 시간/날짜, Ctrl+R이 바꾸기라서 메모가 직접 처리한다.)
-  else if ((key === 'f5' || (ev.ctrlKey && key === 'r')) && !ev.target.closest?.('.term, .memo')) { /* 막기만 한다 */ }
+  else if ((key === 'f5' || (ev.ctrlKey && key === 'r')) && !ev.target.closest?.('.term, .memo')) {
+    // 본창을 새로 읽는 것은 막는다. S3 저장소 창에서 누른 F5는 그 폴더의 목록을 다시 읽으라는 것이다.
+    const pane = ev.target.closest?.('.pane');
+    const item = pane && key === 'f5' ? [...sessions.values()].find((s) => s.pane === pane) : null;
+    if (item?.kind === 's3') item.view.refresh();
+  }
   else handled = false;
   if (handled) { ev.preventDefault(); ev.stopPropagation(); }
 }, true);

@@ -1122,3 +1122,97 @@ li.tone-fail .dot.kind, li.tone-fail .sub { color: var(--dead); }
 .hex-inspect-head b { flex: 1; font-weight: 600; }
 .hex-inspect-head button { flex: none; padding: 1px 8px; font-size: 11px; }
 .hex-inspect .hex-kv .v { font-family: var(--mono-font); }
+
+/* ───────── S3 저장소 항목: 버킷·폴더·객체를 탐색기처럼 ───────── */
+
+.doc.s3 .doc-bar { flex-wrap: nowrap; }
+.doc.s3 .doc-bar[hidden] { display: none; }
+.doc.s3 .doc-bar button:disabled { opacity: 0.4; cursor: default; }
+.s3-nav button { min-width: 26px; padding: 2px 6px; }
+.s3-where { flex: 1; min-width: 80px; display: flex; align-items: center; height: 24px; padding: 0 4px; background: var(--field); border: 1px solid var(--line); border-radius: 4px; cursor: text; overflow: hidden; }
+.s3-where:focus-within { border-color: var(--accent); }
+.s3-crumbs { flex: 1; min-width: 0; display: flex; align-items: center; gap: 1px; overflow: hidden; white-space: nowrap; }
+.s3-crumbs[hidden], .s3-address[hidden] { display: none; }
+.doc.s3 .doc-bar .s3-crumb { flex: none; max-width: 240px; padding: 1px 5px; overflow: hidden; text-overflow: ellipsis; font: 12px var(--mono-font); color: var(--text); background: transparent; border: 1px solid transparent; border-radius: 3px; }
+.doc.s3 .doc-bar .s3-crumb:hover:not(:disabled) { background: var(--hover); border-color: var(--line); }
+.s3-sep { flex: none; padding: 0 1px; font-size: 11px; color: var(--idle); }
+.s3-starts { flex: none; padding: 0 5px; font-size: 12px; color: var(--busy); }
+.s3-address { flex: 1; min-width: 0; height: 20px; padding: 0 2px; font: 12px var(--mono-font); color: var(--text); background: transparent; border: none; }
+.doc.s3 .doc-bar .s3-conn { max-width: 220px; overflow: hidden; text-overflow: ellipsis; color: var(--dim); }
+.s3-tools { flex-wrap: wrap !important; row-gap: 4px; overflow: visible; }
+.s3-filter { margin-left: auto; }
+
+.s3-gate { flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center; padding: 20px; overflow: auto; }
+.s3-gate[hidden] { display: none; }
+.s3-gate-box { width: min(520px, 100%); padding: 22px 20px; text-align: center; color: var(--dim); border: 1px dashed var(--line); border-radius: 8px; }
+.s3-gate-box .empty-hint { overflow-wrap: anywhere; }
+.s3-gate-box .s3-go { padding: 5px 22px; font-weight: bold; color: var(--on-accent); background: var(--accent); border-color: var(--accent); }
+.s3-gate-box .s3-go:disabled { opacity: 0.6; }
+.s3-gate-box .s3-password { flex: 0 1 200px; }
+.s3-gate-box button { padding: 4px 12px; font-size: 12px; }
+.s3-quiet { margin-top: 14px; font-size: 11px; }
+.s3-problem { margin-top: 10px; font-size: 12px; color: var(--dead); white-space: pre-wrap; overflow-wrap: anywhere; user-select: text; }
+.s3-conns { display: flex; flex-direction: column; gap: 3px; margin-top: 12px; text-align: left; }
+.s3-conns .row .row-title { padding: 6px 8px; }
+.s3-conns .row .close { padding: 2px 7px; }
+
+.s3-main { flex: 1; min-height: 0; display: flex; }
+.s3-main[hidden] { display: none; }
+.s3-list { flex: 1; min-width: 0; overflow: auto; outline: none; background: var(--bg); }
+.s3-table { width: 100%; }
+.s3-table th, .s3-table td { border-right: none; cursor: default; }
+.s3-table td { user-select: none; }
+.s3-table td.s3-name { width: 60%; max-width: 0; }
+.s3-table td.s3-kind { color: var(--dim); }
+.s3-table tbody tr.sel td, .s3-table tbody tr.sel:hover td { background: var(--select); }
+:root[data-theme="win32"] .s3-table tbody tr.sel td { color: #ffffff; }
+:root[data-theme="win32"] .s3-table tbody tr.sel td.s3-kind { color: #d0d0ff; }
+.s3-gate:focus { outline: none; }
+.s3-table tr.sel td:first-child { box-shadow: inset 2px 0 0 var(--accent); }
+.s3-table tr.cut td { opacity: 0.5; }
+.s3-ico { display: inline-block; width: 13px; height: 10px; margin-right: 7px; vertical-align: -1px; border: 1px solid var(--idle); border-radius: 1px; box-sizing: border-box; }
+.s3-ico.folder, .s3-ico.bucket { background: color-mix(in srgb, var(--busy) 55%, transparent); border-color: var(--busy); border-radius: 0 2px 2px 2px; box-shadow: -4px -3px 0 -1px var(--busy) inset; }
+.s3-ico.bucket { height: 11px; border-radius: 1px 1px 4px 4px; box-shadow: none; }
+.s3-ico.file { width: 9px; height: 12px; margin-left: 2px; margin-right: 9px; vertical-align: -2px; }
+.s3-message { padding: 18px 16px; font-size: 12px; color: var(--dim); white-space: pre-wrap; overflow-wrap: anywhere; }
+.s3-message:empty { display: none; }
+.s3-message.fail { color: var(--dead); user-select: text; }
+.s3-more { display: block; margin: 8px auto 12px; padding: 4px 14px; font-size: 12px; }
+.s3-more[hidden] { display: none; }
+
+.s3-preview { flex: 0 0 46%; min-width: 0; display: flex; flex-direction: column; border-left: 1px solid var(--line); background: var(--bg); }
+.s3-preview[hidden] { display: none; }
+.s3-preview-head { flex: none; display: flex; align-items: center; gap: 6px; padding: 5px 8px 5px 10px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.s3-preview-head b { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
+.s3-preview-head button { flex: none; padding: 2px 8px; font-size: 12px; }
+.s3-preview-head button:disabled { opacity: 0.4; }
+.s3-info { flex: none; padding: 4px 10px; font-size: 11px; color: var(--dim); border-bottom: 1px solid var(--line); overflow-wrap: anywhere; user-select: text; }
+.s3-info:empty { display: none; }
+.s3-preview-body { flex: 1; min-height: 0; display: flex; overflow: auto; }
+.s3-text { flex: 1; min-width: 0; margin: 0; padding: 8px 10px; font: 12px/1.5 var(--mono-font); color: var(--text); white-space: pre; tab-size: 4; user-select: text; }
+textarea.s3-text { resize: none; background: var(--field); border: none; outline: none; }
+.s3-image { margin: auto; max-width: 100%; max-height: 100%; object-fit: contain; }
+@container (max-width: 760px) {
+  .s3-main { flex-direction: column; }
+  .s3-preview { flex: 0 0 50%; border-left: none; border-top: 1px solid var(--line); }
+}
+
+.s3-jobs { flex: none; max-height: 30%; overflow: auto; border-top: 1px solid var(--line); background: var(--panel); }
+.s3-jobs[hidden] { display: none; }
+.s3-job { display: flex; align-items: center; gap: 8px; padding: 3px 8px 3px 10px; font-size: 12px; }
+.s3-job + .s3-job { border-top: 1px solid var(--line); }
+.s3-job-text { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.s3-job progress { flex: none; width: 120px; height: 8px; accent-color: var(--accent); }
+.s3-job button { flex: none; padding: 1px 8px; font-size: 11px; }
+.s3-job.failed .s3-job-text, .s3-job.canceled .s3-job-text { color: var(--dead); }
+.s3-job.conflict .s3-job-text { color: var(--busy); }
+.s3-foot { flex: none; padding: 3px 10px; font-size: 11px; color: var(--dim); background: var(--panel); border-top: 1px solid var(--line); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.s3-foot:empty { display: none; }
+
+.s3-checks { display: flex; flex-wrap: wrap; gap: 4px 16px; padding: 2px 0 2px 84px; }
+.s3-check { display: flex; align-items: center; gap: 5px; font-size: 12px; color: var(--dim); }
+.s3-check input { width: auto; }
+.s3-conflicts { max-height: 240px; margin: 0 10px; padding: 6px 8px; overflow: auto; font: 12px/1.5 var(--mono-font); background: var(--field); border: 1px solid var(--line); border-radius: 4px; user-select: text; overflow-wrap: anywhere; }
+.s3-conflicts .dim { color: var(--dim); }
+.ssh-buttons .s3-danger { color: var(--dead); border-color: var(--dead); }
+.s3-value { flex: 1; min-width: 0; overflow-wrap: anywhere; user-select: text; }

@@ -29,6 +29,8 @@ mod monitor;
 mod paths;
 mod peer;
 mod reader;
+mod s3;
+mod s3_vault;
 mod status;
 mod template;
 mod todo;
@@ -392,6 +394,27 @@ fn main() {
             hex::hex_analyze,
             hex::hex_find,
             hex::hex_save,
+            s3::s3_conns,
+            s3::s3_conn_save,
+            s3::s3_conn_remove,
+            s3::s3_connect,
+            s3::s3_disconnect,
+            s3::s3_buckets,
+            s3::s3_list,
+            s3::s3_head,
+            s3::s3_exists,
+            s3::s3_preview,
+            s3::s3_put_text,
+            s3::s3_mkdir,
+            s3::s3_bucket_create,
+            s3::s3_bucket_remove,
+            s3::s3_upload,
+            s3::s3_download,
+            s3::s3_delete,
+            s3::s3_copy,
+            s3::s3_job_cancel,
+            s3::s3_job_answer,
+            s3::s3_pick_files,
             commands::ssh_hosts,
             commands::wake_after,
             commands::link_detect,

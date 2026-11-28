@@ -89,6 +89,7 @@
   <li><a href="#ssh">SSH 세션, 타이머·알람</a></li>
   <li><a href="#builtin-ssh">내장 SSH와 출력 기록</a></li>
   <li><a href="#hex">헥사 에디터</a></li>
+  <li><a href="#s3">S3 저장소 탐색기</a></li>
   <li><a href="#storage">어디에 무엇을 저장하나</a></li>
   <li><a href="#limits">막지 못하는 것</a></li>
   <li><a href="#files">코드 위치</a></li>
@@ -634,7 +635,26 @@
   <li><b>오른쪽 ↔ 왼쪽</b>: 칸을 누르면 그 바이트들을 고르고, 커서가 든 가장 깊은 칸을 목록에 표시합니다(접혀 있으면 보이는 조상 칸). 아래의 값 살펴보기는 커서 자리의 8바이트를 2진수·정수·실수·UTF-8·유닉스 시각으로 읽습니다(리틀/빅 엔디언).</li>
 </ul>
 
-<h2 id="storage">17. 어디에 무엇을 저장하나</h2>
+<h2 id="s3">17. S3 저장소 탐색기 <span class="new">0.22부터</span></h2>
+<p>S3 호환 저장소(Ncloud Storage 등)를 탐색기처럼 보는 항목입니다. 저장소에 닿는 일은 모두 앱(Rust)이 하고, 화면(<code>ui/s3.js</code>)은 무엇을 할지 정하고 결과를 보여 줍니다.</p>
+<ul>
+  <li><b>세 부분</b>: <code>cypher-core/src/s3.rs</code>는 네트워크 없이 시험할 수 있는 핵심입니다(요청 주소, AWS Signature V4·예전 V2 서명, 응답 XML 읽기). 서명은 AWS 문서의 예시 값으로 시험합니다. <code>cypher-app/src/s3.rs</code>가 요청을 보내고(ureq) 명령과 작업을 맡고, <code>s3_vault.rs</code>가 접속 정보를 저장합니다.</li>
+  <li><b>주소와 서명이 어긋나지 않게</b>: 키는 RFC 3986대로 엄격하게 %XX로 적고, 그 글을 서명과 실제 요청에 똑같이 씁니다(보내는 쪽의 주소 해석기를 거쳐도 글자가 바뀌지 않는 것을 시험으로 확인). 키의 한 마디가 <code>.</code>·<code>..</code>이면 주소 규칙이 다른 객체를 가리키게 풀어 버리므로 요청을 만들지 않습니다.</li>
+  <li><b>접속 정보 금고</b>(<code>%APPDATA%\cypher\s3\connections.json</code>): 저장소 주소·지역·옵션과 암호화한 키. 키는 (고르면) 잠금 암호에서 끌어낸 키(PBKDF2-HMAC-SHA256 60만 번)로 AES-256-GCM 암호화하고, 늘 Windows 계정 잠금(DPAPI)으로 한 번 더 감쌉니다(잠금 암호는 8자 이상만 받음). 덧붙임 값을 접속 정보의 번호에 묶어, 다른 접속 정보의 덩어리를 옮겨 붙여도 풀리지 않습니다. 화면에는 키를 돌려주지 않습니다: 화면은 저장할 때 한 번 넘기고, 접속하면 앱이 키를 풀어 접속 번호(<code>handle</code>)만 돌려줍니다. 접속을 끊거나 항목을 닫으면 앱이 풀어 둔 키를 지웁니다.</li>
+  <li><b>접속은 요청을 보내지 않습니다</b>: <code>s3_connect</code>는 키를 풀어 메모리에 둘 뿐이고, 목록은 화면이 달라고 할 때 읽습니다. 항목을 되살릴 때 화면이 하는 일은 금고의 목록(이 PC의 파일)을 읽는 것뿐이라, 다시 켠 뒤에는 [접속]을 누르기 전까지 저장소에 아무것도 보내지 않습니다.</li>
+  <li><b>목록</b>: <code>ListObjectsV2</code>를 <code>delimiter=/</code>로 불러 그 층만, 한 번에 500개씩 읽습니다. 화면은 폴더마다 읽은 목록을 기억해 두고(60곳까지), 요청은 한 번에 하나만 보냅니다(읽는 중에 다른 곳으로 가면 그 요청이 끝난 뒤 지금 있는 곳을 읽음). 저장소마다 받는 선택 사항이 달라서, 요청이 "모르는 인자"로 거절되면 <code>encoding-type</code>, <code>delimiter</code>를 차례로 빼고 다시 물어 통한 모양을 그 접속 동안 기억합니다(많아야 두 번). 구분자로 묶어 주지 않는 저장소의 답은 앱이 폴더 모양으로 묶고, 한 쪽의 마지막 객체가 폴더 안의 것이었으면 다음 쪽은 <code>start-after</code>로 그 폴더를 통째로 건너뜁니다. V2를 모르는 저장소(이어 읽기 표 없이 답함)는 <code>marker</code>로 이어 읽습니다.</li>
+  <li><b>작업</b>(올리기·내려받기·지우기·복사·옮기기·이름 바꾸기): 명령은 작업 번호만 돌려주고, 따로 도는 줄에서 요청을 하나씩 차례로 보내며 진행을 <code>s3-job</code> 알림으로 알립니다. 폴더째 하는 일만 그 아래를 1,000개씩 이어 읽습니다. 놓일 자리에 이미 있는 것이 있으면(낱개 50개까지는 하나씩 물어보고, 그보다 많으면 그 폴더의 목록으로 견줌) 멈추고 화면에 물은 뒤 답(덮어쓰기·건너뛰기·취소)을 기다립니다. 연달아 세 번 실패하면 멈추고, 실패한 요청을 스스로 되풀이하지 않습니다. 겹침을 견주는 목록은 값어치가 있을 때까지만 읽습니다(놓일 자리에 객체가 훨씬 많으면 그만두고 남은 것을 하나씩 물어, 요청 수가 다루는 객체 수를 넘지 않게 함). 스스로 이어 읽는 목록은 저장소가 같은 쪽을 되풀이해 주거나 물은 앞머리 아래가 아닌 키를 돌려주면 멈춥니다.</li>
+  <li><b>답을 믿는 기준</b>: 복사·나눠 올리기 맺기·여러 객체 지우기는 기다리던 답(<code>CopyObjectResult</code> 등)일 때만 성공으로 칩니다. 200으로 답하고 본문에 오류를 적는 저장소도, 그 요청을 몰라 빈 답을 주는 저장소도 있어서, 그런 답을 믿고 원본을 지우지 않습니다.</li>
+  <li><b>저장소에 든 그대로</b>: 전송 라이브러리의 gzip 자동 풀기를 꺼서, 줄인 채(<code>Content-Encoding: gzip</code>) 저장된 객체도 든 바이트 그대로 보고 내려받습니다(풀린 글의 앞부분을 "다 읽은 글"로 보여 주어 고쳐 저장하면 뒷부분이 사라지는 일을 막음). HTTP 항목의 응답은 <code>http.rs</code>가 직접 풉니다.</li>
+  <li><b>고쳐 쓰기</b>: 쓰기 직전에 한 번 물어(HEAD) 읽었을 때의 확인 값(ETag)과 다르면 쓰지 않습니다. 붙어 있던 종류·사용자 메타데이터·표준 헤더·저장 등급은 그대로 돌려 붙입니다.</li>
+  <li><b>크기에 따라</b>: 100MB까지는 한 번에 올리고(서명에 넣을 본문 해시를 먼저 계산), 넘으면 16MB 조각으로 나눠 올립니다(조각이 10,000개를 넘지 않게 조각을 키움). 저장소 안의 복사는 5GB까지 한 번에, 넘으면 조각 복사(<code>UploadPartCopy</code>)로 합니다. 실패하거나 취소하면 올리다 만 조각을 치웁니다(<code>AbortMultipartUpload</code>). 옮기기는 복사가 끝난 원본만 지웁니다.</li>
+  <li><b>여러 객체 지우기</b>는 <code>POST ?delete</code>(1,000개씩, <code>Content-MD5</code>)로 하고, 이 요청을 모르는 저장소로 드러나면 하나씩 지웁니다.</li>
+  <li><b>내려받기</b>: 키를 Windows의 파일 이름으로 다듬어 고른 폴더 아래에만 놓습니다. <code>.cypher-part</code>라는 이름으로 다 받은 뒤 제 이름으로 바꿉니다.</li>
+  <li><b>인증서</b>: 공개 인증 기관에 Windows의 루트 저장소(사내 인증 기관)를 더해 확인합니다. "인증서 확인 안 함"은 접속 정보마다 켰을 때만 씁니다.</li>
+  <li><b>시험</b>: 앱의 시험은 이 컴퓨터의 포트에 가짜 저장소(<code>s3_fake.rs</code>)를 띄워 돌립니다. 가짜 저장소는 받은 요청의 서명을 저장소처럼 다시 계산해 견주므로, 서명에 넣은 주소·헤더와 실제로 보낸 것이 다르면 시험이 실패합니다.</li>
+</ul>
+
+<h2 id="storage">18. 어디에 무엇을 저장하나</h2>
 <table>
   <tr><th>곳</th><th>담는 것</th></tr>
   <tr><td><code>%APPDATA%\cypher</code></td><td>사용자의 것: 설정(<code>config.toml</code>, 예시 <code>config.example.toml</code>), 메모(<code>memos</code>), 마인드맵(<code>mindmaps</code>), ERD(<code>erds</code>), 할 일(<code>todos</code>), 이미지(<code>images</code>), 워크스페이스 틀(<code>templates</code>), 삭제한 워크스페이스의 기록(<code>history</code>, 3년). 닫은 것은 각 폴더의 <code>closed</code>에 30일</td></tr>
@@ -644,9 +664,10 @@
   <tr><td><code>%APPDATA%\dev.cypher.terminal</code></td><td>창의 위치와 크기. 시작할 때 되살리고, 메뉴 줄을 붙인 뒤 크기만 한 번 더 되살립니다(메뉴 줄이 없을 때 맞춘 크기 그대로 두면 창 안쪽이 메뉴 줄 높이만큼 줄어, 닫았다 켤 때마다 창이 그만큼 작아짐. 최대화된 창은 건드리지 않음). 닫힐 때와 "지금 다시 시작"으로 새 버전을 띄우기 직전에 저장합니다</td></tr>
   <tr><td>실행 파일이 있는 폴더</td><td><code>cypher.exe</code>, <code>cypher-bridge.exe</code>와 묶음에 함께 든 파일(README 등). 업데이트 직후에는 이름을 바꿔 둔 옛 파일(<code>*.old-*</code>)이 다음 시작 때까지 남음</td></tr>
 </table>
+<p>S3 저장소의 접속 정보는 <code>%APPDATA%\cypher\s3\connections.json</code>에 있습니다: 저장소 주소·지역·옵션과, 암호화한 Access key·Secret key(<a href="#s3">17절</a>). 열린 S3 항목의 상태(<code>cypher.state</code>)에는 접속 정보의 번호와 이름, 보던 곳만 들어갑니다.</p>
 <p>Cypher는 사용자의 설정 파일을 고치거나 덮어쓰지 않고(없을 때만 기본 파일을 만듦), 통계·오류 보고 같은 통신을 하지 않습니다. 업데이트 확인도 단추를 눌렀을 때만 합니다.</p>
 
-<h2 id="limits">18. 막지 못하는 것</h2>
+<h2 id="limits">19. 막지 못하는 것</h2>
 <p>울타리는 <b>Cypher 도구</b>에 세운 것입니다. 그 바깥은 Cypher가 막을 수 없습니다.</p>
 <ul>
   <li><b>파일 직접 접근</b>: Claude Code는 자기 권한 설정 안에서 이 컴퓨터의 파일을 읽고 씁니다. 다른 워크스페이스의 메모가 저장된 파일도 파일로는 읽을 수 있습니다. 이것은 Claude Code의 권한 설정으로 다룹니다.</li>
@@ -656,7 +677,7 @@
   <li><b>업데이트의 믿음</b>: 확인값은 GitHub가 알려 주는 값입니다. 묶음이 올라온 뒤에 바뀌지 않았다는 것과 이 저장소의 릴리즈에서 받았다는 것은 확인하지만, 릴리즈를 올리는 계정 자체가 탈취된 경우까지 막지는 못합니다(업데이트는 실행 파일의 서명을 따로 확인하지 않습니다).</li>
 </ul>
 
-<h2 id="files">19. 코드 위치</h2>
+<h2 id="files">20. 코드 위치</h2>
 <table>
   <tr><th>하는 일</th><th>파일</th></tr>
   <tr><td>항목·워크스페이스·분할·북마크, 범위 판정(<code>canControl</code>), 도구 요청에 답하기(<code>mcpAction</code>), 프로필 번호(<code>profileOf</code>), 만든 파일 놓기(<code>onCreatedFile</code>), 고친 파일 새로 읽기(<code>onEditedFile</code>),세션 상태(<code>onStatus</code>·<code>onHook</code>·<code>onTool</code>), 되살리기(<code>restore</code>·<code>wake</code>), 다시 맞추기(<code>realign</code>)</td><td><code>ui/main.js</code></td></tr>
@@ -665,6 +686,7 @@
   <tr><td>SSH 접속 창과 저장해 둔 서버, 접속할 곳을 ssh 인자로 바꾸기·<code>~/.ssh/config</code>·known_hosts 읽기, 타이머·알람</td><td><code>ui/ssh.js</code>, <code>crates/cypher-core/src/ssh.rs</code>, <code>ui/timer.js</code></td></tr>
   <tr><td>내장 SSH(접속·서버 키·인증·채널·연결 나눠 쓰기), 세션(가상 터미널·SSH 채널)과 출력 기록</td><td><code>crates/cypher-app/src/sshc.rs</code>, <code>terms.rs</code>, <code>crates/cypher-core/src/termlog.rs</code></td></tr>
   <tr><td>헥사 에디터: 화면, 조각 읽기·찾기·저장, 형식 알아보기·구조 읽기</td><td><code>ui/hex.js</code>, <code>crates/cypher-app/src/hex.rs</code>, <code>crates/cypher-core/src/binfmt.rs</code></td></tr>
+  <tr><td>S3 저장소 탐색기: 화면, 요청·작업, 접속 정보 금고, 주소·서명·응답 읽기, 시험용 가짜 저장소</td><td><code>ui/s3.js</code>, <code>crates/cypher-app/src/s3.rs</code>, <code>s3_vault.rs</code>, <code>crates/cypher-core/src/s3.rs</code>, <code>crates/cypher-app/src/s3_fake.rs</code></td></tr>
   <tr><td>떠 있는 창·메뉴·변경 내용·업데이트 창, 빠른 이동, 닫은 항목, 알림 기록, 워크스페이스 틀, 끌어다 놓기, 모양</td><td><code>ui/extras.js</code>, <code>palette.js</code>, <code>closed.js</code>, <code>history.js</code>(삭제한 워크스페이스 기록 · 앱 쪽은 <code>crates/cypher-app/src/history.rs</code>), <code>notices.js</code>, <code>template.js</code>, <code>drop.js</code>, <code>look.js</code>, <code>matrix.js</code></td></tr>
   <tr><td>글자 칸 수 표</td><td><code>ui/widths.js</code></td></tr>
   <tr><td>로컬 통로: 확인값, 세션 확인, 상태줄·훅 받기, 도구 신호 추리기</td><td><code>crates/cypher-app/src/status.rs</code></td></tr>

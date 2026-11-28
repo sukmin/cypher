@@ -22,11 +22,20 @@ png = "0.17"
 base64 = "0.22"
 open = "5"
 rfd = "0.15"
-ureq = "2"
+# gzip 기능은 끈다: 켜 두면 `Content-Encoding: gzip`으로 저장된 S3 객체를 라이브러리가 몰래 풀어, 내려받은 파일과
+# 미리보기가 저장소의 내용과 달라진다. HTTP 항목의 응답은 http.rs가 직접 푼다.
+ureq = { version = "2", default-features = false, features = ["tls"] }
+flate2 = "1"
 sha2 = "0.10"
 sysinfo = { version = "0.33", default-features = false, features = ["system"] }
 # 내장 SSH: 순수 Rust 구현. 암호는 이미 쓰고 있는 ring으로 한다(aws-lc는 빌드에 NASM·CMake가 필요하다).
 russh = { version = "0.65", default-features = false, features = ["ring", "rsa", "flate2"] }
 tokio = { version = "1", features = ["sync", "time", "net", "macros", "rt", "io-util"] }
+# S3 호환 저장소 탐색기: 요청은 이미 쓰고 있는 ureq로 보내고, 저장하는 키의 암호화(AES-GCM·PBKDF2)는 ring으로 한다.
+# rustls·webpki-roots는 ureq가 쓰는 것과 같은 판이다(사내 인증 기관을 믿는 TLS 설정을 직접 만들려고 꺼내 쓴다).
+ring = "0.17"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+webpki-roots = "0.26"
+zeroize = "1"
 cypher-core = { path = "../cypher-core" }
 cypher-pty = { path = "../cypher-pty" }

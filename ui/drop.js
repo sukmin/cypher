@@ -3,6 +3,7 @@
 // - 터미널 창에 놓으면: 파일은 경로를, 글자·링크는 그 글자를 입력한다.
 // - 메모 창에 놓으면: 글자 파일은 그 메모로 연다(글자는 편집기가 직접 받는다).
 // - 대상을 아직 정하지 않은 빈 항목(표·문서·명령·할 일)의 창에 놓으면: 그 파일로 그 항목을 채운다.
+// - S3 저장소 창에 놓으면: 그 파일·폴더를 저장소의 지금 폴더에 올린다.
 // - 그 밖의 곳(사이드바, 다른 종류의 창, 빈 화면)에 놓으면 항목으로 만든다:
 //   이미지 → 이미지 항목 · 글자 파일·글자 → 메모 · .csv·.tsv → 표 · .http → HTTP · 링크·바로 가기 → 사이트.
 //   사이드바의 묶음(머리나 그 안의 줄)에 놓으면 그 묶음에, 창에 놓으면 그 창 항목의 묶음에 만든다.
@@ -72,6 +73,8 @@ function placeOf(ev) {
   if (item?.kind === 'memo') return { zone: 'memo', item };
   // 대상을 아직 정하지 않은 빈 항목(표·문서·명령·할 일)의 창에 놓은 파일은 그 항목이 받는다.
   if (files && item?.view?.wantsFile?.()) return { zone: 'fill', item };
+  // S3 저장소 창에 놓은 파일·폴더는 그 저장소의 지금 폴더(폴더 줄 위에 놓았으면 그 폴더)에 올린다.
+  if (files && item?.view?.dropFiles) return { zone: 'upload', item, target: el };
   if (item) return { zone: 'items', near: item };
   return { zone: 'items' };
 }
@@ -120,6 +123,11 @@ async function onDrop(ev) {
     if (place.zone === 'term' || place.zone === 'composer') await intoInput(place, data);
     else if (place.zone === 'memo') await intoMemo(place.item, data);
     else if (place.zone === 'fill') await intoEmpty(place.item, data);
+    else if (place.zone === 'upload') {
+      const paths = (await pathsOf(data.files)).filter(Boolean);
+      if (paths.length) place.item.view.dropFiles(paths, place.target);
+      else api.setStatus('경로가 없는 파일이라 올릴 수 없습니다. 탐색기에서 끌어다 놓아 주세요.');
+    }
     else await intoItems(data, contextOf(place));
   } catch (err) {
     api.setStatus(`끌어다 놓기 실패: ${err}`);

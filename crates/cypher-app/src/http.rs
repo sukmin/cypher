@@ -367,6 +367,11 @@ fn send(request: &HttpRequest, headers: &[(String, String)], payload: Option<&[u
     for (key, value) in headers {
         call = call.set(key, value);
     }
+    // 줄여 보내도 된다고 알린다(사용자가 직접 적었으면 그 값을 그대로 둔다). 줄여 온 응답은 아래에서 푼다.
+    let ours = !has_header(headers, "Accept-Encoding");
+    if ours {
+        call = call.set("Accept-Encoding", "gzip");
+    }
     let started = Instant::now();
     let result = if let Some(bytes) = payload {
         call.send_bytes(bytes)
@@ -396,7 +401,10 @@ fn send(request: &HttpRequest, headers: &[(String, String)], payload: Option<&[u
     }
     let headers: Vec<(String, String)> =
         names.iter().flat_map(|name| response.all(name).into_iter().map(move |value| (name.clone(), value.to_string()))).collect();
-    let (bytes, truncated) = read_limited(response.into_reader(), MAX_BODY_BYTES).map_err(|e| e.to_string())?;
+    // gzip으로 줄여 온 본문은 풀어서 보여 준다(헤더에는 받은 그대로 `content-encoding: gzip`이 보인다).
+    let gzipped = response.header("content-encoding").is_some_and(|value| value.trim().eq_ignore_ascii_case("gzip"));
+    let reader: Box<dyn Read> = if gzipped { Box::new(flate2::read::GzDecoder::new(response.into_reader())) } else { Box::new(response.into_reader()) };
+    let (bytes, truncated) = read_limited(reader, MAX_BODY_BYTES).map_err(|e| e.to_string())?;
     let elapsed_ms = started.elapsed().as_millis() as u64;
     Ok(Sent { code, status, headers, body: body_text(bytes, truncated), elapsed_ms, final_url, truncated })
 }
@@ -854,6 +862,30 @@ mod tests {
         let history = fs::read_to_string(dir.join(HISTORY)).unwrap();
         assert!(history.contains(&format!("ms → {moved}\n")), "{history}");
         assert_eq!(history.matches("# set-cookie: ***\n").count(), 2, "{history}");
+    }
+
+    #[test]
+    fn gzip으로_줄여_온_응답은_풀어서_보여_준다() {
+        use std::io::Write;
+        let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all("{\"이름\": \"줄여 보낸 응답\"}".as_bytes()).unwrap();
+        let packed = encoder.finish().unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buffer = [0u8; 4096];
+            let read = stream.read(&mut buffer).unwrap();
+            let head = format!("HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", packed.len());
+            stream.write_all(head.as_bytes()).unwrap();
+            stream.write_all(&packed).unwrap();
+            String::from_utf8_lossy(&buffer[..read]).to_lowercase()
+        });
+        let request = cypher_core::http::parse(&format!("GET http://127.0.0.1:{port}/a")).remove(0);
+        let headers = wire_headers(&request);
+        let sent = send(&request, &headers, None).unwrap();
+        assert!(sent.body.contains("줄여 보낸 응답"), "{}", sent.body);
+        assert!(server.join().unwrap().contains("accept-encoding: gzip"));
     }
 
     #[test]

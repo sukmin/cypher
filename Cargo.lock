@@ -1004,16 +1004,19 @@ dependencies = [
 
 [[package]]
 name = "cypher"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "arboard",
  "base64 0.22.1",
  "cypher-core",
  "cypher-pty",
+ "flate2",
  "open",
  "png 0.17.16",
  "rfd",
+ "ring",
  "russh",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -1024,17 +1027,19 @@ dependencies = [
  "tauri-plugin-window-state",
  "tokio",
  "ureq",
+ "webpki-roots 0.26.11",
  "webview2-com",
  "windows-core 0.62.2",
+ "zeroize",
 ]
 
 [[package]]
 name = "cypher-bridge"
-version = "0.21.0"
+version = "0.22.0"
 
 [[package]]
 name = "cypher-core"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "base64 0.22.1",
  "encoding_rs",
@@ -1050,7 +1055,7 @@ dependencies = [
 
 [[package]]
 name = "cypher-pty"
-version = "0.21.0"
+version = "0.22.0"
 dependencies = [
  "anyhow",
  "portable-pty",
@@ -5864,7 +5869,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "02d1a66277ed75f640d608235660df48c8e3c19f3b4edb6a263315626cc3c01d"
 dependencies = [
  "base64 0.22.1",
- "flate2",
  "log",
  "once_cell",
  "rustls",

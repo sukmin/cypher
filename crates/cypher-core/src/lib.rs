@@ -10,3 +10,4 @@ pub mod profile;
 pub mod ssh;
 pub mod termlog;
 pub mod textfile;
+pub mod s3;
